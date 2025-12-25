@@ -1,8 +1,4 @@
-=======
-# time-to-sell-web--2
->>>>>>> 262973e3f1ac798165c8390d05e003d756e10c9b
-<<<<<<< HEAD
-# S&P500 売り時ダッシュボード v1
+# 売り時くん v1
 
 ブラウザで動作する React + TypeScript（Vite）フロントエンドと、FastAPI バックエンドで構成された SPA です。
 
