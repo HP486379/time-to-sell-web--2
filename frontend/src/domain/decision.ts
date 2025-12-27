@@ -1,4 +1,6 @@
-export type Decision = 'TAKE_PROFIT' | 'WAIT' | 'HOLD_OR_BUY'
+export const DECISION_VALUES = ['TAKE_PROFIT', 'WAIT', 'HOLD_OR_BUY'] as const
+
+export type Decision = (typeof DECISION_VALUES)[number]
 
 const DECISION_THRESHOLDS = {
   TAKE_PROFIT: 60,

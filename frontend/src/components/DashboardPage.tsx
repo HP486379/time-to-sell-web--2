@@ -593,7 +593,7 @@ function resolveStartDate(series: PricePoint[], startOption: StartOption, custom
       if (parsed.isValid()) return parsed
       return dayjs(series[0].date)
     }
-    case 'max'
+    case 'max':
     default:
       return dayjs(series[0].date)
   }

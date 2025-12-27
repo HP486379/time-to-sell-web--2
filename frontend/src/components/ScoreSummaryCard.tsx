@@ -1,4 +1,16 @@
-import { Card, CardContent, Typography, LinearProgress, Stack, Box, alpha, useTheme, Tooltip } from '@mui/material'
+import {
+  Card,
+  CardContent,
+  Typography,
+  LinearProgress,
+  Stack,
+  Box,
+  alpha,
+  useTheme,
+  Tooltip,
+  Divider,
+  Button,
+} from '@mui/material'
 import type { TooltipTexts } from '../tooltipTexts'
 import { getScoreZoneText } from '../utils/alertState'
 
@@ -12,15 +24,30 @@ interface ScoreSummaryCardProps {
   }
   technical?: { d: number; T_base: number; T_trend: number }
   macro?: { p_r: number; p_cpi: number; p_vix: number; M: number }
+  highlights?: { icon: string; text: string }[]
+  zoneText?: string
+  expanded?: boolean
+  onShowDetails?: () => void
   tooltips: TooltipTexts
 }
 
-function ScoreSummaryCard({ scores, technical, macro, tooltips }: ScoreSummaryCardProps) {
+function ScoreSummaryCard({
+  scores,
+  technical,
+  macro,
+  highlights = [],
+  zoneText,
+  expanded,
+  onShowDetails,
+  tooltips,
+}: ScoreSummaryCardProps) {
   const theme = useTheme()
   const isDark = theme.palette.mode === 'dark'
   const gradientStart = isDark ? '#101726' : alpha(theme.palette.primary.light, 0.2)
   const gradientEnd = isDark ? '#0c1b34' : alpha(theme.palette.secondary.light, 0.16)
-  const zoneText = getScoreZoneText(scores?.total)
+  const zoneTextValue = zoneText ?? getScoreZoneText(scores?.total)
+  const showHighlights = highlights.length > 0
+  const showDetailsToggle = Boolean(onShowDetails) && expanded !== undefined
 
   return (
     <Card
@@ -46,7 +73,7 @@ function ScoreSummaryCard({ scores, technical, macro, tooltips }: ScoreSummaryCa
             </Typography>
           </Tooltip>
           <Typography variant="body2" color="text.secondary">
-            {zoneText}
+            {zoneTextValue}
           </Typography>
 
           <Stack spacing={1}>
@@ -55,6 +82,35 @@ function ScoreSummaryCard({ scores, technical, macro, tooltips }: ScoreSummaryCa
             <LabelBar label="イベント補正" tooltip={tooltips.score.event} value={scores?.event_adjustment} color="error" />
           </Stack>
 
+          {showHighlights && (
+            <Box
+              sx={{
+                p: 1.5,
+                borderRadius: 2,
+                backgroundColor: alpha(theme.palette.background.default, 0.35),
+                border: `1px solid ${alpha(theme.palette.text.primary, 0.08)}`,
+              }}
+            >
+              <Tooltip title={tooltips.simple.points} arrow>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                  今日のポイント
+                </Typography>
+              </Tooltip>
+              <Stack spacing={1}>
+                {highlights.map((highlight, idx) => (
+                  <Stack direction="row" spacing={1} alignItems="flex-start" key={`${highlight.icon}-${idx}`}>
+                    <Typography variant="body1" component="span" aria-hidden>
+                      {highlight.icon}
+                    </Typography>
+                    <Typography variant="body2" component="span" color="text.secondary">
+                      {highlight.text}
+                    </Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            </Box>
+          )}
+
           {technical && macro && (
             <Box display="grid" gridTemplateColumns="repeat(2, 1fr)" gap={1}>
               <DetailItem label="乖離率 d" tooltip={tooltips.score.d} value={`${technical.d}%`} />
@@ -62,6 +118,14 @@ function ScoreSummaryCard({ scores, technical, macro, tooltips }: ScoreSummaryCa
               <DetailItem label="T_trend" tooltip={tooltips.score.T_trend} value={technical.T_trend} />
               <DetailItem label="マクロ M" tooltip={tooltips.score.macroM} value={macro.M} />
             </Box>
+          )}
+          {showDetailsToggle && (
+            <>
+              <Divider />
+              <Button variant="outlined" color="inherit" onClick={onShowDetails} sx={{ alignSelf: 'flex-start' }}>
+                {expanded ? '閉じる' : 'くわしく見る ≫'}
+              </Button>
+            </>
           )}
         </Stack>
       </CardContent>
