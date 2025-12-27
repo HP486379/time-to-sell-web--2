@@ -236,6 +236,21 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   return (
     <Stack spacing={3}>
       {error && <Alert severity="error">{error}</Alert>}
+      <Box
+        sx={{
+          width: '100%',
+          backgroundColor: (theme) => (theme.palette.mode === 'dark' ? '#2a2a2a' : '#f5f5f5'),
+          color: (theme) => (theme.palette.mode === 'dark' ? '#ddd' : '#444'),
+          fontSize: '12.5px',
+          px: 2,
+          py: 0.875,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        ⚠ 本サービスは投資助言ではありません。表示されるスコアは参考情報であり、最終的な投資判断はご自身の責任で行ってください。
+      </Box>
       <Box display="flex" justifyContent="space-between" alignItems="center" gap={1} flexWrap="wrap">
         <FormControl size="small" sx={{ minWidth: 200 }}>
           <InputLabel id="index-select-label">対象インデックス</InputLabel>
