@@ -146,6 +146,36 @@ const withFallbackScores = (res: EvaluateResponse, series: PricePoint[]): Evalua
   }
 }
 
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value)
+
+const hasUsableScores = (res: EvaluateResponse): boolean =>
+  isFiniteNumber(res?.scores?.technical) &&
+  isFiniteNumber(res?.scores?.macro) &&
+  isFiniteNumber(res?.scores?.event_adjustment) &&
+  isFiniteNumber(res?.scores?.total)
+
+const normalizeEvaluateResponse = (res: EvaluateResponse, series: PricePoint[]): EvaluateResponse => {
+  const withFallback = withFallbackScores(res, series)
+  if (hasUsableScores(withFallback)) return withFallback
+
+  return {
+    ...withFallback,
+    status: 'degraded',
+    scores: {
+      ...withFallback.scores,
+      technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : 0,
+      macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : 0,
+      event_adjustment: isFiniteNumber(withFallback.scores?.event_adjustment)
+        ? withFallback.scores.event_adjustment
+        : 0,
+      total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : 0,
+      label: withFallback.scores?.label ?? '計算中',
+    },
+    reasons: [...(withFallback.reasons ?? []), 'TECHNICAL_UNAVAILABLE'],
+  }
+}
+
 type ViewKey = 'short' | 'mid' | 'long'
 
 type BreakdownSlice = {
@@ -343,14 +373,17 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   const resolveUiStatus = (data: EvaluateResponse): EvalStatus => {
     const apiStatus = (data.status ?? 'ready') as EvalStatus
     const reasons = data.reasons ?? []
-    const hasTechUnavailable = reasons.includes('TECHNICAL_UNAVAILABLE')
-    const priceSeriesEmpty = !data.price_series || data.price_series.length === 0
     if (apiStatus === 'error') return 'error'
     if (apiStatus === 'loading') return 'loading'
-    if (priceSeriesEmpty) return 'degraded'
-    if (hasTechUnavailable) return 'ready'
 
-    return apiStatus
+    // MA欠損だけで全体停止しない
+    if (hasUsableScores(data)) return 'ready'
+
+    // スコアが欠損している場合のみ degraded 扱い（計算中）
+    if (reasons.includes('TECHNICAL_UNAVAILABLE') || reasons.includes('PRICE_HISTORY_EMPTY')) {
+      return 'degraded'
+    }
+    return 'degraded'
   }
 
   const scheduleEvalRetry = (
@@ -393,7 +426,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       if (reqSeq !== evalReqSeqRef.current) return
       if (res.data.request_id !== latestEvalRequestIdRef.current[targetIndex]) return
       const latestSeries = priceSeriesMap[targetIndex] ?? []
-      const normalized = withFallbackScores(res.data, latestSeries)
+      const normalized = normalizeEvaluateResponse(res.data, latestSeries)
       const status = resolveUiStatus(normalized)
       const reasons = normalized.reasons ?? []
       let uiMessage: string | undefined
@@ -413,6 +446,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       }
 
       if (status === 'degraded') {
+        setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
         if (!markPrimary) return
         if (retryCount >= EVAL_RETRY_DELAYS_MS.length) {
           setIsEvalRetrying(false)
@@ -420,6 +454,13 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
           return
         }
         setIsEvalRetrying(true)
+        console.warn('[EVAL DEGRADED]', {
+          index: targetIndex,
+          retryCount,
+          reasons,
+          status: normalized.status,
+          scores: normalized.scores,
+        })
         scheduleEvalRetry(targetIndex, payload, markPrimary, retryCount)
         return
       }
@@ -484,14 +525,20 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       const res = await apiClient.get<PricePoint[]>(getPriceHistoryEndpoint(targetIndex))
       if (reqSeq !== priceReqSeqRef.current) return
       const sorted = [...res.data]
-        .filter((p) => typeof p?.date === 'string' && typeof p?.close === 'number')
+        .filter((p) => typeof p?.date === 'string' && typeof p?.close === 'number' && Number.isFinite(p?.close))
         .sort((a, b) => a.date.localeCompare(b.date))
-        .map((p) => ({
-          ...p,
-          ma20: typeof p.ma20 === 'number' ? p.ma20 : null,
-          ma60: typeof p.ma60 === 'number' ? p.ma60 : null,
-          ma200: typeof p.ma200 === 'number' ? p.ma200 : null,
-        }))
+        .map((p, idx) => {
+          const row = {
+            ...p,
+            ma20: typeof p.ma20 === 'number' && Number.isFinite(p.ma20) ? p.ma20 : null,
+            ma60: typeof p.ma60 === 'number' && Number.isFinite(p.ma60) ? p.ma60 : null,
+            ma200: typeof p.ma200 === 'number' && Number.isFinite(p.ma200) ? p.ma200 : null,
+          }
+          if (idx === 0 || idx === res.data.length - 1) {
+            console.debug('[PRICE ROW]', { index: targetIndex, row })
+          }
+          return row
+        })
       setPriceSeriesMap((prev) => ({ ...prev, [targetIndex]: sorted }))
     } catch (e: any) {
       console.error('価格履歴取得に失敗しました', e)

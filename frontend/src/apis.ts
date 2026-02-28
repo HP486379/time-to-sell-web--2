@@ -54,7 +54,9 @@ export async function fetchEvents(dateIso?: string): Promise<EventItem[]> {
   const url = new URL(`${apiBase}/api/events`)
 
   if (dateIso) {
+    // 念のため両方付ける（backend がどちらを採用しても動く）
     url.searchParams.set('date', dateIso)
+    url.searchParams.set('date_str', dateIso)
   }
 
   const res = await fetch(url.toString(), {
@@ -68,6 +70,22 @@ export async function fetchEvents(dateIso?: string): Promise<EventItem[]> {
   }
 
   const json = await res.json()
-  // backend 側で { events: [...] } 形式を返している前提
-  return (json?.events ?? []) as EventItem[]
+  const rawEvents = Array.isArray(json?.events)
+    ? json.events
+    : Array.isArray(json)
+      ? json
+      : []
+
+  const normalized = rawEvents
+    .filter((ev: unknown): ev is Record<string, unknown> => !!ev && typeof ev === 'object')
+    .map((ev: Record<string, unknown>) => ({
+      name: typeof ev.name === 'string' ? ev.name : 'Unknown Event',
+      importance: typeof ev.importance === 'number' ? ev.importance : 3,
+      date: typeof ev.date === 'string' ? ev.date : String(json?.target ?? ''),
+      source: typeof ev.source === 'string' ? ev.source : 'manual',
+      description: typeof ev.description === 'string' ? ev.description : undefined,
+    }))
+    .filter((ev: EventItem) => ev.date.length > 0)
+
+  return normalized
 }
