@@ -703,18 +703,25 @@ def backtest(payload: BacktestRequest):
 from datetime import date as dt_date  # ★ date型と引数名の衝突回避のため alias
 
 @app.get("/api/events")
-def get_events_api(date_str: str = Query(None)):
+def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = Query(None)):
     """
     デバッグ用イベント取得API
 
     - /api/events?date=2026-01-02
+    - /api/events?date_str=2026-01-02
     - /api/events   ← 今日基準
     """
     try:
-        # ★ クエリ文字列 date_str をパースして target(date) を作る
+        # 優先順位: date -> date_str -> today
+        requested_date: Optional[str] = None
+        for candidate in (date, date_str):
+            if isinstance(candidate, str) and candidate:
+                requested_date = candidate
+                break
+
         target = (
-            datetime.strptime(date_str, "%Y-%m-%d").date()
-            if date_str
+            datetime.strptime(requested_date, "%Y-%m-%d").date()
+            if requested_date
             else dt_date.today()
         )
 
