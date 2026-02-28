@@ -100,6 +100,82 @@ const chartMotion = {
   exit: { opacity: 0.6 },
 }
 
+const calculateFallbackTechnicalScore = (series: PricePoint[]): number | null => {
+  if (!series.length) return null
+  const latest = series[series.length - 1]
+
+  const indicators = [
+    { ma: latest.ma20, weight: 0.25 },
+    { ma: latest.ma60, weight: 0.35 },
+    { ma: latest.ma200, weight: 0.4 },
+  ].filter((item) => item.ma !== null)
+
+  if (!indicators.length) return null
+
+  const totalWeight = indicators.reduce((sum, item) => sum + item.weight, 0)
+  const weightedScore = indicators.reduce((sum, item) => {
+    const signal = latest.close >= (item.ma as number) ? 100 : 0
+    return sum + signal * item.weight
+  }, 0)
+
+  return roundToTwo(weightedScore / totalWeight)
+}
+
+const withFallbackScores = (res: EvaluateResponse, series: PricePoint[]): EvaluateResponse => {
+  const reasons = res.reasons ?? []
+  if (!reasons.includes('TECHNICAL_UNAVAILABLE')) return res
+
+  const fallbackTechnical = calculateFallbackTechnicalScore(series)
+  if (fallbackTechnical === null) return res
+
+  const fallbackTotal = roundToTwo(
+    fallbackTechnical * 0.45 +
+      (res.scores?.macro ?? 0) * 0.45 +
+      (res.scores?.event_adjustment ?? 0) * 0.1,
+  )
+
+  return {
+    ...res,
+    status: 'ready',
+    reasons,
+    scores: {
+      ...res.scores,
+      technical: fallbackTechnical,
+      total: fallbackTotal,
+    },
+  }
+}
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value)
+
+const hasUsableScores = (res: EvaluateResponse): boolean =>
+  isFiniteNumber(res?.scores?.technical) &&
+  isFiniteNumber(res?.scores?.macro) &&
+  isFiniteNumber(res?.scores?.event_adjustment) &&
+  isFiniteNumber(res?.scores?.total)
+
+const normalizeEvaluateResponse = (res: EvaluateResponse, series: PricePoint[]): EvaluateResponse => {
+  const withFallback = withFallbackScores(res, series)
+  if (hasUsableScores(withFallback)) return withFallback
+
+  return {
+    ...withFallback,
+    status: 'degraded',
+    scores: {
+      ...withFallback.scores,
+      technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : 0,
+      macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : 0,
+      event_adjustment: isFiniteNumber(withFallback.scores?.event_adjustment)
+        ? withFallback.scores.event_adjustment
+        : 0,
+      total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : 0,
+      label: withFallback.scores?.label ?? '計算中',
+    },
+    reasons: [...(withFallback.reasons ?? []), 'TECHNICAL_UNAVAILABLE'],
+  }
+}
+
 type ViewKey = 'short' | 'mid' | 'long'
 
 type BreakdownSlice = {
@@ -264,7 +340,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   const evalStatus = evalStatusMap[indexType] ?? (response ? 'ready' : 'loading')
   const evalReasons = evalReasonsMap[indexType] ?? []
   const evalStatusMessage = evalStatusMessageMap[indexType]
-  const showScores = evalStatus === 'ready' || evalStatus === 'refreshing'
+  const showScores = evalStatus === 'ready' || evalStatus === 'refreshing' || evalStatus === 'degraded'
   const displayResponse = showScores ? response : null
   const totalScore = displayResponse?.scores?.total
   const priceSeries = priceSeriesMap[indexType] ?? []
@@ -297,17 +373,17 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   const resolveUiStatus = (data: EvaluateResponse): EvalStatus => {
     const apiStatus = (data.status ?? 'ready') as EvalStatus
     const reasons = data.reasons ?? []
-    const hasTechUnavailable = reasons.includes('TECHNICAL_UNAVAILABLE')
-    const priceSeriesEmpty = !data.price_series || data.price_series.length === 0
-    const techLooksBroken =
-      (data.scores?.technical === 0 && (data.scores?.macro ?? 0) >= 50) ||
-      data.technical_details?.T_base === undefined
-
     if (apiStatus === 'error') return 'error'
     if (apiStatus === 'loading') return 'loading'
-    if (hasTechUnavailable || priceSeriesEmpty || techLooksBroken) return 'degraded'
 
-    return apiStatus
+    // MA欠損だけで全体停止しない
+    if (hasUsableScores(data)) return 'ready'
+
+    // スコアが欠損している場合のみ degraded 扱い（計算中）
+    if (reasons.includes('TECHNICAL_UNAVAILABLE') || reasons.includes('PRICE_HISTORY_EMPTY')) {
+      return 'degraded'
+    }
+    return 'degraded'
   }
 
   const scheduleEvalRetry = (
@@ -349,13 +425,15 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body)
       if (reqSeq !== evalReqSeqRef.current) return
       if (res.data.request_id !== latestEvalRequestIdRef.current[targetIndex]) return
-      const status = resolveUiStatus(res.data)
-      const reasons = res.data.reasons ?? []
+      const latestSeries = priceSeriesMap[targetIndex] ?? []
+      const normalized = normalizeEvaluateResponse(res.data, latestSeries)
+      const status = resolveUiStatus(normalized)
+      const reasons = normalized.reasons ?? []
       let uiMessage: string | undefined
-      if (status === 'degraded') {
-        if (reasons.includes('TECHNICAL_UNAVAILABLE')) {
-          uiMessage = 'テクニカル指標の取得が未完了のため、スコアは確定していません。'
-        } else if (!res.data.price_series || res.data.price_series.length === 0) {
+      if (reasons.includes('TECHNICAL_UNAVAILABLE')) {
+        uiMessage = 'MA200計算中（データ不足）'
+      } else if (status === 'degraded') {
+        if (!res.data.price_series || res.data.price_series.length === 0) {
           uiMessage = '価格履歴の取得が未完了のため、スコアは確定していません。'
         } else {
           uiMessage = '一部データ取得中のため、スコアは確定していません。'
@@ -368,14 +446,21 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       }
 
       if (status === 'degraded') {
+        setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
         if (!markPrimary) return
         if (retryCount >= EVAL_RETRY_DELAYS_MS.length) {
           setIsEvalRetrying(false)
-          setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'error' }))
-          setError('価格履歴が未確定のためスコアを表示できません。再取得してください。')
+          setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'degraded' }))
           return
         }
         setIsEvalRetrying(true)
+        console.warn('[EVAL DEGRADED]', {
+          index: targetIndex,
+          retryCount,
+          reasons,
+          status: normalized.status,
+          scores: normalized.scores,
+        })
         scheduleEvalRetry(targetIndex, payload, markPrimary, retryCount)
         return
       }
@@ -388,14 +473,14 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
         return
       }
 
-      setResponses((prev) => ({ ...prev, [targetIndex]: res.data }))
+      setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
       if (targetIndex === indexType && payload)
         setLastRequest((prev) => ({ ...prev, ...payload, index_type: targetIndex }))
       if (markPrimary) {
         setLastUpdated(new Date())
         setIsEvalRetrying(false)
         setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'ready' }))
-        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: [] }))
+        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
       }
     } catch (e: any) {
       if (reqSeq !== evalReqSeqRef.current) return
@@ -439,7 +524,21 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     try {
       const res = await apiClient.get<PricePoint[]>(getPriceHistoryEndpoint(targetIndex))
       if (reqSeq !== priceReqSeqRef.current) return
-      const sorted = [...res.data].sort((a, b) => a.date.localeCompare(b.date))
+      const sorted = [...res.data]
+        .filter((p) => typeof p?.date === 'string' && typeof p?.close === 'number' && Number.isFinite(p?.close))
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((p, idx) => {
+          const row = {
+            ...p,
+            ma20: typeof p.ma20 === 'number' && Number.isFinite(p.ma20) ? p.ma20 : null,
+            ma60: typeof p.ma60 === 'number' && Number.isFinite(p.ma60) ? p.ma60 : null,
+            ma200: typeof p.ma200 === 'number' && Number.isFinite(p.ma200) ? p.ma200 : null,
+          }
+          if (idx === 0 || idx === res.data.length - 1) {
+            console.debug('[PRICE ROW]', { index: targetIndex, row })
+          }
+          return row
+        })
       setPriceSeriesMap((prev) => ({ ...prev, [targetIndex]: sorted }))
     } catch (e: any) {
       console.error('価格履歴取得に失敗しました', e)
@@ -624,7 +723,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   const degradedMessage =
     reasonMessages.length > 0
       ? `ℹ 状態：${reasonMessages.join(' / ')}`
-      : 'ℹ 状態：データが未確定のためスコアを確定できません'
+      : 'ℹ 状態：MA200計算中（データ不足）'
 
   const statusMessage =
     evalStatus === 'error'

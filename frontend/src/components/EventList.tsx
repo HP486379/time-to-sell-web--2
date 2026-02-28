@@ -40,10 +40,14 @@ const EventList: React.FC<Props> = ({ eventDetails, events, isLoading, error, to
 
   // ====== manual > heuristic のマージ ======
   const mergedEvents = useMemo(() => {
-    if (!events || events.length === 0) return []
+    if (!Array.isArray(events) || events.length === 0) return []
 
-    const manual = events.filter((e) => e.source === 'manual')
-    const heuristic = events.filter((e) => e.source !== 'manual')
+    const normalizedEvents = events.filter((e): e is EventItem => {
+      return !!e && typeof e === 'object' && typeof e.date === 'string' && typeof e.name === 'string'
+    })
+
+    const manual = normalizedEvents.filter((e) => e.source === 'manual')
+    const heuristic = normalizedEvents.filter((e) => e.source !== 'manual')
 
     // 同じ name & date が manual にあるものは heuristic を捨てる
     const isDuplicated = (h: EventItem) =>
@@ -104,14 +108,15 @@ const EventList: React.FC<Props> = ({ eventDetails, events, isLoading, error, to
     return t.format('YYYY/MM/DD (ddd)')
   }
 
-  const getImportanceChip = (imp: number) => {
-    if (imp >= 5) {
+  const getImportanceChip = (imp?: number) => {
+    const value = typeof imp === 'number' ? imp : 3
+    if (value >= 5) {
       return <Chip size="small" color="error" label="★★★ 超重要" />
     }
-    if (imp >= 4) {
+    if (value >= 4) {
       return <Chip size="small" color="warning" label="★★ 重要" />
     }
-    if (imp >= 3) {
+    if (value >= 3) {
       return <Chip size="small" color="info" label="★ 注目" />
     }
     return <Chip size="small" variant="outlined" label="参考" />
