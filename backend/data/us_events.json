@@ -4,7 +4,7 @@
   { "date": "2026-01-13", "name": "CPI Release", "importance": 4, "description": "米国CPIの発表" },
   { "date": "2026-01-14", "name": "Retail Sales", "importance": 4, "description": "小売売上高" },
   { "date": "2026-01-22", "name": "GDP", "importance": 4, "description": "実質GDP" },
-  { "date": "2026-01-29", "name": "FOMC", "importance": 5, "description": "FOMC 政策金利・声明" },https://github.com/HP486379/time-to-sell-web--2/blob/main/backend/data/us_events.json
+  { "date": "2026-01-29", "name": "FOMC", "importance": 5, "description": "FOMC 政策金利・声明" },
   { "date": "2026-01-29", "name": "PCE", "importance": 4, "description": "PCEデフレーター" },
   { "date": "2026-02-01", "name": "GDP", "importance": 4, "description": "実質GDP" },
   { "date": "2026-02-03", "name": "ISM Manufacturing", "importance": 4, "description": "ISM製造業景況感" },
