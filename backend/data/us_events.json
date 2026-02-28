@@ -4,7 +4,7 @@
   { "date": "2026-01-13", "name": "CPI Release", "importance": 4, "description": "米国CPIの発表" },
   { "date": "2026-01-14", "name": "Retail Sales", "importance": 4, "description": "小売売上高" },
   { "date": "2026-01-22", "name": "GDP", "importance": 4, "description": "実質GDP" },
-  { "date": "2026-01-29", "name": "FOMC", "importance": 5, "description": "FOMC 政策金利・声明" },
+  { "date": "2026-01-29", "name": "FOMC", "importance": 5, "description": "FOMC 政策金利・声明" },https://github.com/HP486379/time-to-sell-web--2/blob/main/backend/data/us_events.json
   { "date": "2026-01-29", "name": "PCE", "importance": 4, "description": "PCEデフレーター" },
   { "date": "2026-02-01", "name": "GDP", "importance": 4, "description": "実質GDP" },
   { "date": "2026-02-03", "name": "ISM Manufacturing", "importance": 4, "description": "ISM製造業景況感" },
@@ -12,4 +12,18 @@
   { "date": "2026-02-11", "name": "CPI Release", "importance": 4, "description": "米国CPIの発表" },
   { "date": "2026-02-17", "name": "Retail Sales", "importance": 4, "description": "小売売上高" },
   { "date": "2026-02-26", "name": "PCE", "importance": 4, "description": "PCEデフレーター" }
+  { "date": "2026-03-02", "name": "ISM Manufacturing", "importance": 4, "description": "ISM製造業景況感" },
+  { "date": "2026-03-06", "name": "Nonfarm Payrolls", "importance": 5, "description": "雇用統計（非農業部門雇用者数）" },
+  { "date": "2026-03-11", "name": "CPI Release", "importance": 4, "description": "米国CPIの発表" },
+  { "date": "2026-03-17", "name": "Retail Sales", "importance": 4, "description": "小売売上高" },
+  { "date": "2026-03-18", "name": "FOMC", "importance": 5, "description": "FOMC 政策金利・声明" },
+  { "date": "2026-03-26", "name": "GDP", "importance": 4, "description": "実質GDP（確報値）" },
+  { "date": "2026-03-27", "name": "PCE", "importance": 4, "description": "PCEデフレーター" }
+  { "date": "2026-04-01", "name": "ISM Manufacturing", "importance": 4, "description": "ISM製造業景況感" },
+  { "date": "2026-04-03", "name": "Nonfarm Payrolls", "importance": 5, "description": "雇用統計（非農業部門雇用者数）" },
+  { "date": "2026-04-15", "name": "CPI Release", "importance": 4, "description": "米国CPIの発表" },
+  { "date": "2026-04-16", "name": "Retail Sales", "importance": 4, "description": "小売売上高" },
+  { "date": "2026-04-29", "name": "FOMC", "importance": 5, "description": "FOMC 政策金利・声明" },
+  { "date": "2026-04-30", "name": "GDP", "importance": 4, "description": "実質GDP（速報値）" },
+  { "date": "2026-04-30", "name": "PCE", "importance": 4, "description": "PCEデフレーター" }
 ]
