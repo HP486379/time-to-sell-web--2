@@ -21,6 +21,7 @@ def test_events_api_accepts_date_query_param(monkeypatch):
     assert captured["target"].isoformat() == "2026-03-20"
     assert body["target"] == "2026-03-20"
     assert body["events"] == [{"date": "2026-03-20", "name": "dummy"}]
+    assert isinstance(body["manual_count"], int)
 
 
 def test_events_api_prefers_date_over_date_str(monkeypatch):
@@ -36,6 +37,7 @@ def test_events_api_prefers_date_over_date_str(monkeypatch):
 
     assert captured["target"].isoformat() == "2026-03-20"
     assert body["target"] == "2026-03-20"
+    assert isinstance(body["manual_count"], int)
 
 
 def test_events_api_accepts_date_str_query_param(monkeypatch):
@@ -51,3 +53,4 @@ def test_events_api_accepts_date_str_query_param(monkeypatch):
 
     assert captured["target"].isoformat() == "2026-03-20"
     assert body["target"] == "2026-03-20"
+    assert isinstance(body["manual_count"], int)

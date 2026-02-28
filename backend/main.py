@@ -734,7 +734,7 @@ def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = 
             if isinstance(d, dt_date):
                 e["date"] = d.isoformat()
 
-        return {"events": events, "target": target.isoformat()}
+        return {"events": events, "target": target.isoformat(), "manual_count": len(event_service.manual_events)}
 
     except Exception as e:
         # 既存仕様に合わせて握りつぶし（現状の挙動を維持）
