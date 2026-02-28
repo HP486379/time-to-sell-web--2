@@ -108,6 +108,8 @@ class EvaluateResponse(BaseModel):
     technical_details: dict
     macro_details: dict
     event_details: dict
+    event_adjustment_pt: float = 0.0
+    event_count: int = 0
     price_series: List[PricePoint]
 
 
@@ -250,6 +252,33 @@ def _get_price_series_or_503(index_type: IndexType):
         ) from exc
 
 
+def _normalize_event_date(raw_date) -> Optional[date]:
+    if isinstance(raw_date, date):
+        return raw_date
+    if isinstance(raw_date, str):
+        try:
+            return date.fromisoformat(raw_date)
+        except Exception:
+            return None
+    return None
+
+
+def _build_event_adjustment(target_date: date) -> tuple[float, dict, int]:
+    events = event_service.get_events_for_date(target_date)
+    event_adjustment, event_details = calculate_event_adjustment(target_date, events)
+
+    normalized_events = []
+    for event in events:
+        event_date = _normalize_event_date(event.get("date"))
+        if event_date is None:
+            continue
+        normalized_events.append({**event, "date": event_date})
+
+    detail_obj = event_details or {}
+    detail_obj["events"] = normalized_events
+    return float(event_adjustment), detail_obj, len(normalized_events)
+
+
 def _resolve_as_of(price_history: List[tuple[str, float]]) -> str:
     if not price_history:
         return datetime.now(timezone.utc).isoformat()
@@ -311,11 +340,13 @@ def _build_snapshot(index_type: IndexType = IndexType.SP500):
         macro_score, macro_details = 0.0, {}
 
     try:
-        events = event_service.get_events()
-        event_adjustment, event_details = calculate_event_adjustment(date.today(), events)
+        target = date.today()
+        if price_history:
+            target = date.fromisoformat(price_history[-1][0])
+        event_adjustment, event_details, event_count = _build_event_adjustment(target)
     except Exception:
         logger.exception("[snapshot] events calc failed for %s", index_type.value)
-        event_adjustment, event_details = 0.0, {}
+        event_adjustment, event_details, event_count = 0.0, {}, 0
 
     # 超長期ガードに必要なMAのみ内部で計算（APIに露出しない）
     ma500, ma1000 = calculate_ultra_long_mas(price_history)
@@ -343,6 +374,7 @@ def _build_snapshot(index_type: IndexType = IndexType.SP500):
             "technical_details": technical_details,
             "macro_details": macro_details,
             "event_details": event_details,
+            "event_count": event_count,
             "price_history": price_history,
             "price_series": market_service.build_price_series_with_ma(price_history),
         }
@@ -461,11 +493,20 @@ def _evaluate(position: PositionRequest):
 
     macro_score = snapshot.get("scores", {}).get("macro", 0.0)
     event_adjustment = snapshot.get("scores", {}).get("event_adjustment", 0.0)
+    event_details = snapshot.get("event_details", {}) or {}
+    event_count = int(snapshot.get("event_count", 0) or 0)
 
     if not snapshot.get("macro_details"):
         reasons.append("MACRO_UNAVAILABLE")
 
-    if not snapshot.get("event_details"):
+    try:
+        target = date.fromisoformat(price_history[-1][0])
+        event_adjustment, event_details, event_count = _build_event_adjustment(target)
+    except Exception:
+        logger.exception("[evaluate] events calc failed request_id=%s index=%s", request_id, position.index_type.value)
+        event_adjustment, event_details, event_count = 0.0, {}, 0
+
+    if not event_details:
         reasons.append("EVENTS_UNAVAILABLE")
 
     # 超長期ガードに必要なMAのみ内部で計算（APIに露出しない）
@@ -518,7 +559,7 @@ def _evaluate(position: PositionRequest):
         period_total_score = calculate_total_score(
             technical_scores[key],
             macro_score,
-            event_adjustment,
+            0.0,
             current_price=guard_price,
             ma500=ma500,
             ma1000=ma1000,
@@ -553,7 +594,7 @@ def _evaluate(position: PositionRequest):
         if position.score_ma == period_windows["mid"]
         else "long"
     )
-    period_total = period_scores[selected_key]
+    period_total = max(0.0, min(period_scores[selected_key] + event_adjustment, 100.0))
     base_score = (
         0.2 * period_scores["short"]
         + 0.3 * period_scores["mid"]
@@ -578,8 +619,8 @@ def _evaluate(position: PositionRequest):
     else:
         bonus = 0
 
-    exit_total = max(0.0, min(base_score + bonus, 100.0))
-    label = get_label(base_score)
+    total_score = max(0.0, min(base_score + bonus + event_adjustment, 100.0))
+    label = get_label(total_score)
     logger.info(
         "[evaluate] price history ready request_id=%s index=%s points=%d",
         request_id,
@@ -639,13 +680,15 @@ def _evaluate(position: PositionRequest):
                 "technical": technical_score,
                 "macro": macro_score,
                 "event_adjustment": event_adjustment,
-                "total": base_score,
+                "total": total_score,
                 "label": label,
                 "period_total": period_total,
             },
             "technical_details": technical_details,
             "macro_details": snapshot.get("macro_details", {}),
-            "event_details": snapshot.get("event_details", {}),
+            "event_details": event_details,
+            "event_adjustment_pt": float(event_adjustment),
+            "event_count": int(event_count),
             "price_series": price_series,
         }
     except Exception as exc:
@@ -703,18 +746,25 @@ def backtest(payload: BacktestRequest):
 from datetime import date as dt_date  # ★ date型と引数名の衝突回避のため alias
 
 @app.get("/api/events")
-def get_events_api(date_str: str = Query(None)):
+def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = Query(None)):
     """
     デバッグ用イベント取得API
 
     - /api/events?date=2026-01-02
+    - /api/events?date_str=2026-01-02
     - /api/events   ← 今日基準
     """
     try:
-        # ★ クエリ文字列 date_str をパースして target(date) を作る
+        # 優先順位: date -> date_str -> today
+        requested_date: Optional[str] = None
+        for candidate in (date, date_str):
+            if isinstance(candidate, str) and candidate:
+                requested_date = candidate
+                break
+
         target = (
-            datetime.strptime(date_str, "%Y-%m-%d").date()
-            if date_str
+            datetime.strptime(requested_date, "%Y-%m-%d").date()
+            if requested_date
             else dt_date.today()
         )
 
@@ -727,7 +777,7 @@ def get_events_api(date_str: str = Query(None)):
             if isinstance(d, dt_date):
                 e["date"] = d.isoformat()
 
-        return {"events": events, "target": target.isoformat()}
+        return {"events": events, "target": target.isoformat(), "manual_count": len(event_service.manual_events)}
 
     except Exception as e:
         # 既存仕様に合わせて握りつぶし（現状の挙動を維持）
