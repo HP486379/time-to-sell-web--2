@@ -131,7 +131,7 @@ const withFallbackScores = (res: EvaluateResponse, series: PricePoint[]): Evalua
   const fallbackTotal = roundToTwo(
     fallbackTechnical * 0.45 +
       (res.scores?.macro ?? 0) * 0.45 +
-      (res.scores?.event_adjustment ?? 0) * 0.1,
+      ((isFiniteNumber(res.event_adjustment_pt) ? res.event_adjustment_pt : res.scores?.event_adjustment) ?? 0) * 0.1,
   )
 
   return {
@@ -157,18 +157,31 @@ const hasUsableScores = (res: EvaluateResponse): boolean =>
 
 const normalizeEvaluateResponse = (res: EvaluateResponse, series: PricePoint[]): EvaluateResponse => {
   const withFallback = withFallbackScores(res, series)
-  if (hasUsableScores(withFallback)) return withFallback
+  const eventAdjustmentPt = isFiniteNumber(withFallback.event_adjustment_pt)
+    ? withFallback.event_adjustment_pt
+    : isFiniteNumber(withFallback.scores?.event_adjustment)
+      ? withFallback.scores.event_adjustment
+      : 0
 
-  return {
+  const normalized: EvaluateResponse = {
     ...withFallback,
-    status: 'degraded',
+    event_adjustment_pt: eventAdjustmentPt,
     scores: {
       ...withFallback.scores,
+      event_adjustment: eventAdjustmentPt,
+    },
+  }
+
+  if (hasUsableScores(normalized)) return normalized
+
+  return {
+    ...normalized,
+    status: 'degraded',
+    scores: {
+      ...normalized.scores,
       technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : 0,
       macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : 0,
-      event_adjustment: isFiniteNumber(withFallback.scores?.event_adjustment)
-        ? withFallback.scores.event_adjustment
-        : 0,
+      event_adjustment: eventAdjustmentPt,
       total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : 0,
       label: withFallback.scores?.label ?? '計算中',
     },
