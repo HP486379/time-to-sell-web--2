@@ -1,10 +1,10 @@
 from datetime import date, datetime, time, timedelta, timezone
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Dict
 import logging
 from enum import Enum
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
@@ -19,6 +19,7 @@ from services.macro_data_service import MacroDataService
 from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
+import purchases_store
 
 
 # ======================
@@ -69,6 +70,8 @@ class PositionRequest(BaseModel):
                 return IndexType.SP500_JPY
             if normalized == "orukan_jpy":
                 return IndexType.ORUKAN_JPY
+            if normalized in {"nikkei225", "nikkei_225", "nikkei-225"}:
+                return IndexType.NIKKEI
         return value
 
 
@@ -86,6 +89,13 @@ class Event(BaseModel):
     date: str
     source: Optional[str] = None
     description: Optional[str] = None
+
+
+
+
+class IOSVerifyRequest(BaseModel):
+    product_id: str
+    transaction_id: str
 
 
 class EvaluateResponse(BaseModel):
@@ -108,6 +118,8 @@ class EvaluateResponse(BaseModel):
     technical_details: dict
     macro_details: dict
     event_details: dict
+    event_adjustment_pt: float = 0.0
+    event_count: int = 0
     price_series: List[PricePoint]
 
 
@@ -171,6 +183,7 @@ macro_service = MacroDataService()
 event_service = EventService()          # ← ここは必ず EventService()
 nav_service = FundNavService()
 backtest_service = BacktestService(market_service, macro_service, event_service)
+purchases_store.init_db()
 
 JST = timezone(timedelta(hours=9))
 
@@ -250,6 +263,33 @@ def _get_price_series_or_503(index_type: IndexType):
         ) from exc
 
 
+def _normalize_event_date(raw_date) -> Optional[date]:
+    if isinstance(raw_date, date):
+        return raw_date
+    if isinstance(raw_date, str):
+        try:
+            return date.fromisoformat(raw_date)
+        except Exception:
+            return None
+    return None
+
+
+def _build_event_adjustment(target_date: date) -> tuple[float, dict, int]:
+    events = event_service.get_events_for_date(target_date)
+    event_adjustment, event_details = calculate_event_adjustment(target_date, events)
+
+    normalized_events = []
+    for event in events:
+        event_date = _normalize_event_date(event.get("date"))
+        if event_date is None:
+            continue
+        normalized_events.append({**event, "date": event_date})
+
+    detail_obj = event_details or {}
+    detail_obj["events"] = normalized_events
+    return float(event_adjustment), detail_obj, len(normalized_events)
+
+
 def _resolve_as_of(price_history: List[tuple[str, float]]) -> str:
     if not price_history:
         return datetime.now(timezone.utc).isoformat()
@@ -311,11 +351,13 @@ def _build_snapshot(index_type: IndexType = IndexType.SP500):
         macro_score, macro_details = 0.0, {}
 
     try:
-        events = event_service.get_events()
-        event_adjustment, event_details = calculate_event_adjustment(date.today(), events)
+        target = date.today()
+        if price_history:
+            target = date.fromisoformat(price_history[-1][0])
+        event_adjustment, event_details, event_count = _build_event_adjustment(target)
     except Exception:
         logger.exception("[snapshot] events calc failed for %s", index_type.value)
-        event_adjustment, event_details = 0.0, {}
+        event_adjustment, event_details, event_count = 0.0, {}, 0
 
     # 超長期ガードに必要なMAのみ内部で計算（APIに露出しない）
     ma500, ma1000 = calculate_ultra_long_mas(price_history)
@@ -343,6 +385,7 @@ def _build_snapshot(index_type: IndexType = IndexType.SP500):
             "technical_details": technical_details,
             "macro_details": macro_details,
             "event_details": event_details,
+            "event_count": event_count,
             "price_history": price_history,
             "price_series": market_service.build_price_series_with_ma(price_history),
         }
@@ -387,6 +430,81 @@ def get_orukan_jpy_history():
 @app.get("/api/sp500-jpy/price-history", response_model=List[PricePoint])
 def get_sp500_jpy_history():
     return _get_price_series_or_503(IndexType.SP500_JPY)
+
+
+ALL_INDICES = ["SP500", "NIKKEI225", "TOPIX", "NIFTY50", "ORUKAN", "sp500_jpy", "orukan_jpy"]
+
+
+def _resolve_user_id(x_user_id: Optional[str]) -> str:
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail={"reason": "x_user_id_required"})
+    return x_user_id
+
+
+def _compute_entitlements(user_id: str) -> Dict:
+    base = ["SP500"]
+    granted = purchases_store.get_granted_index_types(user_id)
+    available = list(dict.fromkeys(base + granted))
+
+    # 既存互換: NIKKEI225をNIKKEIとしても扱えるようにする
+    if "NIKKEI225" in available and "NIKKEI" not in available:
+        available.append("NIKKEI")
+
+    return {
+        "plan": "free",
+        "plan_source": "internal",
+        "plan_expires_at": None,
+        "available_index_types": available,
+        "features": {"multi_index": len(available) > 1},
+    }
+
+
+def _ensure_index_allowed(index_type: IndexType, x_user_id: Optional[str]) -> Dict:
+    user_id = _resolve_user_id(x_user_id)
+    entitlements = _compute_entitlements(user_id)
+    allowed = set(entitlements["available_index_types"])
+    requested = index_type.value
+
+    if requested == "NIKKEI" and "NIKKEI225" in allowed:
+        return entitlements
+
+    if requested not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": "index_not_entitled",
+                "requested_index_type": requested,
+                "available_index_types": entitlements["available_index_types"],
+            },
+        )
+    return entitlements
+
+
+@app.get("/api/entitlements")
+def get_entitlements_api(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
+    user_id = _resolve_user_id(x_user_id)
+    return _compute_entitlements(user_id)
+
+
+@app.get("/api/indices")
+def get_indices_api(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
+    user_id = _resolve_user_id(x_user_id)
+    entitlements = _compute_entitlements(user_id)
+    allowed = set(entitlements["available_index_types"])
+    indices = [idx for idx in ALL_INDICES if idx in allowed]
+    return {"indices": indices, "entitlements": entitlements}
+
+
+@app.post("/api/iap/ios/verify")
+def verify_ios_iap(
+    payload: IOSVerifyRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    user_id = _resolve_user_id(x_user_id)
+    if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
+        raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
+    created = purchases_store.add_purchase(user_id, payload.product_id, payload.transaction_id)
+    return {"ok": True, "created": created, "entitlements": _compute_entitlements(user_id)}
 
 
 # ======================
@@ -461,11 +579,20 @@ def _evaluate(position: PositionRequest):
 
     macro_score = snapshot.get("scores", {}).get("macro", 0.0)
     event_adjustment = snapshot.get("scores", {}).get("event_adjustment", 0.0)
+    event_details = snapshot.get("event_details", {}) or {}
+    event_count = int(snapshot.get("event_count", 0) or 0)
 
     if not snapshot.get("macro_details"):
         reasons.append("MACRO_UNAVAILABLE")
 
-    if not snapshot.get("event_details"):
+    try:
+        target = date.fromisoformat(price_history[-1][0])
+        event_adjustment, event_details, event_count = _build_event_adjustment(target)
+    except Exception:
+        logger.exception("[evaluate] events calc failed request_id=%s index=%s", request_id, position.index_type.value)
+        event_adjustment, event_details, event_count = 0.0, {}, 0
+
+    if not event_details:
         reasons.append("EVENTS_UNAVAILABLE")
 
     # 超長期ガードに必要なMAのみ内部で計算（APIに露出しない）
@@ -518,7 +645,7 @@ def _evaluate(position: PositionRequest):
         period_total_score = calculate_total_score(
             technical_scores[key],
             macro_score,
-            event_adjustment,
+            0.0,
             current_price=guard_price,
             ma500=ma500,
             ma1000=ma1000,
@@ -553,7 +680,7 @@ def _evaluate(position: PositionRequest):
         if position.score_ma == period_windows["mid"]
         else "long"
     )
-    period_total = period_scores[selected_key]
+    period_total = max(0.0, min(period_scores[selected_key] + event_adjustment, 100.0))
     base_score = (
         0.2 * period_scores["short"]
         + 0.3 * period_scores["mid"]
@@ -578,8 +705,8 @@ def _evaluate(position: PositionRequest):
     else:
         bonus = 0
 
-    exit_total = max(0.0, min(base_score + bonus, 100.0))
-    label = get_label(base_score)
+    total_score = max(0.0, min(base_score + bonus + event_adjustment, 100.0))
+    label = get_label(total_score)
     logger.info(
         "[evaluate] price history ready request_id=%s index=%s points=%d",
         request_id,
@@ -639,13 +766,15 @@ def _evaluate(position: PositionRequest):
                 "technical": technical_score,
                 "macro": macro_score,
                 "event_adjustment": event_adjustment,
-                "total": base_score,
+                "total": total_score,
                 "label": label,
                 "period_total": period_total,
             },
             "technical_details": technical_details,
             "macro_details": snapshot.get("macro_details", {}),
-            "event_details": snapshot.get("event_details", {}),
+            "event_details": event_details,
+            "event_adjustment_pt": float(event_adjustment),
+            "event_count": int(event_count),
             "price_series": price_series,
         }
     except Exception as exc:
@@ -662,12 +791,21 @@ def _evaluate(position: PositionRequest):
 
 
 @app.post("/api/sp500/evaluate", response_model=EvaluateResponse)
-def evaluate_sp500(position: PositionRequest):
-    return _evaluate(position)
+def evaluate_sp500(
+    position: PositionRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    _ensure_index_allowed(IndexType.SP500, x_user_id)
+    normalized = position.copy(update={"index_type": IndexType.SP500})
+    return _evaluate(normalized)
 
 
 @app.post("/api/evaluate", response_model=EvaluateResponse)
-def evaluate(position: PositionRequest):
+def evaluate(
+    position: PositionRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    _ensure_index_allowed(position.index_type, x_user_id)
     return _evaluate(position)
 
 
@@ -703,18 +841,25 @@ def backtest(payload: BacktestRequest):
 from datetime import date as dt_date  # ★ date型と引数名の衝突回避のため alias
 
 @app.get("/api/events")
-def get_events_api(date_str: str = Query(None)):
+def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = Query(None)):
     """
     デバッグ用イベント取得API
 
     - /api/events?date=2026-01-02
+    - /api/events?date_str=2026-01-02
     - /api/events   ← 今日基準
     """
     try:
-        # ★ クエリ文字列 date_str をパースして target(date) を作る
+        # 優先順位: date -> date_str -> today
+        requested_date: Optional[str] = None
+        for candidate in (date, date_str):
+            if isinstance(candidate, str) and candidate:
+                requested_date = candidate
+                break
+
         target = (
-            datetime.strptime(date_str, "%Y-%m-%d").date()
-            if date_str
+            datetime.strptime(requested_date, "%Y-%m-%d").date()
+            if requested_date
             else dt_date.today()
         )
 
@@ -727,7 +872,7 @@ def get_events_api(date_str: str = Query(None)):
             if isinstance(d, dt_date):
                 e["date"] = d.isoformat()
 
-        return {"events": events, "target": target.isoformat()}
+        return {"events": events, "target": target.isoformat(), "manual_count": len(event_service.manual_events)}
 
     except Exception as e:
         # 既存仕様に合わせて握りつぶし（現状の挙動を維持）

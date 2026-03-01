@@ -143,6 +143,8 @@ export interface EvaluateResponse {
     p_vix: number
     M: number
   }
+  event_adjustment_pt?: number
+  event_count?: number
   event_details: {
     E_adj: number
     R_max: number
