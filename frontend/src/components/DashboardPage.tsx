@@ -26,7 +26,6 @@ import {
   Skeleton,
   LinearProgress,
 } from '@mui/material'
-import axios from 'axios'
 import dayjs from 'dayjs'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -51,17 +50,10 @@ import { INDEX_LABELS, PRICE_TITLE_MAP, type IndexType } from '../types/index'
 import { getScoreZoneText } from '../utils/alertState'
 import SellTimingAvatarCard from './SellTimingAvatarCard'
 import { decideSellAction } from '../domain/sellDecision'
+import { apiClient } from '../shared/api'
 
 // ★ 追加：イベント API 用
 import { fetchEvents, type EventItem } from '../apis'
-
-const apiBase =
-  import.meta.env.VITE_API_BASE ||
-  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000')
-
-const apiClient = axios.create({
-  baseURL: apiBase,
-})
 
 const defaultRequest: EvaluateRequest = {
   total_quantity: 77384,
