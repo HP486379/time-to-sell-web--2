@@ -1,10 +1,10 @@
 from datetime import date, datetime, time, timedelta, timezone
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Dict
 import logging
 from enum import Enum
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
@@ -19,6 +19,7 @@ from services.macro_data_service import MacroDataService
 from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
+import purchases_store
 
 
 # ======================
@@ -69,6 +70,8 @@ class PositionRequest(BaseModel):
                 return IndexType.SP500_JPY
             if normalized == "orukan_jpy":
                 return IndexType.ORUKAN_JPY
+            if normalized in {"nikkei225", "nikkei_225", "nikkei-225"}:
+                return IndexType.NIKKEI
         return value
 
 
@@ -86,6 +89,13 @@ class Event(BaseModel):
     date: str
     source: Optional[str] = None
     description: Optional[str] = None
+
+
+
+
+class IOSVerifyRequest(BaseModel):
+    product_id: str
+    transaction_id: str
 
 
 class EvaluateResponse(BaseModel):
@@ -173,6 +183,7 @@ macro_service = MacroDataService()
 event_service = EventService()          # ← ここは必ず EventService()
 nav_service = FundNavService()
 backtest_service = BacktestService(market_service, macro_service, event_service)
+purchases_store.init_db()
 
 JST = timezone(timedelta(hours=9))
 
@@ -419,6 +430,81 @@ def get_orukan_jpy_history():
 @app.get("/api/sp500-jpy/price-history", response_model=List[PricePoint])
 def get_sp500_jpy_history():
     return _get_price_series_or_503(IndexType.SP500_JPY)
+
+
+ALL_INDICES = ["SP500", "NIKKEI225", "TOPIX", "NIFTY50", "ORUKAN", "sp500_jpy", "orukan_jpy"]
+
+
+def _resolve_user_id(x_user_id: Optional[str]) -> str:
+    if not x_user_id:
+        raise HTTPException(status_code=400, detail={"reason": "x_user_id_required"})
+    return x_user_id
+
+
+def _compute_entitlements(user_id: str) -> Dict:
+    base = ["SP500"]
+    granted = purchases_store.get_granted_index_types(user_id)
+    available = list(dict.fromkeys(base + granted))
+
+    # 既存互換: NIKKEI225をNIKKEIとしても扱えるようにする
+    if "NIKKEI225" in available and "NIKKEI" not in available:
+        available.append("NIKKEI")
+
+    return {
+        "plan": "free",
+        "plan_source": "internal",
+        "plan_expires_at": None,
+        "available_index_types": available,
+        "features": {"multi_index": len(available) > 1},
+    }
+
+
+def _ensure_index_allowed(index_type: IndexType, x_user_id: Optional[str]) -> Dict:
+    user_id = _resolve_user_id(x_user_id)
+    entitlements = _compute_entitlements(user_id)
+    allowed = set(entitlements["available_index_types"])
+    requested = index_type.value
+
+    if requested == "NIKKEI" and "NIKKEI225" in allowed:
+        return entitlements
+
+    if requested not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": "index_not_entitled",
+                "requested_index_type": requested,
+                "available_index_types": entitlements["available_index_types"],
+            },
+        )
+    return entitlements
+
+
+@app.get("/api/entitlements")
+def get_entitlements_api(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
+    user_id = _resolve_user_id(x_user_id)
+    return _compute_entitlements(user_id)
+
+
+@app.get("/api/indices")
+def get_indices_api(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
+    user_id = _resolve_user_id(x_user_id)
+    entitlements = _compute_entitlements(user_id)
+    allowed = set(entitlements["available_index_types"])
+    indices = [idx for idx in ALL_INDICES if idx in allowed]
+    return {"indices": indices, "entitlements": entitlements}
+
+
+@app.post("/api/iap/ios/verify")
+def verify_ios_iap(
+    payload: IOSVerifyRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    user_id = _resolve_user_id(x_user_id)
+    if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
+        raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
+    created = purchases_store.add_purchase(user_id, payload.product_id, payload.transaction_id)
+    return {"ok": True, "created": created, "entitlements": _compute_entitlements(user_id)}
 
 
 # ======================
@@ -705,12 +791,21 @@ def _evaluate(position: PositionRequest):
 
 
 @app.post("/api/sp500/evaluate", response_model=EvaluateResponse)
-def evaluate_sp500(position: PositionRequest):
-    return _evaluate(position)
+def evaluate_sp500(
+    position: PositionRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    _ensure_index_allowed(IndexType.SP500, x_user_id)
+    normalized = position.copy(update={"index_type": IndexType.SP500})
+    return _evaluate(normalized)
 
 
 @app.post("/api/evaluate", response_model=EvaluateResponse)
-def evaluate(position: PositionRequest):
+def evaluate(
+    position: PositionRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    _ensure_index_allowed(position.index_type, x_user_id)
     return _evaluate(position)
 
 
