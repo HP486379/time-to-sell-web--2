@@ -1,8 +1,10 @@
 import logging
+import math
 import os
 import random
+import time
 from datetime import date, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 import pandas as pd
@@ -73,6 +75,8 @@ class SP500MarketService:
             "sp500_jpy": 4000.0,
         }
 
+        self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
+
         logger.info(
             "[MARKET CONFIG] symbols=%s fx_symbols=%s fallback=%s price_types=%s",
             self.symbol_map,
@@ -122,6 +126,197 @@ class SP500MarketService:
         if closes.empty:
             raise ValueError(f"empty history for {symbol}")
         return closes
+
+    def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
+        if not history:
+            return "empty_history"
+
+        min_points_map = {
+            "SP500": 450,
+            "TOPIX": 400,
+            "NIKKEI": 400,
+            "NIFTY50": 350,
+            "ORUKAN": 300,
+            "orukan_jpy": 300,
+            "sp500_jpy": 450,
+        }
+        min_points = min_points_map.get(index_type, 300)
+
+        span_days = 0
+        try:
+            start_d = date.fromisoformat(history[0][0])
+            end_d = date.fromisoformat(history[-1][0])
+            span_days = max(0, (end_d - start_d).days)
+        except Exception:
+            span_days = 0
+
+        if len(history) < 30:
+            return f"too_few_points:{len(history)}"
+        if span_days >= 365 * 3 and len(history) < min_points:
+            return f"insufficient_points:{len(history)}<{min_points}"
+
+        prev: Optional[float] = None
+        for _, value in history:
+            if value is None:
+                return "invalid_price:none"
+            if isinstance(value, float) and math.isnan(value):
+                return "invalid_price:nan"
+            if value <= 0:
+                return f"invalid_price:non_positive:{value}"
+
+            if prev and prev > 0:
+                jump = abs((value - prev) / prev)
+                if jump > 0.20:
+                    return f"abnormal_daily_jump:{jump:.4f}"
+            prev = value
+
+        last_price = history[-1][1]
+        if index_type == "SP500" and last_price < 3000:
+            return f"abnormal_sp500_price:{last_price:.2f}"
+
+        start_price = self.start_prices.get(index_type)
+        if start_price:
+            if last_price < start_price * 0.4:
+                return f"abnormal_scale_low:{last_price:.2f}<{start_price * 0.4:.2f}"
+            if last_price > start_price * 5.0:
+                return f"abnormal_scale_high:{last_price:.2f}>{start_price * 5.0:.2f}"
+
+        return None
+
+    def _update_last_good_history(self, index_type: str, history: List[Tuple[str, float]]) -> None:
+        self._last_good_history[index_type] = [(d, round(float(v), 2)) for d, v in history]
+
+    def _log_validation_failure(
+        self,
+        *,
+        index_type: str,
+        symbol: str,
+        price_type: Optional[str],
+        reason: str,
+        attempt: int,
+        history: List[Tuple[str, float]],
+    ) -> None:
+        last_price = history[-1][1] if history else None
+        logger.warning(
+            "Validation failed index=%s symbol=%s price_type=%s reason=%s attempt=%d points=%d last=%s",
+            index_type,
+            symbol,
+            price_type,
+            reason,
+            attempt,
+            len(history),
+            last_price,
+        )
+
+    def _get_validated_index_jpy_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        symbol = self._resolve_symbol(index_type)
+        price_type = self._resolve_price_type(index_type)
+        backoffs = [0.2, 0.5, 1.0]
+        last_error: Optional[Exception] = None
+
+        for attempt, delay in enumerate(backoffs, start=1):
+            try:
+                series = self._fetch_index_history_jpy(start, end, index_type)
+                reason = self._validate_history(series, index_type)
+                if not reason:
+                    self._update_last_good_history(index_type, series)
+                    return series
+                self._log_validation_failure(
+                    index_type=index_type,
+                    symbol=symbol,
+                    price_type=price_type,
+                    reason=reason,
+                    attempt=attempt,
+                    history=series,
+                )
+                last_error = ValueError(reason)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Index JPY history fetch failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
+                    index_type,
+                    symbol,
+                    price_type,
+                    attempt,
+                    exc,
+                )
+            if attempt < len(backoffs):
+                time.sleep(delay)
+
+        if index_type in self._last_good_history:
+            last_good = self._last_good_history[index_type]
+            logger.info(
+                "Using last good history index=%s symbol=%s price_type=%s points=%d last=%s",
+                index_type,
+                symbol,
+                price_type,
+                len(last_good),
+                last_good[-1][1] if last_good else None,
+            )
+            return last_good
+
+        if last_error:
+            raise last_error
+        raise ValueError("index_jpy history unavailable")
+
+    def _fetch_yfinance_history_with_retry(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        symbol = self._resolve_symbol(index_type)
+        price_type = self._resolve_price_type(index_type)
+        backoffs = [0.2, 0.5, 1.0]
+        last_error: Optional[Exception] = None
+
+        for attempt, delay in enumerate(backoffs, start=1):
+            try:
+                closes = self._download_close_series(symbol, start, end)
+                history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
+                reason = self._validate_history(history, index_type)
+                if not reason:
+                    logger.info(
+                        "Using yfinance history for %s (symbol=%s price_type=%s points=%d)",
+                        index_type,
+                        symbol,
+                        price_type,
+                        len(history),
+                    )
+                    self._update_last_good_history(index_type, history)
+                    return history
+                self._log_validation_failure(
+                    index_type=index_type,
+                    symbol=symbol,
+                    price_type=price_type,
+                    reason=reason,
+                    attempt=attempt,
+                    history=history,
+                )
+                last_error = ValueError(reason)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Price history attempt failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
+                    index_type,
+                    symbol,
+                    price_type,
+                    attempt,
+                    exc,
+                )
+            if attempt < len(backoffs):
+                time.sleep(delay)
+
+        if index_type in self._last_good_history:
+            last_good = self._last_good_history[index_type]
+            logger.info(
+                "Using last good history index=%s symbol=%s price_type=%s points=%d last=%s",
+                index_type,
+                symbol,
+                price_type,
+                len(last_good),
+                last_good[-1][1] if last_good else None,
+            )
+            return last_good
+
+        if last_error:
+            raise last_error
+        raise ValueError("history unavailable")
 
     def _fetch_index_history_jpy(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         symbol = self._resolve_symbol(index_type)
@@ -247,31 +442,45 @@ class SP500MarketService:
         try:
             price_type = self._resolve_price_type(index_type)
             if price_type == "index_jpy":
-                return self._fetch_index_history_jpy(start, today, index_type)
+                return self._get_validated_index_jpy_history(start, today, index_type)
 
             nav_hist = self._fetch_nav_history(start, today, index_type)
             if nav_hist:
-                logger.info(
-                    "Using NAV history for %s (symbol=%s price_type=%s points=%d)",
-                    index_type,
-                    self._resolve_symbol(index_type),
-                    price_type,
-                    len(nav_hist),
+                nav_hist = [(d, round(v, 2)) for d, v in nav_hist]
+                nav_reason = self._validate_history(nav_hist, index_type)
+                if not nav_reason:
+                    logger.info(
+                        "Using NAV history for %s (symbol=%s price_type=%s points=%d)",
+                        index_type,
+                        self._resolve_symbol(index_type),
+                        price_type,
+                        len(nav_hist),
+                    )
+                    self._update_last_good_history(index_type, nav_hist)
+                    return nav_hist
+                self._log_validation_failure(
+                    index_type=index_type,
+                    symbol=self._resolve_symbol(index_type),
+                    price_type=price_type,
+                    reason=nav_reason,
+                    attempt=1,
+                    history=nav_hist,
                 )
-                return [(d, round(v, 2)) for d, v in nav_hist]
 
-            symbol = self._resolve_symbol(index_type)
-            closes = self._download_close_series(symbol, start, today)
-            logger.info(
-                "Using yfinance history for %s (symbol=%s price_type=%s points=%d)",
-                index_type,
-                symbol,
-                price_type,
-                len(closes),
-            )
-            return [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
+            return self._fetch_yfinance_history_with_retry(start, today, index_type)
         except Exception as exc:
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
+            if index_type in self._last_good_history:
+                last_good = self._last_good_history[index_type]
+                logger.info(
+                    "Using last good history after fetch failure index=%s symbol=%s price_type=%s points=%d last=%s",
+                    index_type,
+                    self._resolve_symbol(index_type),
+                    self._resolve_price_type(index_type),
+                    len(last_good),
+                    last_good[-1][1] if last_good else None,
+                )
+                return last_good
             if not allow_synth:
                 raise
             fallback = self._fallback_history(start, today, index_type)
@@ -292,35 +501,45 @@ class SP500MarketService:
         try:
             price_type = self._resolve_price_type(index_type)
             if price_type == "index_jpy":
-                return self._fetch_index_history_jpy(start, end, index_type)
+                return self._get_validated_index_jpy_history(start, end, index_type)
 
             nav_hist = self._fetch_nav_history(start, end, index_type)
             if nav_hist:
-                logger.info(
-                    "Using NAV history for %s (symbol=%s price_type=%s points=%d)",
-                    index_type,
-                    self._resolve_symbol(index_type),
-                    price_type,
-                    len(nav_hist),
+                nav_hist = [(d, round(v, 2)) for d, v in nav_hist]
+                nav_reason = self._validate_history(nav_hist, index_type)
+                if not nav_reason:
+                    logger.info(
+                        "Using NAV history for %s (symbol=%s price_type=%s points=%d)",
+                        index_type,
+                        self._resolve_symbol(index_type),
+                        price_type,
+                        len(nav_hist),
+                    )
+                    self._update_last_good_history(index_type, nav_hist)
+                    return nav_hist
+                self._log_validation_failure(
+                    index_type=index_type,
+                    symbol=self._resolve_symbol(index_type),
+                    price_type=price_type,
+                    reason=nav_reason,
+                    attempt=1,
+                    history=nav_hist,
                 )
-                return [(d, round(v, 2)) for d, v in nav_hist]
 
-            symbol = self._resolve_symbol(index_type)
-            hist = yf.download(symbol, start=start, end=end + timedelta(days=1), interval="1d")
-            hist = hist.dropna()
-            if hist.empty:
-                raise ValueError("empty history")
-            closes = self._extract_close_series(hist)
-            logger.info(
-                "Using yfinance history for %s (symbol=%s price_type=%s points=%d)",
-                index_type,
-                symbol,
-                price_type,
-                len(closes),
-            )
-            return [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
+            return self._fetch_yfinance_history_with_retry(start, end, index_type)
         except Exception as exc:
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
+            if index_type in self._last_good_history:
+                last_good = self._last_good_history[index_type]
+                logger.info(
+                    "Using last good history after fetch failure index=%s symbol=%s price_type=%s points=%d last=%s",
+                    index_type,
+                    self._resolve_symbol(index_type),
+                    self._resolve_price_type(index_type),
+                    len(last_good),
+                    last_good[-1][1] if last_good else None,
+                )
+                return last_good
             if not fallback_allowed:
                 raise
             fallback = self._fallback_history(start, end, index_type)
