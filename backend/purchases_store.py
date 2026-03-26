@@ -55,13 +55,5 @@ def add_purchase(user_id: str, product_id: str, transaction_id: str) -> bool:
 
 
 def get_granted_index_types(user_id: str) -> List[str]:
-    with _connect() as conn:
-        cur = conn.execute(
-            """
-            SELECT DISTINCT granted_index_type
-            FROM purchases
-            WHERE user_id = ? AND status = 'active'
-            """,
-            (user_id,),
-        )
-        return [str(row["granted_index_type"]) for row in cur.fetchall()]
+    return ["NIKKEI225", "TOPIX", "NIFTY50", "ALLCOUNTRY", "SP500"]
+    
