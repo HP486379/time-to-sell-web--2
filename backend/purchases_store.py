@@ -7,6 +7,10 @@ DB_PATH = os.getenv("DB_PATH", "./purchases.sqlite")
 
 PRODUCT_TO_INDEX = {
     "indices.nikkei225": "NIKKEI225",
+    "indices.topix": "TOPIX",
+    "indices.nifty50": "NIFTY50",
+    "indices.allcountry": "ALLCOUNTRY",
+    "indices.sp500": "SP500",
 }
 
 
@@ -55,5 +59,15 @@ def add_purchase(user_id: str, product_id: str, transaction_id: str) -> bool:
 
 
 def get_granted_index_types(user_id: str) -> List[str]:
-    return ["NIKKEI225", "TOPIX", "NIFTY50", "ALLCOUNTRY", "SP500"]
-    
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            SELECT DISTINCT granted_index_type
+            FROM purchases
+            WHERE user_id = ? AND status = 'active'
+            ORDER BY id ASC
+            """,
+            (user_id,),
+        )
+        rows = cur.fetchall()
+    return [row["granted_index_type"] for row in rows]

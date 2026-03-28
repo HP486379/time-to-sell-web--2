@@ -77,3 +77,36 @@ export async function fetchEvents(dateIso?: string): Promise<EventItem[]> {
 
   return normalized
 }
+
+export interface RevenueCatEntitlementLike {
+  latestPurchaseDate?: string
+}
+
+/**
+ * RevenueCatのactive entitlementsをバックエンドの purchases に同期する
+ * POST /purchase
+ */
+export async function syncPurchasesToBackend(
+  appUserId: string,
+  activeEntitlements: Record<string, RevenueCatEntitlementLike>,
+): Promise<void> {
+  for (const productId of Object.keys(activeEntitlements)) {
+    const transactionId =
+      activeEntitlements[productId]?.latestPurchaseDate ?? `${Date.now()}-${productId}`
+
+    const res = await apiFetch('/purchase', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: appUserId,
+        product_id: productId,
+        transaction_id: transactionId,
+      }),
+    })
+
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`Failed to sync purchase: ${res.status} ${text}`)
+    }
+  }
+}

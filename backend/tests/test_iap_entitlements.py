@@ -51,6 +51,29 @@ def test_verify_is_idempotent_on_duplicate_transaction(temp_db):
     assert second["ok"] is True and second["created"] is False
 
 
+def test_purchase_endpoint_accepts_user_id_in_body(temp_db):
+    first = main.purchase(
+        main.PurchaseRequest(
+            user_id="u2",
+            product_id="indices.topix",
+            transaction_id="tx-topix-1",
+        )
+    )
+    second = main.purchase(
+        main.PurchaseRequest(
+            user_id="u2",
+            product_id="indices.topix",
+            transaction_id="tx-topix-1",
+        )
+    )
+
+    assert first["success"] is True and first["created"] is True
+    assert second["success"] is True and second["created"] is False
+
+    ent = main._compute_entitlements("u2")
+    assert "TOPIX" in ent["available_index_types"]
+
+
 def test_evaluate_access_control_with_entitlements(temp_db, monkeypatch):
     user_id = "u1"
 

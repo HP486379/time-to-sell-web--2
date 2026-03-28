@@ -98,6 +98,12 @@ class IOSVerifyRequest(BaseModel):
     transaction_id: str
 
 
+class PurchaseRequest(BaseModel):
+    user_id: str
+    product_id: str
+    transaction_id: str
+
+
 class EvaluateResponse(BaseModel):
     current_price: float
     market_value: float
@@ -505,6 +511,14 @@ def verify_ios_iap(
         raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
     created = purchases_store.add_purchase(user_id, payload.product_id, payload.transaction_id)
     return {"ok": True, "created": created, "entitlements": _compute_entitlements(user_id)}
+
+
+@app.post("/purchase")
+def purchase(payload: PurchaseRequest):
+    if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
+        raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
+    created = purchases_store.add_purchase(payload.user_id, payload.product_id, payload.transaction_id)
+    return {"success": True, "created": created}
 
 
 # ======================
