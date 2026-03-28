@@ -115,13 +115,32 @@ def test_verify_ios_iap_idempotent(temp_db):
     assert second["ok"] is True and second["created"] is False
 
 
+def test_purchase_uses_header_user_id_over_body(temp_db):
+    """X-User-Idヘッダがあればbodyのuser_idより優先される"""
+    result = main.purchase(
+        main.PurchaseRequest(user_id="body_user", product_id="topix_a", transaction_id="tx-header-1"),
+        x_user_id="header_user",
+    )
+    assert result["success"] is True
+
+    # header_user でentitlementが取れる
+    ent = main._compute_entitlements("header_user")
+    assert "TOPIX" in ent["available_index_types"]
+
+    # body_user にはentitlementがない
+    ent_body = main._compute_entitlements("body_user")
+    assert "TOPIX" not in ent_body["available_index_types"]
+
+
 def test_purchase_endpoint_idempotent(temp_db):
-    """/purchase エンドポイントの冪等性テスト"""
+    """/purchase エンドポイントの冪等性テスト（X-User-Idなし→payload.user_idにフォールバック）"""
     first = main.purchase(
-        main.PurchaseRequest(user_id="u2", product_id="topix_a", transaction_id="tx-topix-1")
+        main.PurchaseRequest(user_id="u2", product_id="topix_a", transaction_id="tx-topix-1"),
+        x_user_id=None,
     )
     second = main.purchase(
-        main.PurchaseRequest(user_id="u2", product_id="topix_a", transaction_id="tx-topix-1")
+        main.PurchaseRequest(user_id="u2", product_id="topix_a", transaction_id="tx-topix-1"),
+        x_user_id=None,
     )
     assert first["success"] is True and first["created"] is True
     assert second["success"] is True and second["created"] is False
