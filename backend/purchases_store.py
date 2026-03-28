@@ -6,11 +6,12 @@ from typing import List
 DB_PATH = os.getenv("DB_PATH", "./purchases.sqlite")
 
 PRODUCT_TO_INDEX = {
-   "indices.nikkei225": "NIKKEI225",
-    "indices.topix": "TOPIX",
-    "indices.nifty50": "NIFTY50",
-    "indices.allcountry": "ALLCOUNTRY",
-    "indices.sp500": "SP500",
+    "nikkei225_a": "NIKKEI225",
+    "topix_a": "TOPIX",
+    "nifty50_a": "NIFTY50",
+    "allcountry_a": "ALLCOUNTRY",
+    "sp500_jpy_a": "SP500",
+    "allcountry_jpy_a": "ALLCOUNTRY_JPY",
 }
 
 
