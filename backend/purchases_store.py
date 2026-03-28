@@ -59,6 +59,18 @@ def add_purchase(user_id: str, product_id: str, transaction_id: str) -> bool:
             return False
 
 
+def get_recent_purchases(limit: int = 50) -> List[dict]:
+    """直近の purchases レコードを返す（デバッグ用）"""
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT id, user_id, product_id, granted_index_type, transaction_id, status, created_at"
+            " FROM purchases ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_granted_index_types(user_id: str) -> List[str]:
     with _connect() as conn:
         cur = conn.execute(

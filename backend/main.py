@@ -524,11 +524,32 @@ def verify_ios_iap(
 
 
 @app.post("/purchase")
-def purchase(payload: PurchaseRequest):
+def purchase(
+    payload: PurchaseRequest,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    # X-User-Idヘッダを優先。なければpayload.user_idにフォールバック（後方互換）
+    user_id = x_user_id or payload.user_id
+    if not user_id:
+        raise HTTPException(status_code=400, detail={"reason": "user_id_required"})
+
     if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
         raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
-    created = purchases_store.add_purchase(payload.user_id, payload.product_id, payload.transaction_id)
+
+    logger.info("[purchase] user_id=%s product_id=%s", user_id, payload.product_id)
+    created = purchases_store.add_purchase(user_id, payload.product_id, payload.transaction_id)
     return {"success": True, "created": created}
+
+
+@app.get("/debug/purchases")
+def debug_purchases(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
+    """デバッグ用: purchases テーブルの内容を返す（将来的には認証追加を推奨）"""
+    rows = purchases_store.get_recent_purchases(limit=50)
+    return {
+        "current_user_id": x_user_id,
+        "purchases": rows,
+        "count": len(rows),
+    }
 
 
 # ======================
@@ -825,6 +846,7 @@ def evaluate(
     position: PositionRequest,
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ):
+    logger.info("[evaluate] user_id=%s index=%s", x_user_id, position.index_type.value)
     _ensure_index_allowed(position.index_type, x_user_id)
     return _evaluate(position)
 
