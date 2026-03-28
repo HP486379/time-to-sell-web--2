@@ -47,12 +47,33 @@ app.add_middleware(
 
 class IndexType(str, Enum):
     SP500 = "SP500"
-    SP500_JPY = "sp500_jpy"
+    SP500_JPY = "SP500_JPY"
     TOPIX = "TOPIX"
-    NIKKEI = "NIKKEI"
+    NIKKEI225 = "NIKKEI225"
     NIFTY50 = "NIFTY50"
-    ORUKAN = "ORUKAN"
-    ORUKAN_JPY = "orukan_jpy"
+    ALLCOUNTRY = "ALLCOUNTRY"
+    ALLCOUNTRY_JPY = "ALLCOUNTRY_JPY"
+
+
+def _normalize_index_type_value(value):
+    """Normalize legacy index type names to canonical uppercase values."""
+    if isinstance(value, str):
+        v = value.lower().strip()
+        if v in {"nikkei", "nikkei225", "nikkei_225", "nikkei-225"}:
+            return "NIKKEI225"
+        if v in {"orukan", "allcountry"}:
+            return "ALLCOUNTRY"
+        if v in {"orukan_jpy", "allcountry_jpy"}:
+            return "ALLCOUNTRY_JPY"
+        if v == "sp500_jpy":
+            return "SP500_JPY"
+        if v == "topix":
+            return "TOPIX"
+        if v == "nifty50":
+            return "NIFTY50"
+        if v == "sp500":
+            return "SP500"
+    return value
 
 
 class PositionRequest(BaseModel):
@@ -64,15 +85,7 @@ class PositionRequest(BaseModel):
 
     @validator("index_type", pre=True)
     def normalize_index_type(cls, value):
-        if isinstance(value, str):
-            normalized = value.lower()
-            if normalized == "sp500_jpy":
-                return IndexType.SP500_JPY
-            if normalized == "orukan_jpy":
-                return IndexType.ORUKAN_JPY
-            if normalized in {"nikkei225", "nikkei_225", "nikkei-225"}:
-                return IndexType.NIKKEI
-        return value
+        return _normalize_index_type_value(value)
 
 
 class PricePoint(BaseModel):
@@ -151,6 +164,10 @@ class BacktestRequest(BaseModel):
     sell_threshold: float = 80.0
     index_type: IndexType = IndexType.SP500
     score_ma: int = Field(200)
+
+    @validator("index_type", pre=True)
+    def normalize_index_type(cls, value):
+        return _normalize_index_type_value(value)
 
 
 class Trade(BaseModel):
@@ -415,7 +432,7 @@ def get_topix_history():
 
 @app.get("/api/nikkei/price-history", response_model=List[PricePoint])
 def get_nikkei_history():
-    return _get_price_series_or_503(IndexType.NIKKEI)
+    return _get_price_series_or_503(IndexType.NIKKEI225)
 
 
 @app.get("/api/nifty50/price-history", response_model=List[PricePoint])
@@ -425,12 +442,12 @@ def get_nifty_history():
 
 @app.get("/api/orukan/price-history", response_model=List[PricePoint])
 def get_orukan_history():
-    return _get_price_series_or_503(IndexType.ORUKAN)
+    return _get_price_series_or_503(IndexType.ALLCOUNTRY)
 
 
 @app.get("/api/orukan-jpy/price-history", response_model=List[PricePoint])
 def get_orukan_jpy_history():
-    return _get_price_series_or_503(IndexType.ORUKAN_JPY)
+    return _get_price_series_or_503(IndexType.ALLCOUNTRY_JPY)
 
 
 @app.get("/api/sp500-jpy/price-history", response_model=List[PricePoint])
@@ -438,7 +455,7 @@ def get_sp500_jpy_history():
     return _get_price_series_or_503(IndexType.SP500_JPY)
 
 
-ALL_INDICES = ["SP500", "NIKKEI225", "TOPIX", "NIFTY50", "ORUKAN", "sp500_jpy", "orukan_jpy"]
+ALL_INDICES = ["SP500", "TOPIX", "NIKKEI225", "NIFTY50", "ALLCOUNTRY", "SP500_JPY", "ALLCOUNTRY_JPY"]
 
 
 def _resolve_user_id(x_user_id: Optional[str]) -> str:
@@ -451,10 +468,6 @@ def _compute_entitlements(user_id: str) -> Dict:
     base = ["SP500"]
     granted = purchases_store.get_granted_index_types(user_id)
     available = list(dict.fromkeys(base + granted))
-
-    # 既存互換: NIKKEI225をNIKKEIとしても扱えるようにする
-    if "NIKKEI225" in available and "NIKKEI" not in available:
-        available.append("NIKKEI")
 
     return {
         "plan": "free",
@@ -470,9 +483,6 @@ def _ensure_index_allowed(index_type: IndexType, x_user_id: Optional[str]) -> Di
     entitlements = _compute_entitlements(user_id)
     allowed = set(entitlements["available_index_types"])
     requested = index_type.value
-
-    if requested == "NIKKEI" and "NIKKEI225" in allowed:
-        return entitlements
 
     if requested not in allowed:
         raise HTTPException(
@@ -746,11 +756,7 @@ def _evaluate(position: PositionRequest):
             reasons,
         )
 
-    used_index_type = (
-        "SP500_JPY" if position.index_type == IndexType.SP500_JPY else
-        "ORUKAN_JPY" if position.index_type == IndexType.ORUKAN_JPY else
-        position.index_type.value
-    )
+    used_index_type = position.index_type.value
     price_type = market_service._resolve_price_type(position.index_type.value)
     symbol = market_service._resolve_symbol(position.index_type.value)
     fx_symbol = market_service._resolve_fx_symbol(position.index_type.value)

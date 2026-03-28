@@ -79,6 +79,8 @@ export async function fetchEvents(dateIso?: string): Promise<EventItem[]> {
 }
 
 export interface RevenueCatEntitlementLike {
+  productIdentifier?: string
+  transactionIdentifier?: string
   latestPurchaseDate?: string
 }
 
@@ -90,9 +92,13 @@ export async function syncPurchasesToBackend(
   appUserId: string,
   activeEntitlements: Record<string, RevenueCatEntitlementLike>,
 ): Promise<void> {
-  for (const productId of Object.keys(activeEntitlements)) {
+  for (const [, entitlement] of Object.entries(activeEntitlements)) {
+    const productId = entitlement.productIdentifier
+    if (!productId) continue
+
     const transactionId =
-      activeEntitlements[productId]?.latestPurchaseDate ?? `${Date.now()}-${productId}`
+      entitlement.transactionIdentifier ??
+      `${Date.now()}-${productId}`
 
     const res = await apiFetch('/purchase', {
       method: 'POST',
@@ -106,7 +112,8 @@ export async function syncPurchasesToBackend(
 
     if (!res.ok) {
       const text = await res.text()
-      throw new Error(`Failed to sync purchase: ${res.status} ${text}`)
+      console.error(`Failed to sync purchase for ${productId}: ${res.status} ${text}`)
+      // 1件失敗しても他の指数の同期を続ける（throwしない）
     }
   }
 }

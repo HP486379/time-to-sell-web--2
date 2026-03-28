@@ -10,7 +10,7 @@ PRODUCT_TO_INDEX = {
     "topix_a": "TOPIX",
     "nifty50_a": "NIFTY50",
     "allcountry_a": "ALLCOUNTRY",
-    "sp500_jpy_a": "SP500",
+    "sp500_jpy_a": "SP500_JPY",
     "allcountry_jpy_a": "ALLCOUNTRY_JPY",
 }
 
