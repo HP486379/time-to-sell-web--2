@@ -4,3 +4,4 @@ frontend/dist/
 backend/.venv/
 __pycache__/
 *.pyc
+backend/purchases.sqlite
