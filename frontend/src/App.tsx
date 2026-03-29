@@ -8,7 +8,7 @@ import {
   ToggleButton,
   Paper,
 } from '@mui/material'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import LightModeIcon from '@mui/icons-material/LightMode'
 import DarkModeIcon from '@mui/icons-material/DarkMode'
 import { PaletteMode } from '@mui/material'
@@ -22,7 +22,11 @@ interface AppProps {
 }
 
 function App({ mode, onToggleMode }: AppProps) {
-  const [displayMode, setDisplayMode] = useState<'pro' | 'simple'>('pro')
+  const [displayMode, setDisplayMode] = useState<'pro' | 'simple'>(() => {
+    if (typeof window === 'undefined') return 'simple'
+    const stored = window.localStorage.getItem('displayMode')
+    return stored === 'pro' || stored === 'simple' ? stored : 'simple'
+  })
   const location = useLocation()
   const navigate = useNavigate()
 
@@ -33,6 +37,11 @@ function App({ mode, onToggleMode }: AppProps) {
   const handleDisplayMode = (_: any, next: 'pro' | 'simple') => {
     if (next) setDisplayMode(next)
   }
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('displayMode', displayMode)
+  }, [displayMode])
 
   const handleTabChange = (_: any, next: 'dashboard' | 'backtest' | null) => {
     if (!next) return
@@ -68,8 +77,8 @@ function App({ mode, onToggleMode }: AppProps) {
               表示モード
             </Typography>
             <ToggleButtonGroup value={displayMode} exclusive size="small" onChange={handleDisplayMode}>
-              <ToggleButton value="pro">プロ向け</ToggleButton>
               <ToggleButton value="simple">かんたん</ToggleButton>
+              <ToggleButton value="pro">プロ向け</ToggleButton>
             </ToggleButtonGroup>
           </Box>
           <Stack direction="row" spacing={1} alignItems="center">

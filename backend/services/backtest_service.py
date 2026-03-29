@@ -8,7 +8,7 @@ import logging
 import os
 from scoring.events import calculate_event_adjustment
 from scoring.macro import calculate_macro_score
-from scoring.technical import calculate_technical_score
+from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
 from scoring.total_score import calculate_total_score
 
 
@@ -61,7 +61,16 @@ class BacktestService:
         events = self.event_service.get_events_for_date(current_date)
         event_adjustment, _ = calculate_event_adjustment(current_date, events)
 
-        total = calculate_total_score(technical_score, macro_score, event_adjustment)
+        ma500, ma1000 = calculate_ultra_long_mas(price_history)
+        current_price = price_history[-1][1] if price_history else None
+        total = calculate_total_score(
+            technical_score,
+            macro_score,
+            event_adjustment,
+            current_price=current_price,
+            ma500=ma500,
+            ma1000=ma1000,
+        )
         return total
 
     def _compute_max_drawdown(self, values: List[float]) -> float:

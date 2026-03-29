@@ -1,4 +1,18 @@
-import { Card, CardContent, Stack, Typography, Box, Button, useTheme, alpha, Tooltip, Divider } from '@mui/material'
+import {
+  Card,
+  CardContent,
+  Stack,
+  Typography,
+  Box,
+  Button,
+  useTheme,
+  alpha,
+  Tooltip,
+  Divider,
+  Alert,
+  Chip,
+  Skeleton,
+} from '@mui/material'
 import { darken } from '@mui/material/styles'
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward'
 import type { TooltipTexts } from '../tooltipTexts'
@@ -14,6 +28,10 @@ interface Props {
   onShowDetails: () => void
   expanded: boolean
   tooltips: TooltipTexts
+  status?: 'loading' | 'ready' | 'degraded' | 'error' | 'refreshing'
+  statusMessage?: string
+  onRetry?: () => void
+  isRetrying?: boolean
 }
 
 function SimpleAlertCard({
@@ -23,10 +41,16 @@ function SimpleAlertCard({
   onShowDetails,
   expanded,
   tooltips,
+  status = 'ready',
+  statusMessage,
+  onRetry,
+  isRetrying = false,
 }: Props) {
   const theme = useTheme()
   const isDark = theme.palette.mode === 'dark'
-  const alert = getAlertState(scores?.total)
+  const showConfirmed = status === 'ready' || status === 'refreshing'
+  const totalScore = scores?.total
+  const alert = getAlertState(showConfirmed ? totalScore : undefined)
   const cardBackground = isDark ? '#2b2f38' : darken(alert.color, 0.04)
   const borderColor = isDark ? 'rgba(255,255,255,0.08)' : alpha(theme.palette.text.primary, 0.1)
   const textPrimary = isDark ? '#ffffff' : 'rgba(0, 0, 0, 0.85)'
@@ -44,27 +68,86 @@ function SimpleAlertCard({
     >
       <CardContent>
         <Stack spacing={2.25}>
+          {status === 'degraded' && (
+            <Alert
+              severity="warning"
+              action={
+                onRetry ? (
+                  <Button color="inherit" size="small" onClick={onRetry}>
+                    再取得
+                  </Button>
+                ) : undefined
+              }
+            >
+              <Typography variant="subtitle2" component="div">
+                ⚠ 一部データ取得中
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {statusMessage ?? '価格履歴の取得が未完了のため、現在のスコアは参考値です。'}
+              </Typography>
+              {isRetrying && (
+                <Typography variant="caption" color="text.secondary">
+                  再試行中…
+                </Typography>
+              )}
+            </Alert>
+          )}
+          {status === 'error' && (
+            <Alert
+              severity="error"
+              action={
+                onRetry ? (
+                  <Button color="inherit" size="small" onClick={onRetry}>
+                    再取得
+                  </Button>
+                ) : undefined
+              }
+            >
+              <Typography variant="subtitle2" component="div">
+                ❌ データ取得に失敗しました
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {statusMessage ?? '時間をおいて再取得してください。'}
+              </Typography>
+            </Alert>
+          )}
           <Tooltip title={tooltips.simple.alert} arrow>
             <Typography variant="overline" color={textSecondary}>
               シンプル・アラート
             </Typography>
           </Tooltip>
           <Stack direction="row" alignItems="center" spacing={2.25}>
-            <AnimatedSignalLight decision={alert.decision} />
+            {status === 'loading' ? (
+              <Skeleton variant="circular" width={40} height={40} />
+            ) : (
+              <AnimatedSignalLight decision={alert.decision} />
+            )}
             <Stack spacing={0.75} flex={1}>
-              <Typography variant="h6" fontWeight={700} color={textPrimary}>
-                {alert.title}
-              </Typography>
-              <Typography variant="body2" color={textSecondary}>
-                {alert.reaction}
-              </Typography>
+              {status === 'loading' ? (
+                <>
+                  <Skeleton variant="text" width="60%" />
+                  <Skeleton variant="text" width="80%" />
+                </>
+              ) : (
+                <>
+                  <Typography variant="h6" fontWeight={700} color={textPrimary}>
+                    {showConfirmed ? alert.title : '未確定データを確認中'}
+                  </Typography>
+                  <Typography variant="body2" color={textSecondary}>
+                    {showConfirmed ? alert.reaction : 'データが揃い次第、確定スコアを表示します。'}
+                  </Typography>
+                </>
+              )}
             </Stack>
+            {status === 'refreshing' && <Chip size="small" color="info" label="更新中…" />}
           </Stack>
           <Typography variant="body1" color={textPrimary}>
-            {alert.message}
+            {status === 'loading' ? '⏳ 計算中…' : showConfirmed ? alert.message : '現在のスコアは未確定です。'}
           </Typography>
           <Typography variant="body2" color={textSecondary}>
-            {zoneText ?? getScoreZoneText(scores?.total)}
+            {status === 'loading'
+              ? '計算完了までしばらくお待ちください。'
+              : zoneText ?? getScoreZoneText(showConfirmed ? totalScore : undefined)}
           </Typography>
           {highlights.length > 0 && (
             <Box

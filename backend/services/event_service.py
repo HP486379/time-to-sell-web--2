@@ -62,7 +62,8 @@ class EventService:
         month_ref = today.replace(day=1)
         next_month = (month_ref.replace(day=28) + timedelta(days=4)).replace(day=1)
         candidates = [month_ref, next_month]
-        events: List[Dict] = []
+        events: List[EventItem] = []
+
         for month in candidates:
             events.extend(
                 [
@@ -92,4 +93,5 @@ class EventService:
         return sorted(windowed, key=lambda e: e["date"])
 
     def get_events(self) -> List[Dict]:
+        """今日を基準にイベントを取得（既存 API 互換用）"""
         return self.get_events_for_date(date.today())
