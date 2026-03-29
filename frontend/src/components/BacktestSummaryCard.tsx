@@ -21,22 +21,12 @@ const currencyFmt = new Intl.NumberFormat('ja-JP', {
 })
 
 const formatCurrency = (v: unknown) => {
-  const num =
-    typeof v === 'number'
-      ? v
-      : typeof v === 'string'
-      ? Number(v)
-      : NaN
+  const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
   return Number.isFinite(num) ? currencyFmt.format(num) : '-'
 }
 
 const formatPct = (v: unknown) => {
-  const num =
-    typeof v === 'number'
-      ? v
-      : typeof v === 'string'
-      ? Number(v)
-      : NaN
+  const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
   return Number.isFinite(num) ? `${num.toFixed(2)} %` : '-'
 }
 
@@ -80,19 +70,19 @@ export const BacktestSummaryCard: React.FC<{ indexType: IndexType }> = ({ indexT
         {result ? (
           <Stack spacing={0.5}>
             <Typography variant="body2">
-              最終資産: <strong>{formatCurrency(result.final_value)}</strong>
+              最終資産: <strong>{formatCurrency(result.summary.final_equity)}</strong>
             </Typography>
             <Typography variant="body2">
-              単純ホールド: <strong>{formatCurrency(result.buy_and_hold_final)}</strong>
+              単純ホールド: <strong>{formatCurrency(result.summary.hold_equity)}</strong>
             </Typography>
             <Typography variant="body2">
-              トータルリターン: <strong>{formatPct(result.total_return_pct)}</strong>
+              トータルリターン: <strong>{formatPct(result.summary.total_return)}</strong>
             </Typography>
             <Typography variant="body2">
-              最大ドローダウン: <strong>{formatPct(result.max_drawdown_pct)}</strong>
+              最大ドローダウン: <strong>{formatPct(result.summary.max_drawdown)}</strong>
             </Typography>
             <Typography variant="body2">
-              売買回数: <strong>{result.trade_count ?? '-'} 回</strong>
+              売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
             </Typography>
           </Stack>
         ) : (

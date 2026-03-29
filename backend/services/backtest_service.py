@@ -166,4 +166,5 @@ class BacktestService:
             "trades": trades,
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
+            "price_history": price_history,
         }

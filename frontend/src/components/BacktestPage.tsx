@@ -36,6 +36,10 @@ const pctFmt = (v: unknown) => {
   const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
   return Number.isFinite(num) ? `${num.toFixed(2)} %` : '-'
 }
+const currencySafe = (v: unknown) => {
+  const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
+  return Number.isFinite(num) ? currencyFmt.format(num) : '-'
+}
 
 export function BacktestPage() {
   const [params, setParams] = useState<BacktestRequest>(DEFAULT_REQUEST)
@@ -60,9 +64,12 @@ export function BacktestPage() {
     }
   }
 
-  const chartData = (result?.portfolio_history || []).map((p, idx) => ({
-    ...p,
-    buyHold: result?.buy_hold_history?.[idx]?.value ?? null,
+  const chartData = (result?.equity_curve || []).map((point) => ({
+    date: point.date,
+    close: point.close,
+    ma20: point.ma20 ?? null,
+    ma60: point.ma60 ?? null,
+    ma200: point.ma200 ?? null,
   }))
 
   return (
@@ -174,19 +181,19 @@ export function BacktestPage() {
             {result ? (
               <Stack spacing={0.5}>
                 <Typography variant="body2">
-                  最終資産: <strong>{currencyFmt.format(result.final_value)}</strong>
+                  最終資産: <strong>{currencySafe(result.summary.final_equity)}</strong>
                 </Typography>
                 <Typography variant="body2">
-                  単純ホールド: <strong>{currencyFmt.format(result.buy_and_hold_final)}</strong>
+                  単純ホールド: <strong>{currencySafe(result.summary.hold_equity)}</strong>
                 </Typography>
                 <Typography variant="body2">
-                  トータルリターン: <strong>{pctFmt(result.total_return_pct)}</strong>
+                  トータルリターン: <strong>{pctFmt(result.summary.total_return)}</strong>
                 </Typography>
                 <Typography variant="body2">
-                  最大ドローダウン: <strong>{pctFmt(result.max_drawdown_pct)}</strong>
+                  最大ドローダウン: <strong>{pctFmt(result.summary.max_drawdown)}</strong>
                 </Typography>
                 <Typography variant="body2">
-                  売買回数: <strong>{result.trade_count ?? '-'} 回</strong>
+                  売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
                 </Typography>
               </Stack>
             ) : (
@@ -197,9 +204,9 @@ export function BacktestPage() {
           </CardContent>
         </Card>
 
-        {result?.portfolio_history && result.portfolio_history.length > 0 && (
+        {result?.equity_curve && result.equity_curve.length > 0 && (
           <Card>
-            <CardHeader title="資産推移" />
+            <CardHeader title="価格推移" />
             <CardContent>
               <ResponsiveContainer width="100%" height={320}>
                 <LineChart data={chartData} margin={{ left: 8, right: 8 }}>
@@ -214,8 +221,10 @@ export function BacktestPage() {
                     labelFormatter={(d) => dayjs(d as string).format('YYYY-MM-DD')}
                   />
                   <Legend />
-                  <Line type="monotone" dataKey="value" name="戦略" stroke="#7c3aed" dot={false} />
-                  <Line type="monotone" dataKey="buyHold" name="ホールド" stroke="#10b981" dot={false} />
+                  <Line type="monotone" dataKey="close" name="終値" stroke="#7c3aed" dot={false} />
+                  <Line type="monotone" dataKey="ma20" name="MA20" stroke="#0ea5e9" dot={false} />
+                  <Line type="monotone" dataKey="ma60" name="MA60" stroke="#10b981" dot={false} />
+                  <Line type="monotone" dataKey="ma200" name="MA200" stroke="#f97316" dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </CardContent>

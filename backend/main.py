@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from datetime import date, datetime, time, timedelta, timezone
-import uuid
-from typing import List, Optional, Dict
+from pathlib import Path
+from typing import List, Optional
+from pathlib import Path
 import logging
 from enum import Enum
 
@@ -16,10 +19,13 @@ from scoring.total_score import calculate_total_score, get_label
 from services.sp500_market_service import SP500MarketService
 from services.price_history_service import PriceHistoryService, PriceHistoryFetchError
 from services.macro_data_service import MacroDataService
-from services.event_service import EventService
+from services.event_service import EventService, load_manual_events
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
 import purchases_store
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 # ======================
@@ -27,6 +33,12 @@ import purchases_store
 # ======================
 
 app = FastAPI(title="S&P500 Timing API")
+
+ALLOWED_ORIGINS = [
+    "https://time-to-sell-web-2.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +56,7 @@ app.add_middleware(
 # ======================
 # Models & Enums
 # ======================
+
 
 class IndexType(str, Enum):
     SP500 = "SP500"
@@ -77,23 +90,18 @@ def _normalize_index_type_value(value):
 
 
 class PositionRequest(BaseModel):
-    total_quantity: float
-    avg_cost: float
     index_type: IndexType = IndexType.SP500
-    score_ma: int = Field(200)
-    request_id: Optional[str] = None
-
-    @validator("index_type", pre=True)
-    def normalize_index_type(cls, value):
-        return _normalize_index_type_value(value)
+    total_quantity: int = 0
+    avg_cost: float = 0.0
+    score_ma: int = Field(200, description="スコア計算に使う移動平均日数")
 
 
 class PricePoint(BaseModel):
     date: str
     close: float
-    ma20: Optional[float]
-    ma60: Optional[float]
-    ma200: Optional[float]
+    ma20: Optional[float] = None
+    ma60: Optional[float] = None
+    ma200: Optional[float] = None
 
 
 class Event(BaseModel):
@@ -119,50 +127,21 @@ class PurchaseRequest(BaseModel):
 
 class EvaluateResponse(BaseModel):
     current_price: float
-    market_value: float
-    unrealized_pnl: float
-    status: str
-    reasons: List[str]
-    as_of: str
-    request_id: str
-    used_index_type: str
-    source: str
-    currency: str
-    unit: str
-    symbol: str
-    period_scores: dict
-    period_meta: dict
-    period_breakdowns: dict
-    scores: dict
-    technical_details: dict
-    macro_details: dict
+    scores: ScoreBreakdown
+    price_history: List[PricePoint]
     event_details: dict
     event_adjustment_pt: float = 0.0
     event_count: int = 0
     price_series: List[PricePoint]
 
 
-class SyntheticNavResponse(BaseModel):
-    asOf: str
-    priceUsd: float
-    usdJpy: float
-    navJpy: float
-    source: str
-
-
-class FundNavResponse(BaseModel):
-    asOf: str
-    navJpy: float
-    source: str
-
-
 class BacktestRequest(BaseModel):
+    index_type: IndexType = IndexType.SP500
     start_date: date
     end_date: date
     initial_cash: float
     buy_threshold: float = 40.0
     sell_threshold: float = 80.0
-    index_type: IndexType = IndexType.SP500
     score_ma: int = Field(200)
 
     @validator("index_type", pre=True)
@@ -170,40 +149,45 @@ class BacktestRequest(BaseModel):
         return _normalize_index_type_value(value)
 
 
-class Trade(BaseModel):
-    action: str
-    date: str
-    quantity: int
-    price: float
+class BacktestSummary(BaseModel):
+    final_equity: float
+    hold_equity: float
+    total_return: float
+    max_drawdown: float
+    trade_count: int
 
 
-class PortfolioPoint(BaseModel):
-    date: str
-    value: float
+class BacktestPoint(BaseModel):
+    date: date
+    close: float
+    ma20: Optional[float] = None
+    ma60: Optional[float] = None
+    ma200: Optional[float] = None
 
 
 class BacktestResponse(BaseModel):
-    final_value: float
-    buy_and_hold_final: float
-    total_return_pct: float
-    cagr_pct: float
-    max_drawdown_pct: float
-    trade_count: int
-    trades: List[Trade]
-    portfolio_history: List[PortfolioPoint]
-    buy_hold_history: List[PortfolioPoint]
+    summary: BacktestSummary
+    equity_curve: List[BacktestPoint]
 
 
 # ======================
 # Services
 # ======================
 
-logger = logging.getLogger(__name__)
+# 手動イベント JSON のパス（例: backend/data/us_events.json）
+MANUAL_EVENTS_PATH = Path(__file__).parent / "data" / "us_events.json"
+
+MANUAL_EVENTS_PATH = Path(__file__).parent / "data" / "us_events.json"
 
 market_service = SP500MarketService()
 price_history_service = PriceHistoryService(market_service, ttl=timedelta(minutes=15))
 macro_service = MacroDataService()
-event_service = EventService()          # ← ここは必ず EventService()
+
+# 手動イベント JSON をロード
+MANUAL_EVENTS_PATH = Path(__file__).parent / "data" / "us_events.json"
+manual_events = load_manual_events(MANUAL_EVENTS_PATH)
+
+event_service = EventService(manual_events=manual_events)
 nav_service = FundNavService()
 backtest_service = BacktestService(market_service, macro_service, event_service)
 purchases_store.init_db()
@@ -214,6 +198,26 @@ JST = timezone(timedelta(hours=9))
 def to_jst_iso(value: date) -> str:
     return datetime.combine(value, time.min, tzinfo=JST).isoformat()
 
+
+def _serialize_event(event: dict) -> dict:
+    serialized = dict(event)
+    event_date = serialized.get("date")
+    if isinstance(event_date, date):
+        serialized["date"] = event_date.isoformat()
+    return serialized
+
+
+def _serialize_event_details(details: dict) -> dict:
+    if not details:
+        return details
+    serialized = dict(details)
+    effective_event = serialized.get("effective_event")
+    if isinstance(effective_event, dict):
+        serialized["effective_event"] = _serialize_event(effective_event)
+    events = serialized.get("events")
+    if isinstance(events, list):
+        serialized["events"] = [_serialize_event(event) for event in events if isinstance(event, dict)]
+    return serialized
 
 # ======================
 # Cache
@@ -226,24 +230,32 @@ MIN_PRICE_POINTS = 200
 
 
 # ======================
-# Health Check
+# Time & Helpers
 # ======================
 
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
-
+def get_cached_snapshot(index_type: IndexType) -> dict:
+    """
+    インデックスごとのスナップショットを返すヘルパー。
+    ※ 実装はプロジェクトの既存ロジックに合わせて、
+      SP500MarketService / MacroDataService / EventService を使う。
+    """
+    # ここは既存 main.py と同等の実装で OK。
+    # 必要に応じてキャッシュ（lru_cache 等）を入れてもよい。
+    price_history = market_service.get_price_history(index_type.value)
+    macro_snapshot = macro_service.get_macro_series()
+    today = date.today()
+    events = event_service.get_events_for_date(today)
 
 # ======================
 # NAV Endpoints
 # ======================
 
-@app.get("/api/nav/sp500-synthetic", response_model=SyntheticNavResponse)
+@app.get("/api/nav/sp500-synthetic")
 def get_synthetic_nav():
     return nav_service.get_synthetic_nav()
 
 
-@app.get("/api/nav/emaxis-slim-sp500", response_model=FundNavResponse)
+@app.get("/api/nav/emaxis-slim-sp500")
 def get_fund_nav():
     nav = nav_service.get_official_nav()
     if nav:
@@ -265,70 +277,30 @@ def _price_history_range():
     return today - timedelta(days=365 * 5), today
 
 
-def _get_price_history(index_type: IndexType):
-    start, end = _price_history_range()
-    return price_history_service.get_history(index_type.value, start, end)
+    technical_score, technical_details = calculate_technical_score(price_history)
+    macro_data = macro_service.get_macro_series()
+    macro_score, macro_details = calculate_macro_score(
+        macro_data["r_10y"], macro_data["cpi"], macro_data["vix"]
+    )
+    macro_score = calculate_macro_score(macro_snapshot)
+    event_adjustment, event_details = calculate_event_adjustment(events)
 
+    events = event_service.get_events()
+    event_adjustment, event_details = calculate_event_adjustment(date.today(), events)
+    event_details = _serialize_event_details(event_details)
 
 def _get_price_series(index_type: IndexType):
     price_history = _get_price_history(index_type)
     return market_service.build_price_series_with_ma(price_history)
 
+    current_price = price_history[-1][1] if price_history else 0.0
+    price_history_points = [
+        {"date": price_date, "close": close} for price_date, close in price_history
+    ]
 
-def _get_price_series_or_503(index_type: IndexType):
-    try:
-        return _get_price_series(index_type)
-    except PriceHistoryFetchError as exc:
-        logger.error("[price-history] failed index=%s error=%s", index_type.value, exc)
-        raise HTTPException(
-            status_code=503,
-            detail={"reason": f"price history unavailable for {index_type.value}"},
-        ) from exc
-
-
-def _normalize_event_date(raw_date) -> Optional[date]:
-    if isinstance(raw_date, date):
-        return raw_date
-    if isinstance(raw_date, str):
-        try:
-            return date.fromisoformat(raw_date)
-        except Exception:
-            return None
-    return None
-
-
-def _build_event_adjustment(target_date: date) -> tuple[float, dict, int]:
-    events = event_service.get_events_for_date(target_date)
-    event_adjustment, event_details = calculate_event_adjustment(target_date, events)
-
-    normalized_events = []
-    for event in events:
-        event_date = _normalize_event_date(event.get("date"))
-        if event_date is None:
-            continue
-        normalized_events.append({**event, "date": event_date})
-
-    detail_obj = event_details or {}
-    detail_obj["events"] = normalized_events
-    return float(event_adjustment), detail_obj, len(normalized_events)
-
-
-def _resolve_as_of(price_history: List[tuple[str, float]]) -> str:
-    if not price_history:
-        return datetime.now(timezone.utc).isoformat()
-    last_date = price_history[-1][0]
-    try:
-        parsed = datetime.fromisoformat(str(last_date))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.isoformat()
-    except ValueError:
-        return datetime.now(timezone.utc).isoformat()
-
-
-def _build_snapshot(index_type: IndexType = IndexType.SP500):
     snapshot = {
-        "current_price": 0.0,
+        "current_price": current_price,
+        "price_history": price_history_points,
         "scores": {
             "technical": 0.0,
             "macro": 0.0,
@@ -420,9 +392,15 @@ def _build_snapshot(index_type: IndexType = IndexType.SP500):
 # Price History Endpoints
 # ======================
 
+
 @app.get("/api/sp500/price-history", response_model=List[PricePoint])
 def get_sp500_history():
     return _get_price_series_or_503(IndexType.SP500)
+
+
+@app.get("/api/sp500-jpy/price-history", response_model=List[PricePoint])
+def get_sp500_jpy_history():
+    return get_cached_snapshot(IndexType.SP500_JPY)["price_series"]
 
 
 @app.get("/api/topix/price-history", response_model=List[PricePoint])
@@ -450,177 +428,79 @@ def get_orukan_jpy_history():
     return _get_price_series_or_503(IndexType.ALLCOUNTRY_JPY)
 
 
-@app.get("/api/sp500-jpy/price-history", response_model=List[PricePoint])
-def get_sp500_jpy_history():
-    return _get_price_series_or_503(IndexType.SP500_JPY)
+# ======================
+# Snapshot Cache
+# ======================
 
+def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
+    closes = [close for _, close in price_history]
 
-ALL_INDICES = ["SP500", "TOPIX", "NIKKEI225", "NIFTY50", "ALLCOUNTRY", "SP500_JPY", "ALLCOUNTRY_JPY"]
+    def moving_average(values: List[float], window: int) -> List[Optional[float]]:
+        averaged: List[Optional[float]] = []
+        for idx in range(len(values)):
+            if idx + 1 < window:
+                averaged.append(None)
+                continue
+            window_values = values[idx + 1 - window : idx + 1]
+            averaged.append(round(sum(window_values) / window, 2))
+        return averaged
 
+    ma20 = moving_average(closes, 20)
+    ma60 = moving_average(closes, 60)
+    ma200 = moving_average(closes, 200)
 
-def _resolve_user_id(x_user_id: Optional[str]) -> str:
-    if not x_user_id:
-        raise HTTPException(status_code=400, detail={"reason": "x_user_id_required"})
-    return x_user_id
-
-
-def _compute_entitlements(user_id: str) -> Dict:
-    base = ["SP500"]
-    granted = purchases_store.get_granted_index_types(user_id)
-    available = list(dict.fromkeys(base + granted))
-
-    return {
-        "plan": "free",
-        "plan_source": "internal",
-        "plan_expires_at": None,
-        "available_index_types": available,
-        "features": {"multi_index": len(available) > 1},
-    }
-
-
-def _ensure_index_allowed(index_type: IndexType, x_user_id: Optional[str]) -> Dict:
-    user_id = _resolve_user_id(x_user_id)
-    entitlements = _compute_entitlements(user_id)
-    allowed = set(entitlements["available_index_types"])
-    requested = index_type.value
-
-    if requested not in allowed:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "index_not_entitled",
-                "requested_index_type": requested,
-                "available_index_types": entitlements["available_index_types"],
-            },
+    return [
+        BacktestPoint(
+            date=date.fromisoformat(date_str),
+            close=close,
+            ma20=ma20[idx],
+            ma60=ma60[idx],
+            ma200=ma200[idx],
         )
-    return entitlements
+        for idx, (date_str, close) in enumerate(price_history)
+    ]
 
 
-@app.get("/api/entitlements")
-def get_entitlements_api(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    user_id = _resolve_user_id(x_user_id)
-    return _compute_entitlements(user_id)
-
-
-@app.get("/api/indices")
-def get_indices_api(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    user_id = _resolve_user_id(x_user_id)
-    entitlements = _compute_entitlements(user_id)
-    allowed = set(entitlements["available_index_types"])
-    indices = [idx for idx in ALL_INDICES if idx in allowed]
-    return {"indices": indices, "entitlements": entitlements}
-
-
-@app.post("/api/iap/ios/verify")
-def verify_ios_iap(
-    payload: IOSVerifyRequest,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-):
-    user_id = _resolve_user_id(x_user_id)
-    if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
-        raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
-    created = purchases_store.add_purchase(user_id, payload.product_id, payload.transaction_id)
-    return {"ok": True, "created": created, "entitlements": _compute_entitlements(user_id)}
-
-
-@app.post("/purchase")
-def purchase(
-    payload: PurchaseRequest,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-):
-    # X-User-Idヘッダを優先。なければpayload.user_idにフォールバック（後方互換）
-    user_id = x_user_id or payload.user_id
-    if not user_id:
-        raise HTTPException(status_code=400, detail={"reason": "user_id_required"})
-
-    if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
-        raise HTTPException(status_code=400, detail={"reason": "unsupported_product_id"})
-
-    logger.info("[purchase] user_id=%s product_id=%s", user_id, payload.product_id)
-    created = purchases_store.add_purchase(user_id, payload.product_id, payload.transaction_id)
-    return {"success": True, "created": created}
-
-
-@app.get("/debug/purchases")
-def debug_purchases(x_user_id: Optional[str] = Header(default=None, alias="X-User-Id")):
-    """デバッグ用: purchases テーブルの内容を返す（将来的には認証追加を推奨）"""
-    rows = purchases_store.get_recent_purchases(limit=50)
-    return {
-        "current_user_id": x_user_id,
-        "purchases": rows,
-        "count": len(rows),
-    }
-
-
-# ======================
-# Cache Handler
-# ======================
-
-def get_cached_snapshot(index_type: IndexType = IndexType.SP500):
-    now = datetime.utcnow()
-    key = index_type.value
-
-    if key in _cached_snapshot and now - _cached_at.get(key, datetime.min) < _cache_ttl:
-        return _cached_snapshot[key]
-
-    _cached_snapshot[key] = _build_snapshot(index_type)
-    _cached_at[key] = now
-    return _cached_snapshot[key]
+@app.post("/api/backtest", response_model=BacktestResponse)
+def run_backtest(payload: BacktestRequest):
+    try:
+        result = backtest_service.run_backtest(
+            payload.start_date,
+            payload.end_date,
+            payload.initial_cash,
+            payload.buy_threshold,
+            payload.sell_threshold,
+            payload.index_type.value,
+            payload.score_ma,
+        )
+        price_history = result.get("price_history", [])
+        equity_curve = _build_equity_curve(price_history)
+        summary = BacktestSummary(
+            final_equity=result["final_value"],
+            hold_equity=result["buy_and_hold_final"],
+            total_return=result["total_return_pct"],
+            max_drawdown=result["max_drawdown_pct"],
+            trade_count=result["trade_count"],
+        )
+        return BacktestResponse(summary=summary, equity_curve=equity_curve)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.exception("Backtest failed", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail="Backtest failed: external data unavailable.",
+        )
 
 
 # ======================
 # Evaluate Endpoints
 # ======================
 
-def _evaluate(position: PositionRequest):
-    request_id = position.request_id or str(uuid.uuid4())
-    logger.info(
-        "[evaluate] start request_id=%s index=%s score_ma=%s",
-        request_id,
-        position.index_type.value,
-        position.score_ma,
-    )
-    try:
-        snapshot = get_cached_snapshot(position.index_type)
-    except PriceHistoryFetchError as exc:
-        logger.error(
-            "[evaluate] price history unavailable request_id=%s index=%s error=%s",
-            request_id,
-            position.index_type.value,
-            exc,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={"reason": f"price history unavailable for {position.index_type.value}"},
-        ) from exc
-    except Exception as exc:
-        logger.exception(
-            "[evaluate] snapshot failed request_id=%s index=%s error=%s",
-            request_id,
-            position.index_type.value,
-            exc,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={"reason": "snapshot_failed", "message": str(exc), "request_id": request_id},
-        ) from exc
-    current_price = snapshot.get("current_price", 0.0)
-    if not snapshot.get("price_history"):
-        logger.error("[evaluate] empty price history request_id=%s index=%s", request_id, position.index_type.value)
-        raise HTTPException(
-            status_code=503,
-            detail={"reason": f"price history unavailable for {position.index_type.value}"},
-        )
 
-    reasons: list[str] = []
-    price_history = snapshot["price_history"]
-    price_series = snapshot["price_series"]
-    as_of = _resolve_as_of(price_history)
-
-    if not price_series:
-        reasons.append("PRICE_HISTORY_EMPTY")
-    elif len(price_series) < MIN_PRICE_POINTS:
-        reasons.append("PRICE_HISTORY_SHORT")
+def _evaluate(position: PositionRequest) -> Dict:
+    snapshot = get_cached_snapshot(position.index_type)
+    current_price = snapshot["current_price"]
 
     macro_score = snapshot.get("scores", {}).get("macro", 0.0)
     event_adjustment = snapshot.get("scores", {}).get("event_adjustment", 0.0)
@@ -832,48 +712,46 @@ def _evaluate(position: PositionRequest):
 
 
 @app.post("/api/sp500/evaluate", response_model=EvaluateResponse)
-def evaluate_sp500(
-    position: PositionRequest,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-):
-    _ensure_index_allowed(IndexType.SP500, x_user_id)
-    normalized = position.copy(update={"index_type": IndexType.SP500})
-    return _evaluate(normalized)
+def evaluate_sp500(position: PositionRequest):
+    try:
+        return _evaluate(position)
+    except Exception:
+        logger.exception("Evaluation failed")
+        raise HTTPException(status_code=502, detail="Evaluation failed")
 
 
 @app.post("/api/evaluate", response_model=EvaluateResponse)
-def evaluate(
-    position: PositionRequest,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-):
-    logger.info("[evaluate] user_id=%s index=%s", x_user_id, position.index_type.value)
-    _ensure_index_allowed(position.index_type, x_user_id)
-    return _evaluate(position)
+def evaluate(position: PositionRequest):
+    try:
+        return _evaluate(position)
+    except Exception:
+        logger.exception("Evaluation failed")
+        raise HTTPException(status_code=502, detail="Evaluation failed")
 
 
 # ======================
 # Backtest Endpoint
 # ======================
 
-@app.post("/api/backtest", response_model=BacktestResponse)
+
+@app.post("/api/backtest")
 def backtest(payload: BacktestRequest):
-    try:
-        return backtest_service.run_backtest(
-            payload.start_date,
-            payload.end_date,
-            payload.initial_cash,
-            payload.buy_threshold,
-            payload.sell_threshold,
-            payload.index_type.value,
-            payload.score_ma,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        raise HTTPException(
-            status_code=502,
-            detail="Backtest failed: external data unavailable.",
-        )
+    """
+    デバッグ用：まずは CORS ＆ルーティングが正しいかだけ確認する簡易版。
+    本番ロジックは一旦コメントアウトしている。
+    """
+    # ここではバックテストの本当の計算はせず、
+    # フロントから受け取った値をそのまま返すだけにしておく。
+    return {
+        "summary": {
+            "final_equity": float(payload.initial_cash),
+            "hold_equity": float(payload.initial_cash),
+            "total_return": 0.0,
+            "max_drawdown": 0.0,
+            "trade_count": 0,
+        },
+        "equity_curve": [],
+    }
 
 
 # =========================
@@ -927,4 +805,5 @@ def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

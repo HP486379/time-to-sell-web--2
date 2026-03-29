@@ -10,13 +10,23 @@ export interface BacktestRequest {
   score_ma: number
 }
 
-export interface BacktestResult {
-  final_value: number
-  buy_and_hold_final: number
-  total_return_pct: number
-  max_drawdown_pct: number
+export interface BacktestSummary {
+  final_equity: number
+  hold_equity: number
+  total_return: number
+  max_drawdown: number
   trade_count: number
-  cagr_pct?: number
-  portfolio_history?: { date: string; value: number }[]
-  buy_hold_history?: { date: string; value: number }[]
+}
+
+export interface BacktestPoint {
+  date: string
+  close: number
+  ma20?: number | null
+  ma60?: number | null
+  ma200?: number | null
+}
+
+export interface BacktestResult {
+  summary: BacktestSummary
+  equity_curve: BacktestPoint[]
 }
