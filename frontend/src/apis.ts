@@ -100,7 +100,7 @@ export async function syncPurchasesToBackend(
       entitlement.transactionIdentifier ??
       `${Date.now()}-${productId}`
 
-    const res = await apiFetch('/purchase', {
+    const res = await apiFetch('/api/purchase', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
