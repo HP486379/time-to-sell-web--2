@@ -17,7 +17,7 @@ from scoring.total_score import calculate_total_score, get_label
 from services.sp500_market_service import SP500MarketService
 from services.price_history_service import PriceHistoryService, PriceHistoryFetchError
 from services.macro_data_service import MacroDataService
-from services.event_service import EventService, load_manual_events
+from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
 import purchases_store
@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-# ====================== 
+# ======================
 # FastAPI & CORS Config
-# ====================== 
+# ======================
 
 app = FastAPI(title="S&P500 Timing API")
 
@@ -51,10 +51,9 @@ app.add_middleware(
 )
 
 
-# ====================== 
+# ======================
 # Models & Enums
-# ====================== 
-
+# ======================
 
 class IndexType(str, Enum):
     SP500 = "SP500"
@@ -156,9 +155,9 @@ class BacktestResponse(BaseModel):
     equity_curve: List[BacktestPoint]
 
 
-# ====================== 
+# ======================
 # Services
-# ====================== 
+# ======================
 
 MANUAL_EVENTS_PATH = Path(__file__).parent / "data" / "us_events.json"
 
@@ -166,7 +165,21 @@ market_service = SP500MarketService()
 price_history_service = PriceHistoryService(market_service, ttl=timedelta(minutes=15))
 macro_service = MacroDataService()
 
-manual_events = load_manual_events(MANUAL_EVENTS_PATH)
+# load_manual_events が services.event_service に無い/壊れていても起動できるようにする
+try:
+    from services.event_service import load_manual_events  # noqa: WPS433
+except Exception as exc:  # pragma: no cover
+    logger.warning("load_manual_events import failed: %s", exc)
+
+    def load_manual_events(_path: Path):
+        logger.warning("fallback load_manual_events() used; returning empty list")
+        return []
+
+try:
+    manual_events = load_manual_events(MANUAL_EVENTS_PATH)
+except Exception as exc:  # pragma: no cover
+    logger.warning("loading manual events failed: %s", exc)
+    manual_events = []
 
 event_service = EventService(manual_events=manual_events)
 nav_service = FundNavService()
@@ -197,13 +210,15 @@ def _serialize_event_details(details: dict) -> dict:
         serialized["effective_event"] = _serialize_event(effective_event)
     events = serialized.get("events")
     if isinstance(events, list):
-        serialized["events"] = [_serialize_event(event) for event in events if isinstance(event, dict)]
+        serialized["events"] = [
+            _serialize_event(event) for event in events if isinstance(event, dict)
+        ]
     return serialized
 
 
-# ====================== 
+# ======================
 # Cache
-# ====================== 
+# ======================
 
 _cache_ttl = timedelta(seconds=60)
 _cached_snapshot = {}
@@ -211,9 +226,9 @@ _cached_at: dict[str, datetime] = {}
 MIN_PRICE_POINTS = 200
 
 
-# ====================== 
+# ======================
 # Helpers
-# ====================== 
+# ======================
 
 def _price_history_range():
     today = date.today()
@@ -234,10 +249,25 @@ def _get_price_series_or_503(index_type: IndexType):
 
 def _build_event_adjustment(target: date):
     events = event_service.get_events_for_date(target)
-    event_adjustment, event_details = calculate_event_adjustment(target, events)
-    event_details = _serialize_event_details(event_details)
-    event_count = len(events) if isinstance(events, list) else 0
-    return event_adjustment, event_details, event_count
+    try:
+        result = calculate_event_adjustment(target, events)
+    except TypeError:
+        # 旧シグネチャ互換
+        result = calculate_event_adjustment(events)
+
+    if isinstance(result, tuple):
+        if len(result) == 3:
+            event_adjustment, event_details, event_count = result
+        elif len(result) == 2:
+            event_adjustment, event_details = result
+            event_count = len(events) if isinstance(events, list) else 0
+        else:
+            event_adjustment, event_details, event_count = 0.0, {}, 0
+    else:
+        event_adjustment, event_details, event_count = 0.0, {}, 0
+
+    event_details = _serialize_event_details(event_details if isinstance(event_details, dict) else {})
+    return float(event_adjustment or 0.0), event_details, int(event_count or 0)
 
 
 def get_cached_snapshot(index_type: IndexType) -> dict:
@@ -291,21 +321,18 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         macro_score, macro_details = 0.0, {}
 
     try:
-        target = date.today()
-        if price_history:
-            target = date.fromisoformat(price_history[-1][0])
+        target = date.fromisoformat(price_history[-1][0])
         event_adjustment, event_details, event_count = _build_event_adjustment(target)
     except Exception:
         logger.exception("[snapshot] events calc failed for %s", index_type.value)
         event_adjustment, event_details, event_count = 0.0, {}, 0
 
     ma500, ma1000 = calculate_ultra_long_mas(price_history)
-    guard_price = price_history[-1][1]
     total_score = calculate_total_score(
         technical_score,
         macro_score,
         event_adjustment,
-        current_price=guard_price,
+        current_price=current_price,
         ma500=ma500,
         ma1000=ma1000,
     )
@@ -334,13 +361,14 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
     return snapshot
 
 
-# ====================== 
+# ======================
 # NAV Endpoints
-# ====================== 
+# ======================
 
 @app.get("/api/nav/sp500-synthetic")
 def get_synthetic_nav():
     return nav_service.get_synthetic_nav()
+
 
 @app.get("/api/nav/emaxis-slim-sp500")
 def get_fund_nav():
@@ -355,42 +383,48 @@ def get_fund_nav():
     }
 
 
-# ====================== 
+# ======================
 # Price History Endpoints
-# ====================== 
+# ======================
 
 @app.get("/api/sp500/price-history", response_model=List[PricePoint])
 def get_sp500_history():
     return _get_price_series_or_503(IndexType.SP500)
 
+
 @app.get("/api/sp500-jpy/price-history", response_model=List[PricePoint])
 def get_sp500_jpy_history():
     return _get_price_series_or_503(IndexType.SP500_JPY)
+
 
 @app.get("/api/topix/price-history", response_model=List[PricePoint])
 def get_topix_history():
     return _get_price_series_or_503(IndexType.TOPIX)
 
+
 @app.get("/api/nikkei/price-history", response_model=List[PricePoint])
 def get_nikkei_history():
     return _get_price_series_or_503(IndexType.NIKKEI225)
+
 
 @app.get("/api/nifty50/price-history", response_model=List[PricePoint])
 def get_nifty_history():
     return _get_price_series_or_503(IndexType.NIFTY50)
 
+
 @app.get("/api/orukan/price-history", response_model=List[PricePoint])
 def get_orukan_history():
     return _get_price_series_or_503(IndexType.ALLCOUNTRY)
+
 
 @app.get("/api/orukan-jpy/price-history", response_model=List[PricePoint])
 def get_orukan_jpy_history():
     return _get_price_series_or_503(IndexType.ALLCOUNTRY_JPY)
 
 
-# ====================== 
+# ======================
 # Backtest Endpoints
-# ====================== 
+# ======================
 
 def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
     closes = [close for _, close in price_history]
@@ -453,9 +487,9 @@ def run_backtest(payload: BacktestRequest):
         )
 
 
-# ====================== 
+# ======================
 # Evaluate Endpoints
-# ====================== 
+# ======================
 
 @app.post("/api/sp500/evaluate")
 def evaluate_sp500(position: PositionRequest):
@@ -464,6 +498,7 @@ def evaluate_sp500(position: PositionRequest):
     except Exception:
         logger.exception("Evaluation failed")
         raise HTTPException(status_code=502, detail="Evaluation failed")
+
 
 @app.post("/api/evaluate")
 def evaluate(position: PositionRequest):
@@ -474,9 +509,9 @@ def evaluate(position: PositionRequest):
         raise HTTPException(status_code=502, detail="Evaluation failed")
 
 
-# ====================== 
+# ======================
 # Purchase Endpoint
-# ====================== 
+# ======================
 
 @app.post("/api/purchase")
 def create_purchase(
@@ -493,8 +528,10 @@ def create_purchase(
     if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown product_id: {payload.product_id}. "
-                   f"Valid values: {list(purchases_store.PRODUCT_TO_INDEX.keys())}",
+            detail=(
+                f"Unknown product_id: {payload.product_id}. "
+                f"Valid values: {list(purchases_store.PRODUCT_TO_INDEX.keys())}"
+            ),
         )
 
     try:
@@ -525,7 +562,7 @@ def create_purchase(
 # Events API（デバッグ用）
 # =========================
 
-from datetime import date as dt_date  # ★ date型と引数名の衝突回避のため alias
+from datetime import date as dt_date  # date型と引数名の衝突回避
 
 @app.get("/api/events")
 def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = Query(None)):
@@ -556,15 +593,18 @@ def get_events_api(date: Optional[str] = Query(None), date_str: Optional[str] = 
             if isinstance(d, dt_date):
                 e["date"] = d.isoformat()
 
-        return {"events": events, "target": target.isoformat(), "manual_count": len(event_service.manual_events)}
-
+        return {
+            "events": events,
+            "target": target.isoformat(),
+            "manual_count": len(getattr(event_service, "manual_events", [])),
+        }
     except Exception as e:
         return {"error": str(e)}
 
 
-# ====================== 
+# ======================
 # Debug Endpoints
-# ====================== 
+# ======================
 
 @app.get("/debug/purchases")
 def debug_purchases(limit: int = Query(50, ge=1, le=500)):
@@ -577,9 +617,14 @@ def debug_purchases(limit: int = Query(50, ge=1, le=500)):
         raise HTTPException(status_code=500, detail="Failed to fetch purchases.")
 
 
-# ====================== 
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+
+# ======================
 # Standalone Run
-# ====================== 
+# ======================
 
 if __name__ == "__main__":
     import uvicorn
