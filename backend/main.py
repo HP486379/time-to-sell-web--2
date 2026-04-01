@@ -164,24 +164,7 @@ MANUAL_EVENTS_PATH = Path(__file__).parent / "data" / "us_events.json"
 market_service = SP500MarketService()
 price_history_service = PriceHistoryService(market_service, ttl=timedelta(minutes=15))
 macro_service = MacroDataService()
-
-# load_manual_events が services.event_service に無い/壊れていても起動できるようにする
-try:
-    from services.event_service import load_manual_events  # noqa: WPS433
-except Exception as exc:  # pragma: no cover
-    logger.warning("load_manual_events import failed: %s", exc)
-
-    def load_manual_events(_path: Path):
-        logger.warning("fallback load_manual_events() used; returning empty list")
-        return []
-
-try:
-    manual_events = load_manual_events(MANUAL_EVENTS_PATH)
-except Exception as exc:  # pragma: no cover
-    logger.warning("loading manual events failed: %s", exc)
-    manual_events = []
-
-event_service = EventService(manual_events=manual_events)
+event_service = EventService(manual_events_path=MANUAL_EVENTS_PATH)
 nav_service = FundNavService()
 backtest_service = BacktestService(market_service, macro_service, event_service)
 purchases_store.init_db()
