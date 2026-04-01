@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import date, timedelta
-import json
 import logging
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -22,21 +20,34 @@ class EventService:
         if not self.manual_events_path.exists():
             logger.warning("Manual events file not found: %s", self.manual_events_path)
             return []
+
         try:
             raw = json.loads(self.manual_events_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             logger.exception("Failed to parse manual events JSON: %s", self.manual_events_path)
             return []
+        except Exception:
+            logger.exception("Failed to read manual events JSON: %s", self.manual_events_path)
+            return []
 
-                events: List[Dict] = []
+        if not isinstance(raw, list):
+            logger.warning("Manual events JSON is not a list: %s", self.manual_events_path)
+            return []
+
+        events: List[Dict] = []
         for ev in raw:
             try:
+                if not isinstance(ev, dict):
+                    raise TypeError("event entry is not an object")
+
                 event_date = date.fromisoformat(ev["date"])
                 events.append(
                     {
                         "name": ev["name"],
                         "date": event_date,
                         "importance": int(ev["importance"]),
+                        "source": ev.get("source"),
+                        "description": ev.get("description"),
                     }
                 )
             except (KeyError, ValueError, TypeError):
@@ -47,52 +58,58 @@ class EventService:
     def _compute_third_wednesday(self, target: date) -> date:
         first_day = target.replace(day=1)
         weekday = first_day.weekday()
-        offset = (2 - weekday) % 7
+        offset = (2 - weekday) % 7  # Wednesday = 2
         return first_day + timedelta(days=offset + 14)
 
     def _first_friday(self, target: date) -> date:
         first_day = target.replace(day=1)
         weekday = first_day.weekday()
-        offset = (4 - weekday) % 7
+        offset = (4 - weekday) % 7  # Friday = 4
         return first_day + timedelta(days=offset)
 
-    def _cpi_release_day(self, target: date) -> date:
-        return target.replace(day=10)
+    def get_events_for_date(self, target: date) -> List[Dict]:
+        """
+        指定日のイベント一覧を返す。
+        現時点では manual_events.json の日付一致分に加え、
+        月次の代表イベントを簡易的に補完する。
+        """
+        events: List[Dict] = []
 
-    def _monthly_events_fallback(self, today: date) -> List[Dict]:
-        month_ref = today.replace(day=1)
-        next_month = (month_ref.replace(day=28) + timedelta(days=4)).replace(day=1)
-        candidates = [month_ref, next_month]
-        events: List[EventItem] = []
+        for ev in self.manual_events:
+            ev_date = ev.get("date")
+            if ev_date == target:
+                events.append(
+                    {
+                        "name": ev.get("name"),
+                        "date": ev_date,
+                        "importance": int(ev.get("importance", 1)),
+                        "source": ev.get("source"),
+                        "description": ev.get("description"),
+                    }
+                )
 
-        for month in candidates:
-            events.extend(
-                [
-                    {"name": "FOMC", "importance": 5, "date": self._compute_third_wednesday(month)},
-                    {"name": "CPI", "importance": 4, "date": self._cpi_release_day(month)},
-                    {"name": "Nonfarm Payrolls", "importance": 3, "date": self._first_friday(month)},
-                ]
+        # FOMC（第3水曜の簡易近似）
+        if target == self._compute_third_wednesday(target):
+            events.append(
+                {
+                    "name": "FOMC",
+                    "date": target,
+                    "importance": 3,
+                    "source": "computed",
+                    "description": "Computed third Wednesday event",
+                }
             )
+
+        # 雇用統計（第1金曜の簡易近似）
+        if target == self._first_friday(target):
+            events.append(
+                {
+                    "name": "US Jobs Report",
+                    "date": target,
+                    "importance": 3,
+                    "source": "computed",
+                    "description": "Computed first Friday event",
+                }
+            )
+
         return events
-
-    # ===== パブリック API =====
-
-    def _filter_window(self, events: List[Dict], target: date) -> List[Dict]:
-        """target の前後 [-7, +30] 日に入るイベントだけに絞る."""
-        window_days = 30
-        windowed = [
-            event
-            for event in self.manual_events
-            if -7 <= (event["date"] - target).days <= window_days
-        ]
-        if not windowed:
-            windowed = [
-                event
-                for event in self._monthly_events_fallback(target)
-                if -7 <= (event["date"] - target).days <= window_days
-            ]
-        return sorted(windowed, key=lambda e: e["date"])
-
-    def get_events(self) -> List[Dict]:
-        """今日を基準にイベントを取得（既存 API 互換用）"""
-        return self.get_events_for_date(date.today())
