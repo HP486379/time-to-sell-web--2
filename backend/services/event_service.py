@@ -28,19 +28,20 @@ class EventService:
             logger.exception("Failed to parse manual events JSON: %s", self.manual_events_path)
             return []
 
-        events: List[Dict] = []
+                events: List[Dict] = []
         for ev in raw:
             try:
                 event_date = date.fromisoformat(ev["date"])
-        events.append(
-            {
-                "name": ev["name"],
-                "date": event_date,
-                "importance": int(ev["importance"]),
+                events.append(
+                    {
+                        "name": ev["name"],
+                        "date": event_date,
+                        "importance": int(ev["importance"]),
                     }
                 )
             except (KeyError, ValueError, TypeError):
                 logger.warning("Invalid manual event entry skipped: %s", ev)
+
         return events
 
     def _compute_third_wednesday(self, target: date) -> date:
