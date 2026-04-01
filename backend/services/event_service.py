@@ -31,12 +31,12 @@ class EventService:
         events: List[Dict] = []
         for ev in raw:
             try:
-                event_date = date.fromisoformat(item["date"])
-                events.append(
-                    {
-                        "name": item["name"],
-                        "date": event_date,
-                        "importance": int(item["importance"]),
+                event_date = date.fromisoformat(ev["date"])
+        events.append(
+            {
+                "name": ev["name"],
+                "date": event_date,
+                "importance": int(ev["importance"]),
                     }
                 )
             except (KeyError, ValueError, TypeError):
