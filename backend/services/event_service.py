@@ -40,7 +40,7 @@ class EventService:
                     }
                 )
             except (KeyError, ValueError, TypeError):
-                logger.warning("Invalid manual event entry skipped: %s", item)
+                logger.warning("Invalid manual event entry skipped: %s", ev)
         return events
 
     def _compute_third_wednesday(self, target: date) -> date:
