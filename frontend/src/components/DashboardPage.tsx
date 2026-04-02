@@ -753,8 +753,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   const activeBreakdown = useMemo(() => getActiveBreakdown(viewKey, displayResponse), [viewKey, displayResponse])
   const periodViewScore =
     displayResponse?.period_scores?.[viewKey] ??
-    activeBreakdown?.scores?.period_total ??
-    activeBreakdown?.scores?.total
+    activeBreakdown?.scores?.period_total
   const breakdownTitleMap: Record<ViewKey, string> = {
     short: '短期目線の内訳',
     mid: '中期目線の内訳',
