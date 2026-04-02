@@ -523,6 +523,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
       setEvalStatusMessageMap((prev) => ({ ...prev, [targetIndex]: '' }))
     }
+
   } catch (e: any) {
     if (reqSeq !== evalReqSeqRef.current) return
 
@@ -750,6 +751,10 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   }
   const viewKey = viewKeyMap[viewDays]
   const activeBreakdown = useMemo(() => getActiveBreakdown(viewKey, displayResponse), [viewKey, displayResponse])
+  const periodViewScore =
+    displayResponse?.period_scores?.[viewKey] ??
+    activeBreakdown?.scores?.period_total ??
+    activeBreakdown?.scores?.total
   const breakdownTitleMap: Record<ViewKey, string> = {
     short: '短期目線の内訳',
     mid: '中期目線の内訳',
@@ -844,11 +849,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
             {`${viewLabel}スコア:`}
           </Typography>
           <Typography variant="h6" color="primary.main" fontWeight={700}>
-            {displayResponse?.period_scores?.[viewKey] !== undefined
-              ? displayResponse.period_scores[viewKey].toFixed(1)
-              : displayResponse?.scores?.period_total !== undefined
-                ? displayResponse.scores.period_total.toFixed(1)
-                : '--'}
+            {periodViewScore !== undefined ? periodViewScore.toFixed(1) : '--'}
           </Typography>
         </Stack>
         <Stack spacing={1}>
