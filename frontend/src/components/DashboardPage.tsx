@@ -407,107 +407,146 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   }
 
     const fetchEvaluation = async (
-    targetIndex: IndexType,
-    payload?: Partial<EvaluateRequest>,
-    markPrimary = false,
-    retryCount = 0,
-  ) => {
-    const reqSeq = ++evalReqSeqRef.current
-    const clientRequestId = genRequestId()
-    latestEvalRequestIdRef.current[targetIndex] = clientRequestId
+  targetIndex: IndexType,
+  payload?: Partial<EvaluateRequest>,
+  markPrimary = false,
+  retryCount = 0,
+) => {
+  const reqSeq = ++evalReqSeqRef.current
+  const clientRequestId = genRequestId()
+  latestEvalRequestIdRef.current[targetIndex] = clientRequestId
 
-    try {
-      const apiIndexType = resolveApiIndexType(targetIndex)
-      const body = {
-        ...lastRequest,
-        ...(payload ?? {}),
-        index_type: apiIndexType,
-        request_id: clientRequestId,
+  try {
+    const apiIndexType = resolveApiIndexType(targetIndex)
+    const body = {
+      ...lastRequest,
+      ...(payload ?? {}),
+      index_type: apiIndexType,
+      request_id: clientRequestId,
+    }
+
+    if (markPrimary) {
+      setError(null)
+      if (retryCount === 0) {
+        setEvalStatusMap((prev) => ({
+          ...prev,
+          [targetIndex]: response ? 'refreshing' : 'loading',
+        }))
+      }
+    }
+
+    const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body)
+
+    if (reqSeq !== evalReqSeqRef.current) return
+
+    const responseRequestId =
+      typeof (res.data as EvaluateResponse & { request_id?: unknown }).request_id === 'string'
+        ? ((res.data as EvaluateResponse & { request_id?: string }).request_id as string)
+        : undefined
+
+    const latestRequestId = latestEvalRequestIdRef.current[targetIndex]
+
+    if (responseRequestId && latestRequestId && responseRequestId !== latestRequestId) {
+      console.warn('[EVAL] stale response ignored', {
+        index: targetIndex,
+        expected: latestRequestId,
+        actual: responseRequestId,
+      })
+      return
+    }
+
+    const latestSeries = priceSeriesMap[targetIndex] ?? []
+    const normalized = normalizeEvaluateResponse(res.data, latestSeries)
+    const status = resolveUiStatus(normalized)
+    const reasons = normalized.reasons ?? []
+
+    let uiMessage: string | undefined
+    if (reasons.includes('TECHNICAL_UNAVAILABLE')) {
+      uiMessage = 'MA200計算中（データ不足）'
+    } else if (status === 'degraded') {
+      if (!res.data.price_series || res.data.price_series.length === 0) {
+        uiMessage = '価格履歴の取得が未完了のため、スコアは確定していません。'
+      } else {
+        uiMessage = '一部データ取得中のため、スコアは確定していません。'
+      }
+    }
+
+    if (markPrimary) {
+      setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: status }))
+      setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
+      setEvalStatusMessageMap((prev) => ({ ...prev, [targetIndex]: uiMessage ?? '' }))
+    }
+
+    if (status === 'degraded') {
+      setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
+
+      if (!markPrimary) return
+
+      if (retryCount >= EVAL_RETRY_DELAYS_MS.length) {
+        setIsEvalRetrying(false)
+        setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'degraded' }))
+        return
       }
 
+      setIsEvalRetrying(true)
+      console.warn('[EVAL DEGRADED]', {
+        index: targetIndex,
+        retryCount,
+        reasons,
+        status: normalized.status,
+        scores: normalized.scores,
+      })
+      scheduleEvalRetry(targetIndex, payload, markPrimary, retryCount)
+      return
+    }
+
+    if (status === 'error') {
       if (markPrimary) {
-        setError(null)
-        if (retryCount === 0) {
-          setEvalStatusMap((prev) => ({
-            ...prev,
-            [targetIndex]: response ? 'refreshing' : 'loading',
-          }))
-        }
+        setIsEvalRetrying(false)
+        setError('評価データの取得に失敗しました。再取得してください。')
       }
+      return
+    }
 
-      const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body)
+    setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
 
-      if (reqSeq !== evalReqSeqRef.current) return
+    if (targetIndex === indexType && payload) {
+      setLastRequest((prev) => ({ ...prev, ...payload, index_type: targetIndex }))
+    }
 
-      // request_id が無い / ズレるケースでも、正常レスポンスなら描画を止めない
-      const responseRequestId =
-        typeof (res.data as EvaluateResponse & { request_id?: unknown }).request_id === 'string'
-          ? ((res.data as EvaluateResponse & { request_id?: string }).request_id as string)
-          : undefined
+    if (markPrimary) {
+      setLastUpdated(new Date())
+      setIsEvalRetrying(false)
+      setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'ready' }))
+      setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
+      setEvalStatusMessageMap((prev) => ({ ...prev, [targetIndex]: '' }))
+    }
+  } catch (e: any) {
+    if (reqSeq !== evalReqSeqRef.current) return
 
-      const latestRequestId = latestEvalRequestIdRef.current[targetIndex]
+    const status = e?.response?.status
 
-      if (responseRequestId && latestRequestId && responseRequestId !== latestRequestId) {
-        console.warn('[EVAL] stale response ignored', {
-          index: targetIndex,
-          expected: latestRequestId,
-          actual: responseRequestId,
-        })
-        return
-      }
+    if (markPrimary) {
+      setIsEvalRetrying(false)
+      setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'error' }))
+      setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: ['PRICE_HISTORY_UNAVAILABLE'] }))
+      setEvalStatusMessageMap((prev) => ({
+        ...prev,
+        [targetIndex]: '価格履歴の取得に失敗しました。再取得してください。',
+      }))
+    }
 
-      const latestSeries = priceSeriesMap[targetIndex] ?? []
-      const normalized = normalizeEvaluateResponse(res.data, latestSeries)
-      const status = resolveUiStatus(normalized)
-      const reasons = normalized.reasons ?? []
-
-      let uiMessage: string | undefined
-      if (reasons.includes('TECHNICAL_UNAVAILABLE')) {
-        uiMessage = 'MA200計算中（データ不足）'
-      } else if (status === 'degraded') {
-        if (!res.data.price_series || res.data.price_series.length === 0) {
-          uiMessage = '価格履歴の取得が未完了のため、スコアは確定していません。'
-        } else {
-          uiMessage = '一部データ取得中のため、スコアは確定していません。'
-        }
-      }
-
-      if (markPrimary) {
-        setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: status }))
-        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
-        setEvalStatusMessageMap((prev) => ({ ...prev, [targetIndex]: uiMessage ?? '' }))
-      }
-
-      if (status === 'degraded') {
-        setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
-
-        if (!markPrimary) return
-
-        if (retryCount >= EVAL_RETRY_DELAYS_MS.length) {
-          setIsEvalRetrying(false)
-          setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'degraded' }))
-          return
-        }
-
-        setIsEvalRetrying(true)
-        console.warn('[EVAL DEGRADED]', {
-          index: targetIndex,
-          retryCount,
-          reasons,
-          status: normalized.status,
-          scores: normalized.scores,
-        })
-        scheduleEvalRetry(targetIndex, payload, markPrimary, retryCount)
-        return
-      }
-
-      if (status === 'error') {
-        if (markPrimary) {
-          setIsEvalRetrying(false)
-          setError('評価データの取得に失敗しました。再取得してください。')
-        }
-        return
-      }
+    if (markPrimary) {
+      setError(
+        status === 502 || status === 503
+          ? '価格履歴の取得に失敗しました。再取得してください。'
+          : e.message,
+      )
+    } else {
+      console.error('評価の取得に失敗しました', e)
+    }
+  }
+}
 
       setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
 
