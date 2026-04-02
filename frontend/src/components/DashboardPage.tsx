@@ -371,7 +371,9 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
 
   const resolveApiIndexType = (targetIndex: IndexType) => {
     if (targetIndex === 'sp500_jpy') return 'SP500_JPY'
-    if (targetIndex === 'orukan_jpy') return 'ORUKAN_JPY'
+    if (targetIndex === 'NIKKEI') return 'NIKKEI225'
+    if (targetIndex === 'ORUKAN') return 'ALLCOUNTRY'
+    if (targetIndex === 'orukan_jpy') return 'ALLCOUNTRY_JPY'
     return targetIndex
   }
 
@@ -406,7 +408,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     }, EVAL_RETRY_DELAYS_MS[retryCount])
   }
 
-    const fetchEvaluation = async (
+  const fetchEvaluation = async (
   targetIndex: IndexType,
   payload?: Partial<EvaluateRequest>,
   markPrimary = false,
@@ -547,79 +549,6 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     }
   }
 }
-
-      setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
-
-      if (targetIndex === indexType && payload) {
-        setLastRequest((prev) => ({ ...prev, ...payload, index_type: targetIndex }))
-      }
-
-      if (markPrimary) {
-        setLastUpdated(new Date())
-        setIsEvalRetrying(false)
-        setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'ready' }))
-        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
-        setEvalStatusMessageMap((prev) => ({ ...prev, [targetIndex]: '' }))
-      }
-    } catch (e: any) {
-      if (reqSeq !== evalReqSeqRef.current) return
-
-      const status = e?.response?.status
-
-      if (markPrimary) {
-        setIsEvalRetrying(false)
-        setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'error' }))
-        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: ['PRICE_HISTORY_UNAVAILABLE'] }))
-        setEvalStatusMessageMap((prev) => ({
-          ...prev,
-          [targetIndex]: '価格履歴の取得に失敗しました。再取得してください。',
-        }))
-      }
-
-      if (markPrimary) {
-        setError(
-          status === 502 || status === 503
-            ? '価格履歴の取得に失敗しました。再取得してください。'
-            : e.message,
-        )
-      } else {
-        console.error('評価の取得に失敗しました', e)
-      }
-    }
-  }
-
-      setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
-      if (targetIndex === indexType && payload)
-        setLastRequest((prev) => ({ ...prev, ...payload, index_type: targetIndex }))
-      if (markPrimary) {
-        setLastUpdated(new Date())
-        setIsEvalRetrying(false)
-        setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'ready' }))
-        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
-      }
-    } catch (e: any) {
-      if (reqSeq !== evalReqSeqRef.current) return
-      const status = e?.response?.status
-      if (markPrimary) {
-        setIsEvalRetrying(false)
-        setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'error' }))
-        setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: ['PRICE_HISTORY_UNAVAILABLE'] }))
-        setEvalStatusMessageMap((prev) => ({
-          ...prev,
-          [targetIndex]: '価格履歴の取得に失敗しました。再取得してください。',
-        }))
-      }
-      if (markPrimary) {
-        setError(
-          status === 502 || status === 503
-            ? '価格履歴の取得に失敗しました。再取得してください。'
-            : e.message,
-        )
-      } else {
-        console.error('評価の取得に失敗しました', e)
-      }
-    }
-  }
 
   const getPriceHistoryEndpoint = (targetIndex: IndexType) => {
     const map: Record<IndexType, string> = {
