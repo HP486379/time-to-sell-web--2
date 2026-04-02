@@ -371,7 +371,9 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
 
   const resolveApiIndexType = (targetIndex: IndexType) => {
     if (targetIndex === 'sp500_jpy') return 'SP500_JPY'
-    if (targetIndex === 'orukan_jpy') return 'ORUKAN_JPY'
+    if (targetIndex === 'NIKKEI') return 'NIKKEI225'
+    if (targetIndex === 'ORUKAN') return 'ALLCOUNTRY'
+    if (targetIndex === 'orukan_jpy') return 'ALLCOUNTRY_JPY'
     return targetIndex
   }
 
@@ -406,7 +408,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     }, EVAL_RETRY_DELAYS_MS[retryCount])
   }
 
-    const fetchEvaluation = async (
+  const fetchEvaluation = async (
   targetIndex: IndexType,
   payload?: Partial<EvaluateRequest>,
   markPrimary = false,
