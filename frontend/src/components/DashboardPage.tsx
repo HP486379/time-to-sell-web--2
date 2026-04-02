@@ -751,9 +751,17 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   }
   const viewKey = viewKeyMap[viewDays]
   const activeBreakdown = useMemo(() => getActiveBreakdown(viewKey, displayResponse), [viewKey, displayResponse])
+  const longViewScore = useMemo(() => {
+    const technical = activeBreakdown?.technical?.T_base ?? activeBreakdown?.scores?.technical
+    const macro = activeBreakdown?.macro?.M ?? activeBreakdown?.macro?.macro_M
+    if (typeof technical !== 'number' || typeof macro !== 'number') return undefined
+    return Math.max(0, Math.min(100, technical + macro))
+  }, [activeBreakdown])
+
   const periodViewScore =
-    displayResponse?.period_scores?.[viewKey] ??
-    activeBreakdown?.scores?.period_total
+    viewKey === 'long'
+      ? longViewScore
+      : displayResponse?.period_scores?.[viewKey] ?? activeBreakdown?.scores?.period_total
   const breakdownTitleMap: Record<ViewKey, string> = {
     short: '短期目線の内訳',
     mid: '中期目線の内訳',
