@@ -356,14 +356,12 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
             "macro_details": macro_details,
         }
 
-    total_score = calculate_total_score(
-        technical_score,
-        macro_score,
-        event_adjustment,
-        current_price=current_price,
-        ma500=ma500,
-        ma1000=ma1000,
+    base_score = (
+        period_scores["short"] * 0.2
+        + period_scores["mid"] * 0.3
+        + period_scores["long"] * 0.5
     )
+    total_score = round(max(0.0, min(100.0, base_score + event_adjustment)), 2)
     label = get_label(total_score)
 
     snapshot.update(
