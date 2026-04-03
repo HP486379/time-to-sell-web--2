@@ -317,26 +317,25 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
     ma500, ma1000 = calculate_ultra_long_mas(price_history)
 
     period_windows = {"short": 20, "mid": 60, "long": 200}
-    period_technical_scores = {"long": technical_score}
+    period_scores = {"short": 0.0, "mid": 0.0, "long": 0.0}
+    period_breakdowns = {}
 
-    for period_key, window in period_windows.items():
-        if period_key == "long":
-            continue
+    for key_name, window in period_windows.items():
         try:
-            period_score, _ = calculate_technical_score(price_history, base_window=window)
-            period_technical_scores[period_key] = period_score
+            period_technical_score, period_technical_details = calculate_technical_score(
+                price_history, base_window=window
+            )
         except Exception:
             logger.exception(
-                "[snapshot] period technical calc failed for %s (window=%s)",
+                "[snapshot] period technical calc failed for %s (%s)",
                 index_type.value,
-                window,
+                key_name,
             )
-            period_technical_scores[period_key] = technical_score
+            period_technical_score, period_technical_details = 0.0, {}
 
-    period_scores = {
-        key: round(
+        period_total = round(
             calculate_total_score(
-                period_technical_scores[key],
+                period_technical_score,
                 macro_score,
                 event_adjustment,
                 current_price=current_price,
@@ -345,8 +344,17 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
             ),
             2,
         )
-        for key in period_windows.keys()
-    }
+        period_scores[key_name] = period_total
+        period_breakdowns[key_name] = {
+            "scores": {
+                "technical": period_technical_score,
+                "macro": macro_score,
+                "event_adjustment": event_adjustment,
+                "total": period_total,
+            },
+            "technical_details": period_technical_details,
+            "macro_details": macro_details,
+        }
 
     total_score = calculate_total_score(
         technical_score,
@@ -367,8 +375,15 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
                 "event_adjustment": event_adjustment,
                 "total": total_score,
                 "label": label,
+                "period_total": period_scores["long"],
             },
             "period_scores": period_scores,
+            "period_meta": {
+                "short_window": period_windows["short"],
+                "mid_window": period_windows["mid"],
+                "long_window": period_windows["long"],
+            },
+            "period_breakdowns": period_breakdowns,
             "technical_details": technical_details,
             "macro_details": macro_details,
             "event_details": event_details,
