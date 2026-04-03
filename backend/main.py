@@ -83,7 +83,7 @@ def _normalize_index_type_value(value):
             return "NIFTY50"
         if v == "sp500":
             return "SP500"
-    return value
+    raise ValueError(f"Invalid index_type: {value}")
 
 
 class PositionRequest(BaseModel):
@@ -91,6 +91,10 @@ class PositionRequest(BaseModel):
     total_quantity: int = 0
     avg_cost: float = 0.0
     score_ma: int = Field(200, description="スコア計算に使う移動平均日数")
+
+    @validator("index_type", pre=True)
+    def normalize_index_type(cls, value):
+        return _normalize_index_type_value(value)
 
 
 class PricePoint(BaseModel):
@@ -311,6 +315,39 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         event_adjustment, event_details, event_count = 0.0, {}, 0
 
     ma500, ma1000 = calculate_ultra_long_mas(price_history)
+
+    period_windows = {"short": 20, "mid": 60, "long": 200}
+    period_technical_scores = {"long": technical_score}
+
+    for period_key, window in period_windows.items():
+        if period_key == "long":
+            continue
+        try:
+            period_score, _ = calculate_technical_score(price_history, base_window=window)
+            period_technical_scores[period_key] = period_score
+        except Exception:
+            logger.exception(
+                "[snapshot] period technical calc failed for %s (window=%s)",
+                index_type.value,
+                window,
+            )
+            period_technical_scores[period_key] = technical_score
+
+    period_scores = {
+        key: round(
+            calculate_total_score(
+                period_technical_scores[key],
+                macro_score,
+                event_adjustment,
+                current_price=current_price,
+                ma500=ma500,
+                ma1000=ma1000,
+            ),
+            2,
+        )
+        for key in period_windows.keys()
+    }
+
     total_score = calculate_total_score(
         technical_score,
         macro_score,
@@ -331,6 +368,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
                 "total": total_score,
                 "label": label,
             },
+            "period_scores": period_scores,
             "technical_details": technical_details,
             "macro_details": macro_details,
             "event_details": event_details,
