@@ -83,7 +83,7 @@ def _normalize_index_type_value(value):
             return "NIFTY50"
         if v == "sp500":
             return "SP500"
-    return value
+    raise ValueError(f"Invalid index_type: {value}")
 
 
 class PositionRequest(BaseModel):
@@ -91,6 +91,10 @@ class PositionRequest(BaseModel):
     total_quantity: int = 0
     avg_cost: float = 0.0
     score_ma: int = Field(200, description="スコア計算に使う移動平均日数")
+
+    @validator("index_type", pre=True)
+    def normalize_index_type(cls, value):
+        return _normalize_index_type_value(value)
 
 
 class PricePoint(BaseModel):
