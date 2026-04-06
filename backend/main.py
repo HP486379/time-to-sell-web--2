@@ -21,6 +21,7 @@ from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
 import purchases_store
+from domain.index_type import normalize_index_type
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -67,23 +68,7 @@ class IndexType(str, Enum):
 
 def _normalize_index_type_value(value):
     """Normalize legacy index type names to canonical uppercase values."""
-    if isinstance(value, str):
-        v = value.lower().strip()
-        if v in {"nikkei", "nikkei225", "nikkei_225", "nikkei-225"}:
-            return "NIKKEI225"
-        if v in {"orukan", "allcountry"}:
-            return "ALLCOUNTRY"
-        if v in {"orukan_jpy", "allcountry_jpy"}:
-            return "ALLCOUNTRY_JPY"
-        if v == "sp500_jpy":
-            return "SP500_JPY"
-        if v == "topix":
-            return "TOPIX"
-        if v == "nifty50":
-            return "NIFTY50"
-        if v == "sp500":
-            return "SP500"
-    raise ValueError(f"Invalid index_type: {value}")
+    return normalize_index_type(value)
 
 
 class PositionRequest(BaseModel):

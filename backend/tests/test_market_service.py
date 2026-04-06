@@ -1,5 +1,6 @@
 import pandas as pd
 import yfinance as yf
+from datetime import date
 
 from backend.services.sp500_market_service import SP500MarketService
 
@@ -13,15 +14,15 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
     service = SP500MarketService(symbol="TEST")
 
     dates = pd.date_range("2020-01-01", periods=35, freq="B")
-    df = pd.DataFrame({"Close": [100.0 + i for i in range(35)]}, index=dates)
+    df = pd.DataFrame({"Close": [1000.0 + i for i in range(35)]}, index=dates)
 
     def fake_download(symbol, start, end, interval):  # pragma: no cover - simple stub
         return df
 
     monkeypatch.setattr(yf, "download", fake_download)
 
-    history = service.get_price_history_range(dates[0].date(), dates[-1].date(), allow_fallback=False, index_type="UNKNOWN")
-    assert history == [(d.date().isoformat(), float(100.0 + i)) for i, d in enumerate(dates)]
+    history = service.get_price_history_range(dates[0].date(), dates[-1].date(), allow_fallback=False, index_type="TOPIX")
+    assert history == [(d.date().isoformat(), float(1000.0 + i)) for i, d in enumerate(dates)]
 
 
 def test_validate_history_rejects_abnormal_sp500_price():
@@ -78,3 +79,35 @@ def test_get_price_history_range_uses_last_good_on_repeated_invalid(monkeypatch)
     history = service.get_price_history_range(start, end, allow_fallback=False, index_type="SP500")
 
     assert history == normal
+
+
+def test_fallback_history_uses_same_sp500_drift_for_sp500_jpy(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 12, 31)
+    monkeypatch.setattr("backend.services.sp500_market_service.random.Random.uniform", lambda *_: 0.0)
+
+    sp500 = service._fallback_history(start, end, "SP500")
+    sp500_jpy = service._fallback_history(start, end, "SP500_JPY")
+
+    assert len(sp500) == len(sp500_jpy)
+    assert sp500[-1][1] == sp500_jpy[-1][1]
+
+
+def test_fallback_history_alias_and_canonical_match(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 12, 31)
+
+    canonical = service._fallback_history(start, end, "SP500_JPY")
+    alias = service._fallback_history(start, end, "sp500_jpy")
+
+    assert canonical == alias
+
+
+def test_unknown_index_type_warns_and_falls_back(caplog):
+    service = SP500MarketService(symbol="TEST")
+    with caplog.at_level("WARNING"):
+        symbol = service._resolve_symbol("UNKNOWN_INDEX")
+    assert symbol == "TEST"
+    assert "Unknown index_type" in caplog.text
