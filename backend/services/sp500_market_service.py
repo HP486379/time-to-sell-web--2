@@ -506,6 +506,8 @@ class SP500MarketService:
 
     def _build_valid_fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
+        if index_type == "TOPIX":
+            return self._fallback_history(start, end, index_type)
         fallback = self._fallback_history(start, end, index_type)
         reason = self._fallback_quality_reason(fallback, index_type)
         if not reason:
@@ -579,8 +581,6 @@ class SP500MarketService:
                 return last_good
             if not allow_synth:
                 raise
-            if index_type == "TOPIX":
-                logger.warning("TOPIX real data fetch failed; strict fallback quality checks will be applied")
             fallback = self._build_valid_fallback_history(start, today, index_type)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
@@ -644,8 +644,6 @@ class SP500MarketService:
                 return last_good
             if not fallback_allowed:
                 raise
-            if index_type == "TOPIX":
-                logger.warning("TOPIX real data fetch failed; strict fallback quality checks will be applied")
             fallback = self._build_valid_fallback_history(start, end, index_type)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",

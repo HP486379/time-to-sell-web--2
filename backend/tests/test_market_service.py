@@ -145,7 +145,7 @@ def test_invalid_fallback_uses_last_good_history(monkeypatch):
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
     last_good = _history_from_values("2024-01-01", [1500.0 + i for i in range(60)])
-    service._last_good_history["TOPIX"] = last_good
+    service._last_good_history["SP500"] = last_good
 
     monkeypatch.setattr(
         service,
@@ -153,7 +153,7 @@ def test_invalid_fallback_uses_last_good_history(monkeypatch):
         lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 500.0]),
     )
 
-    history = service._build_valid_fallback_history(start, end, "TOPIX")
+    history = service._build_valid_fallback_history(start, end, "SP500")
     assert history == last_good
 
 
@@ -169,4 +169,16 @@ def test_invalid_fallback_without_last_good_is_data_unavailable(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="data_unavailable"):
-        service._build_valid_fallback_history(start, end, "TOPIX")
+        service._build_valid_fallback_history(start, end, "SP500")
+
+
+def test_topix_fallback_skips_strict_quality_gate(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    degraded = _history_from_values("2024-01-01", [1500.0, 500.0])
+
+    monkeypatch.setattr(service, "_fallback_history", lambda s, e, index_type: degraded)
+
+    history = service._build_valid_fallback_history(start, end, "TOPIX")
+    assert history == degraded
