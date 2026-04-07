@@ -322,7 +322,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
             calculate_total_score(
                 period_technical_score,
                 macro_score,
-                event_adjustment,
+                0.0,
                 current_price=current_price,
                 ma500=ma500,
                 ma1000=ma1000,
@@ -346,7 +346,29 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         + period_scores["mid"] * 0.3
         + period_scores["long"] * 0.5
     )
-    total_score = round(max(0.0, min(100.0, base_score + event_adjustment)), 2)
+    if (
+        period_scores["short"] >= 80
+        and period_scores["mid"] >= 80
+        and period_scores["long"] >= 80
+    ):
+        bonus = 10
+    elif (
+        period_scores["short"] >= 70
+        and period_scores["mid"] >= 70
+        and period_scores["long"] >= 70
+    ):
+        bonus = 6
+    elif period_scores["mid"] >= 70 and period_scores["long"] >= 70:
+        bonus = 3
+    elif period_scores["short"] >= 70 and period_scores["mid"] >= 70:
+        bonus = 2
+    else:
+        bonus = 0
+
+    total_score = round(
+        max(0.0, min(100.0, base_score + bonus + event_adjustment)),
+        2,
+    )
     label = get_label(total_score)
 
     snapshot.update(
@@ -359,6 +381,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
                 "total": total_score,
                 "label": label,
                 "period_total": period_scores["long"],
+                "bonus": bonus,
             },
             "period_scores": period_scores,
             "period_meta": {

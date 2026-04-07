@@ -1,6 +1,7 @@
 import pandas as pd
 import yfinance as yf
 from datetime import date
+import pytest
 
 from backend.services.sp500_market_service import SP500MarketService
 
@@ -91,7 +92,8 @@ def test_fallback_history_uses_same_sp500_drift_for_sp500_jpy(monkeypatch):
     sp500_jpy = service._fallback_history(start, end, "SP500_JPY")
 
     assert len(sp500) == len(sp500_jpy)
-    assert sp500[-1][1] == sp500_jpy[-1][1]
+    expected_scale = service.start_prices["SP500_JPY"] / service.start_prices["SP500"]
+    assert sp500_jpy[-1][1] == pytest.approx(sp500[-1][1] * expected_scale, abs=1.0)
 
 
 def test_fallback_history_alias_and_canonical_match(monkeypatch):
@@ -111,3 +113,28 @@ def test_unknown_index_type_warns_and_falls_back(caplog):
         symbol = service._resolve_symbol("UNKNOWN_INDEX")
     assert symbol == "TEST"
     assert "Unknown index_type" in caplog.text
+
+
+def test_validate_history_accepts_sp500_jpy_realistic_scale():
+    service = SP500MarketService(symbol="TEST")
+    history = _history_from_values("2024-01-01", [650000.0 + i * 500 for i in range(50)])
+
+    reason = service._validate_history(history, "SP500_JPY")
+
+    assert reason is None
+
+
+def test_fallback_sp500_jpy_is_built_from_sp500_and_fx(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 10)
+
+    monkeypatch.setattr(service, "_fallback_fx_history", lambda s, e, _: _history_from_values("2024-01-01", [150.0] * 8))
+
+    sp500 = service._fallback_history(start, end, "SP500")
+    sp500_jpy = service._fallback_history(start, end, "SP500_JPY")
+
+    assert len(sp500) == len(sp500_jpy)
+    for (d1, p_usd), (d2, p_jpy) in zip(sp500, sp500_jpy):
+        assert d1 == d2
+        assert p_jpy == pytest.approx(p_usd * 150.0, abs=1.0)

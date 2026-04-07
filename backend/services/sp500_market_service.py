@@ -72,8 +72,9 @@ class SP500MarketService:
             "NIKKEI225": 15000.0,
             "NIFTY50": 4000.0,
             "ALLCOUNTRY": 15000.0,
-            "ALLCOUNTRY_JPY": 15000.0,
-            "SP500_JPY": 4000.0,
+            # index_jpy は指数値×USD/JPY で桁が大きくなるため、妥当なスケールに合わせる
+            "ALLCOUNTRY_JPY": 2000000.0,
+            "SP500_JPY": 600000.0,
         }
 
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
@@ -408,6 +409,22 @@ class SP500MarketService:
         """
 
         index_type = self._normalize_index_type(index_type)
+        base_index_map = {
+            "SP500_JPY": "SP500",
+            "ALLCOUNTRY_JPY": "ALLCOUNTRY",
+        }
+        if index_type in base_index_map:
+            base_history = self._fallback_history(start, end, base_index_map[index_type])
+            fx_history = self._fallback_fx_history(start, end, index_type)
+            fx_by_date = {d: v for d, v in fx_history}
+            combined = [
+                (d, round(price * fx_by_date[d], 2))
+                for d, price in base_history
+                if d in fx_by_date
+            ]
+            if combined:
+                return combined
+
         annual_drift_map = {
             "SP500": 0.07,
             "TOPIX": 0.04,
@@ -439,6 +456,26 @@ class SP500MarketService:
                 history.append((current.isoformat(), round(price, 2)))
             current += timedelta(days=1)
 
+        return history
+
+    def _fallback_fx_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
+        start_fx_map = {
+            "SP500_JPY": 150.0,
+            "ALLCOUNTRY_JPY": 150.0,
+        }
+        fx = start_fx_map.get(index_type, 150.0)
+        rng_seed = f"fx:{index_type}:{start.isoformat()}:{end.isoformat()}"
+        rng = random.Random(rng_seed)
+
+        history: List[Tuple[str, float]] = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:
+                # 日次 ±0.2% 程度の為替揺らぎ
+                fx = max(50.0, fx * (1 + rng.uniform(-0.002, 0.002)))
+                history.append((current.isoformat(), round(fx, 4)))
+            current += timedelta(days=1)
         return history
 
     def _to_iso_date(self, idx) -> str:
