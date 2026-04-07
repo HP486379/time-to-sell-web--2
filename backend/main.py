@@ -263,19 +263,27 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         "event_count": 0,
         "price_history": [],
         "price_series": [],
+        "source": "real",
     }
 
     try:
         price_history = market_service.get_price_history(index_type.value)
     except PriceHistoryFetchError:
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
-        raise
+        snapshot["source"] = "data_unavailable"
+        return snapshot
+    except Exception:
+        logger.exception("[snapshot] price history failed for %s", index_type.value)
+        snapshot["source"] = "data_unavailable"
+        return snapshot
 
     if not price_history:
         logger.warning("[snapshot] empty price history for %s", index_type.value)
+        snapshot["source"] = "data_unavailable"
         return snapshot
 
     current_price = price_history[-1][1]
+    snapshot["source"] = market_service.get_last_source(index_type.value)
 
     try:
         technical_score, technical_details = calculate_technical_score(price_history)

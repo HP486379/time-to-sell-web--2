@@ -78,6 +78,7 @@ class SP500MarketService:
         }
 
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
+        self._last_source: Dict[str, str] = {}
 
         logger.info(
             "[MARKET CONFIG] symbols=%s fx_symbols=%s fallback=%s price_types=%s",
@@ -112,6 +113,14 @@ class SP500MarketService:
     def _resolve_symbol(self, index_type: str) -> str:
         index_type = self._normalize_index_type(index_type)
         return self.symbol_map.get(index_type, self.symbol_map["SP500"])
+
+    def _set_last_source(self, index_type: str, source: str) -> None:
+        index_type = self._normalize_index_type(index_type)
+        self._last_source[index_type] = source
+
+    def get_last_source(self, index_type: str) -> str:
+        index_type = self._normalize_index_type(index_type)
+        return self._last_source.get(index_type, "real")
 
     def _resolve_fx_symbol(self, index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
@@ -293,6 +302,7 @@ class SP500MarketService:
                         len(history),
                     )
                     self._update_last_good_history(index_type, history)
+                    self._set_last_source(index_type, "real")
                     return history
                 self._log_validation_failure(
                     index_type=index_type,
@@ -356,6 +366,7 @@ class SP500MarketService:
             self._resolve_price_type(index_type),
             len(series),
         )
+        self._set_last_source(index_type, "real")
         return series
 
     def _fetch_nav_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
@@ -478,6 +489,35 @@ class SP500MarketService:
             current += timedelta(days=1)
         return history
 
+    def _fallback_quality_reason(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
+        if not history:
+            return "fallback_empty"
+        index_type = self._normalize_index_type(index_type)
+        start_price = self.start_prices.get(index_type)
+        first = history[0][1]
+        last = history[-1][1]
+        if start_price and last < start_price * 0.6:
+            return f"fallback_too_low:{last:.2f}<{start_price * 0.6:.2f}"
+        if first > 0:
+            five_year_return = (last / first - 1.0) * 100.0
+            if five_year_return <= -50.0:
+                return f"fallback_5y_return_too_low:{five_year_return:.2f}%"
+        return None
+
+    def _build_valid_fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
+        fallback = self._fallback_history(start, end, index_type)
+        reason = self._fallback_quality_reason(fallback, index_type)
+        if not reason:
+            return fallback
+
+        logger.warning("Fallback quality check failed index=%s reason=%s", index_type, reason)
+        if index_type in self._last_good_history:
+            last_good = self._last_good_history[index_type]
+            logger.info("Using last good history after fallback quality fail index=%s points=%d", index_type, len(last_good))
+            return last_good
+        raise ValueError("data_unavailable")
+
     def _to_iso_date(self, idx) -> str:
         try:
             return idx.date().isoformat()
@@ -511,6 +551,7 @@ class SP500MarketService:
                         len(nav_hist),
                     )
                     self._update_last_good_history(index_type, nav_hist)
+                    self._set_last_source(index_type, "real")
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
@@ -534,10 +575,13 @@ class SP500MarketService:
                     len(last_good),
                     last_good[-1][1] if last_good else None,
                 )
+                self._set_last_source(index_type, "fallback")
                 return last_good
             if not allow_synth:
                 raise
-            fallback = self._fallback_history(start, today, index_type)
+            if index_type == "TOPIX":
+                logger.warning("TOPIX real data fetch failed; strict fallback quality checks will be applied")
+            fallback = self._build_valid_fallback_history(start, today, index_type)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -545,6 +589,7 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
+            self._set_last_source(index_type, "fallback")
             return fallback
 
     def get_price_history_range(
@@ -571,6 +616,7 @@ class SP500MarketService:
                         len(nav_hist),
                     )
                     self._update_last_good_history(index_type, nav_hist)
+                    self._set_last_source(index_type, "real")
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
@@ -594,10 +640,13 @@ class SP500MarketService:
                     len(last_good),
                     last_good[-1][1] if last_good else None,
                 )
+                self._set_last_source(index_type, "fallback")
                 return last_good
             if not fallback_allowed:
                 raise
-            fallback = self._fallback_history(start, end, index_type)
+            if index_type == "TOPIX":
+                logger.warning("TOPIX real data fetch failed; strict fallback quality checks will be applied")
+            fallback = self._build_valid_fallback_history(start, end, index_type)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -605,6 +654,7 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
+            self._set_last_source(index_type, "fallback")
             return fallback
 
     def get_usd_jpy(self) -> float:

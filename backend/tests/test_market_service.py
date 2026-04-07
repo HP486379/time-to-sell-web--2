@@ -138,3 +138,35 @@ def test_fallback_sp500_jpy_is_built_from_sp500_and_fx(monkeypatch):
     for (d1, p_usd), (d2, p_jpy) in zip(sp500, sp500_jpy):
         assert d1 == d2
         assert p_jpy == pytest.approx(p_usd * 150.0, abs=1.0)
+
+
+def test_invalid_fallback_uses_last_good_history(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    last_good = _history_from_values("2024-01-01", [1500.0 + i for i in range(60)])
+    service._last_good_history["TOPIX"] = last_good
+
+    monkeypatch.setattr(
+        service,
+        "_fallback_history",
+        lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 500.0]),
+    )
+
+    history = service._build_valid_fallback_history(start, end, "TOPIX")
+    assert history == last_good
+
+
+def test_invalid_fallback_without_last_good_is_data_unavailable(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+
+    monkeypatch.setattr(
+        service,
+        "_fallback_history",
+        lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 500.0]),
+    )
+
+    with pytest.raises(ValueError, match="data_unavailable"):
+        service._build_valid_fallback_history(start, end, "TOPIX")
