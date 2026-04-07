@@ -10,6 +10,7 @@ import requests
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
+from domain.index_type import normalize_index_type
 
 
 logger = logging.getLogger(__name__)
@@ -23,45 +24,34 @@ class SP500MarketService:
         self.symbol_map = {
             "SP500": symbol or os.getenv("SP500_SYMBOL", "^GSPC"),
             "TOPIX": os.getenv("TOPIX_SYMBOL", "1306.T"),
-            "NIKKEI": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIKKEI225": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIFTY50": os.getenv("NIFTY50_SYMBOL", "^NSEI"),
             # オルカンは MSCI ACWI 連動 ETF（ACWI）をプロキシとして利用する
-            "ORUKAN": os.getenv("ORUKAN_SYMBOL", "ACWI"),
             "ALLCOUNTRY": os.getenv("ORUKAN_SYMBOL", "ACWI"),
             # オルカン円建ては ACWI × USD/JPY を用いる
-            "orukan_jpy": os.getenv("ORUKAN_JPY_SYMBOL", os.getenv("ORUKAN_SYMBOL", "ACWI")),
             "ALLCOUNTRY_JPY": os.getenv("ORUKAN_JPY_SYMBOL", os.getenv("ORUKAN_SYMBOL", "ACWI")),
             # S&P500 円建ては ^GSPC × USD/JPY を用いる
-            "sp500_jpy": os.getenv("SP500_JPY_SYMBOL", os.getenv("SP500_SYMBOL", "^GSPC")),
             "SP500_JPY": os.getenv("SP500_JPY_SYMBOL", os.getenv("SP500_SYMBOL", "^GSPC")),
         }
 
         self.fx_symbol_map = {
-            "orukan_jpy": os.getenv("ORUKAN_JPY_FX_SYMBOL", "JPY=X"),
             "ALLCOUNTRY_JPY": os.getenv("ORUKAN_JPY_FX_SYMBOL", "JPY=X"),
-            "sp500_jpy": os.getenv("SP500_JPY_FX_SYMBOL", "JPY=X"),
             "SP500_JPY": os.getenv("SP500_JPY_FX_SYMBOL", "JPY=X"),
         }
 
         self.price_type_map = {
             "SP500": os.getenv("SP500_PRICE_TYPE", "index"),
             "TOPIX": os.getenv("TOPIX_PRICE_TYPE", "index"),
-            "NIKKEI": os.getenv("NIKKEI_PRICE_TYPE", "index"),
             "NIKKEI225": os.getenv("NIKKEI_PRICE_TYPE", "index"),
             "NIFTY50": os.getenv("NIFTY50_PRICE_TYPE", "index"),
-            "ORUKAN": "index",
             "ALLCOUNTRY": "index",
-            "orukan_jpy": "index_jpy",
             "ALLCOUNTRY_JPY": "index_jpy",
-            "sp500_jpy": "index_jpy",
             "SP500_JPY": "index_jpy",
         }
 
         self.nav_api_map = {
             "SP500": os.getenv("SP500_NAV_API_BASE"),
             "TOPIX": os.getenv("TOPIX_NAV_API_BASE"),
-            "NIKKEI": os.getenv("NIKKEI_NAV_API_BASE"),
             "NIKKEI225": os.getenv("NIKKEI_NAV_API_BASE"),
             "NIFTY50": os.getenv("NIFTY50_NAV_API_BASE"),
         }
@@ -69,32 +59,26 @@ class SP500MarketService:
         self.allow_synth_map = {
             "SP500": self._flag("SP500_ALLOW_SYNTHETIC_FALLBACK", default=True),
             "TOPIX": self._flag("TOPIX_ALLOW_SYNTHETIC_FALLBACK", default=True),
-            "NIKKEI": self._flag("NIKKEI_ALLOW_SYNTHETIC_FALLBACK", default=True),
             "NIKKEI225": self._flag("NIKKEI_ALLOW_SYNTHETIC_FALLBACK", default=True),
             "NIFTY50": self._flag("NIFTY50_ALLOW_SYNTHETIC_FALLBACK", default=True),
-            "ORUKAN": True,
             "ALLCOUNTRY": True,
-            "orukan_jpy": True,
             "ALLCOUNTRY_JPY": True,
-            "sp500_jpy": True,
             "SP500_JPY": True,
         }
 
         self.start_prices = {
             "SP500": 4000.0,
             "TOPIX": 1500.0,
-            "NIKKEI": 15000.0,
             "NIKKEI225": 15000.0,
             "NIFTY50": 4000.0,
-            "ORUKAN": 15000.0,
             "ALLCOUNTRY": 15000.0,
-            "orukan_jpy": 15000.0,
-            "ALLCOUNTRY_JPY": 15000.0,
-            "sp500_jpy": 4000.0,
-            "SP500_JPY": 4000.0,
+            # index_jpy は指数値×USD/JPY で桁が大きくなるため、妥当なスケールに合わせる
+            "ALLCOUNTRY_JPY": 2000000.0,
+            "SP500_JPY": 600000.0,
         }
 
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
+        self._last_source: Dict[str, str] = {}
 
         logger.info(
             "[MARKET CONFIG] symbols=%s fx_symbols=%s fallback=%s price_types=%s",
@@ -103,6 +87,9 @@ class SP500MarketService:
             self.allow_synth_map,
             self.price_type_map,
         )
+
+    def _normalize_index_type(self, index_type: str) -> str:
+        return normalize_index_type(index_type, default="SP500", logger=logger)
 
     def _extract_close_series(self, hist: pd.DataFrame) -> pd.Series:
         """Extract a 1-D close/adj close series from yfinance DataFrame."""
@@ -124,18 +111,31 @@ class SP500MarketService:
         return raw.lower() in {"1", "true", "yes", "on"}
 
     def _resolve_symbol(self, index_type: str) -> str:
+        index_type = self._normalize_index_type(index_type)
         return self.symbol_map.get(index_type, self.symbol_map["SP500"])
 
+    def _set_last_source(self, index_type: str, source: str) -> None:
+        index_type = self._normalize_index_type(index_type)
+        self._last_source[index_type] = source
+
+    def get_last_source(self, index_type: str) -> str:
+        index_type = self._normalize_index_type(index_type)
+        return self._last_source.get(index_type, "real")
+
     def _resolve_fx_symbol(self, index_type: str) -> Optional[str]:
+        index_type = self._normalize_index_type(index_type)
         return self.fx_symbol_map.get(index_type)
 
     def _resolve_nav_base(self, index_type: str) -> Optional[str]:
+        index_type = self._normalize_index_type(index_type)
         return self.nav_api_map.get(index_type)
 
     def _allow_synthetic_for_index(self, index_type: str) -> bool:
+        index_type = self._normalize_index_type(index_type)
         return self.allow_synth_map.get(index_type, True)
 
     def _resolve_price_type(self, index_type: str) -> Optional[str]:
+        index_type = self._normalize_index_type(index_type)
         return self.price_type_map.get(index_type)
 
     def _download_close_series(self, symbol: str, start: date, end: date) -> pd.Series:
@@ -147,20 +147,17 @@ class SP500MarketService:
         return closes
 
     def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
+        index_type = self._normalize_index_type(index_type)
         if not history:
             return "empty_history"
 
         min_points_map = {
             "SP500": 450,
             "TOPIX": 400,
-            "NIKKEI": 400,
             "NIKKEI225": 400,
             "NIFTY50": 350,
-            "ORUKAN": 300,
             "ALLCOUNTRY": 300,
-            "orukan_jpy": 300,
             "ALLCOUNTRY_JPY": 300,
-            "sp500_jpy": 450,
             "SP500_JPY": 450,
         }
         min_points = min_points_map.get(index_type, 300)
@@ -207,6 +204,7 @@ class SP500MarketService:
         return None
 
     def _update_last_good_history(self, index_type: str, history: List[Tuple[str, float]]) -> None:
+        index_type = self._normalize_index_type(index_type)
         self._last_good_history[index_type] = [(d, round(float(v), 2)) for d, v in history]
 
     def _log_validation_failure(
@@ -232,6 +230,7 @@ class SP500MarketService:
         )
 
     def _get_validated_index_jpy_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
         symbol = self._resolve_symbol(index_type)
         price_type = self._resolve_price_type(index_type)
         backoffs = [0.2, 0.5, 1.0]
@@ -283,6 +282,7 @@ class SP500MarketService:
         raise ValueError("index_jpy history unavailable")
 
     def _fetch_yfinance_history_with_retry(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
         symbol = self._resolve_symbol(index_type)
         price_type = self._resolve_price_type(index_type)
         backoffs = [0.2, 0.5, 1.0]
@@ -302,6 +302,7 @@ class SP500MarketService:
                         len(history),
                     )
                     self._update_last_good_history(index_type, history)
+                    self._set_last_source(index_type, "real")
                     return history
                 self._log_validation_failure(
                     index_type=index_type,
@@ -342,6 +343,7 @@ class SP500MarketService:
         raise ValueError("history unavailable")
 
     def _fetch_index_history_jpy(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
         symbol = self._resolve_symbol(index_type)
         fx_symbol = self._resolve_fx_symbol(index_type)
         if not fx_symbol:
@@ -364,10 +366,12 @@ class SP500MarketService:
             self._resolve_price_type(index_type),
             len(series),
         )
+        self._set_last_source(index_type, "real")
         return series
 
     def _fetch_nav_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         """Optional custom NAV API (if provided by env) returning date/close pairs."""
+        index_type = self._normalize_index_type(index_type)
 
         nav_base = self._resolve_nav_base(index_type)
         if not nav_base:
@@ -415,14 +419,31 @@ class SP500MarketService:
         * 週末はスキップし、営業日ベースで積み上げる
         """
 
+        index_type = self._normalize_index_type(index_type)
+        base_index_map = {
+            "SP500_JPY": "SP500",
+            "ALLCOUNTRY_JPY": "ALLCOUNTRY",
+        }
+        if index_type in base_index_map:
+            base_history = self._fallback_history(start, end, base_index_map[index_type])
+            fx_history = self._fallback_fx_history(start, end, index_type)
+            fx_by_date = {d: v for d, v in fx_history}
+            combined = [
+                (d, round(price * fx_by_date[d], 2))
+                for d, price in base_history
+                if d in fx_by_date
+            ]
+            if combined:
+                return combined
+
         annual_drift_map = {
             "SP500": 0.07,
             "TOPIX": 0.04,
-            "NIKKEI": 0.05,
+            "NIKKEI225": 0.05,
             "NIFTY50": 0.08,
-            "ORUKAN": 0.06,
-            "orukan_jpy": 0.06,
-            "sp500_jpy": 0.07,
+            "ALLCOUNTRY": 0.06,
+            "ALLCOUNTRY_JPY": 0.06,
+            "SP500_JPY": 0.07,
         }
         annual_drift = annual_drift_map.get(index_type, 0.05)
         daily_drift = annual_drift / 260.0
@@ -448,6 +469,57 @@ class SP500MarketService:
 
         return history
 
+    def _fallback_fx_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
+        start_fx_map = {
+            "SP500_JPY": 150.0,
+            "ALLCOUNTRY_JPY": 150.0,
+        }
+        fx = start_fx_map.get(index_type, 150.0)
+        rng_seed = f"fx:{index_type}:{start.isoformat()}:{end.isoformat()}"
+        rng = random.Random(rng_seed)
+
+        history: List[Tuple[str, float]] = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:
+                # 日次 ±0.2% 程度の為替揺らぎ
+                fx = max(50.0, fx * (1 + rng.uniform(-0.002, 0.002)))
+                history.append((current.isoformat(), round(fx, 4)))
+            current += timedelta(days=1)
+        return history
+
+    def _fallback_quality_reason(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
+        if not history:
+            return "fallback_empty"
+        index_type = self._normalize_index_type(index_type)
+        start_price = self.start_prices.get(index_type)
+        first = history[0][1]
+        last = history[-1][1]
+        if start_price and last < start_price * 0.6:
+            return f"fallback_too_low:{last:.2f}<{start_price * 0.6:.2f}"
+        if first > 0:
+            five_year_return = (last / first - 1.0) * 100.0
+            if five_year_return <= -50.0:
+                return f"fallback_5y_return_too_low:{five_year_return:.2f}%"
+        return None
+
+    def _build_valid_fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
+        if index_type == "TOPIX":
+            return self._fallback_history(start, end, index_type)
+        fallback = self._fallback_history(start, end, index_type)
+        reason = self._fallback_quality_reason(fallback, index_type)
+        if not reason:
+            return fallback
+
+        logger.warning("Fallback quality check failed index=%s reason=%s", index_type, reason)
+        if index_type in self._last_good_history:
+            last_good = self._last_good_history[index_type]
+            logger.info("Using last good history after fallback quality fail index=%s points=%d", index_type, len(last_good))
+            return last_good
+        raise ValueError("data_unavailable")
+
     def _to_iso_date(self, idx) -> str:
         try:
             return idx.date().isoformat()
@@ -459,6 +531,7 @@ class SP500MarketService:
                 return str(idx)
 
     def get_price_history(self, index_type: str = "SP500") -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
         today = date.today()
         start = today - timedelta(days=365 * 5)
         allow_synth = self._allow_synthetic_for_index(index_type)
@@ -480,6 +553,7 @@ class SP500MarketService:
                         len(nav_hist),
                     )
                     self._update_last_good_history(index_type, nav_hist)
+                    self._set_last_source(index_type, "real")
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
@@ -503,10 +577,11 @@ class SP500MarketService:
                     len(last_good),
                     last_good[-1][1] if last_good else None,
                 )
+                self._set_last_source(index_type, "fallback")
                 return last_good
             if not allow_synth:
                 raise
-            fallback = self._fallback_history(start, today, index_type)
+            fallback = self._build_valid_fallback_history(start, today, index_type)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -514,11 +589,13 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
+            self._set_last_source(index_type, "fallback")
             return fallback
 
     def get_price_history_range(
         self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
     ) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
         allow_synth = self._allow_synthetic_for_index(index_type)
         fallback_allowed = allow_fallback and allow_synth
         try:
@@ -539,6 +616,7 @@ class SP500MarketService:
                         len(nav_hist),
                     )
                     self._update_last_good_history(index_type, nav_hist)
+                    self._set_last_source(index_type, "real")
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
@@ -562,10 +640,11 @@ class SP500MarketService:
                     len(last_good),
                     last_good[-1][1] if last_good else None,
                 )
+                self._set_last_source(index_type, "fallback")
                 return last_good
             if not fallback_allowed:
                 raise
-            fallback = self._fallback_history(start, end, index_type)
+            fallback = self._build_valid_fallback_history(start, end, index_type)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -573,6 +652,7 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
+            self._set_last_source(index_type, "fallback")
             return fallback
 
     def get_usd_jpy(self) -> float:
@@ -607,6 +687,7 @@ class SP500MarketService:
     def get_current_price(
         self, history: Optional[List[Tuple[str, float]]] = None, index_type: str = "SP500"
     ) -> float:
+        index_type = self._normalize_index_type(index_type)
         price_type = self._resolve_price_type(index_type)
         try:
             if price_type == "index_jpy":
