@@ -21,6 +21,7 @@ from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
 import purchases_store
+from domain.index_type import normalize_index_type
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -67,23 +68,7 @@ class IndexType(str, Enum):
 
 def _normalize_index_type_value(value):
     """Normalize legacy index type names to canonical uppercase values."""
-    if isinstance(value, str):
-        v = value.lower().strip()
-        if v in {"nikkei", "nikkei225", "nikkei_225", "nikkei-225"}:
-            return "NIKKEI225"
-        if v in {"orukan", "allcountry"}:
-            return "ALLCOUNTRY"
-        if v in {"orukan_jpy", "allcountry_jpy"}:
-            return "ALLCOUNTRY_JPY"
-        if v == "sp500_jpy":
-            return "SP500_JPY"
-        if v == "topix":
-            return "TOPIX"
-        if v == "nifty50":
-            return "NIFTY50"
-        if v == "sp500":
-            return "SP500"
-    raise ValueError(f"Invalid index_type: {value}")
+    return normalize_index_type(value)
 
 
 class PositionRequest(BaseModel):
@@ -278,19 +263,27 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         "event_count": 0,
         "price_history": [],
         "price_series": [],
+        "source": "real",
     }
 
     try:
         price_history = market_service.get_price_history(index_type.value)
     except PriceHistoryFetchError:
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
-        raise
+        snapshot["source"] = "data_unavailable"
+        return snapshot
+    except Exception:
+        logger.exception("[snapshot] price history failed for %s", index_type.value)
+        snapshot["source"] = "data_unavailable"
+        return snapshot
 
     if not price_history:
         logger.warning("[snapshot] empty price history for %s", index_type.value)
+        snapshot["source"] = "data_unavailable"
         return snapshot
 
     current_price = price_history[-1][1]
+    snapshot["source"] = market_service.get_last_source(index_type.value)
 
     try:
         technical_score, technical_details = calculate_technical_score(price_history)
@@ -337,7 +330,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
             calculate_total_score(
                 period_technical_score,
                 macro_score,
-                event_adjustment,
+                0.0,
                 current_price=current_price,
                 ma500=ma500,
                 ma1000=ma1000,
@@ -361,7 +354,29 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         + period_scores["mid"] * 0.3
         + period_scores["long"] * 0.5
     )
-    total_score = round(max(0.0, min(100.0, base_score + event_adjustment)), 2)
+    if (
+        period_scores["short"] >= 80
+        and period_scores["mid"] >= 80
+        and period_scores["long"] >= 80
+    ):
+        bonus = 10
+    elif (
+        period_scores["short"] >= 70
+        and period_scores["mid"] >= 70
+        and period_scores["long"] >= 70
+    ):
+        bonus = 6
+    elif period_scores["mid"] >= 70 and period_scores["long"] >= 70:
+        bonus = 3
+    elif period_scores["short"] >= 70 and period_scores["mid"] >= 70:
+        bonus = 2
+    else:
+        bonus = 0
+
+    total_score = round(
+        max(0.0, min(100.0, base_score + bonus + event_adjustment)),
+        2,
+    )
     label = get_label(total_score)
 
     snapshot.update(
@@ -374,6 +389,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
                 "total": total_score,
                 "label": label,
                 "period_total": period_scores["long"],
+                "bonus": bonus,
             },
             "period_scores": period_scores,
             "period_meta": {
