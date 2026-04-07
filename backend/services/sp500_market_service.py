@@ -45,11 +45,27 @@ class SP500MarketService:
         }
         self.symbol_fallback_map = {
             "TOPIX": [os.getenv("TOPIX_SYMBOL_FALLBACK", "1306.T")],
+            "NIFTY50": [
+                os.getenv("NIFTY50_SYMBOL_FALLBACK", "NIFTYBEES.NS"),
+                os.getenv("NIFTY50_SYMBOL_FALLBACK_2", "INDY"),
+            ],
+            "ALLCOUNTRY": [
+                os.getenv("ORUKAN_SYMBOL_FALLBACK", "VT"),
+                os.getenv("ORUKAN_SYMBOL_FALLBACK_2", "URTH"),
+            ],
+            "ALLCOUNTRY_JPY": [
+                os.getenv("ORUKAN_JPY_SYMBOL_FALLBACK", os.getenv("ORUKAN_SYMBOL_FALLBACK", "VT")),
+                os.getenv("ORUKAN_JPY_SYMBOL_FALLBACK_2", os.getenv("ORUKAN_SYMBOL_FALLBACK_2", "URTH")),
+            ],
         }
 
         self.fx_symbol_map = {
             "ALLCOUNTRY_JPY": os.getenv("ORUKAN_JPY_FX_SYMBOL", "JPY=X"),
             "SP500_JPY": os.getenv("SP500_JPY_FX_SYMBOL", "JPY=X"),
+        }
+        self.fx_symbol_fallback_map = {
+            "ALLCOUNTRY_JPY": [os.getenv("ORUKAN_JPY_FX_SYMBOL_FALLBACK", "USDJPY=X")],
+            "SP500_JPY": [os.getenv("SP500_JPY_FX_SYMBOL_FALLBACK", "USDJPY=X")],
         }
 
         self.price_type_map = {
@@ -92,6 +108,7 @@ class SP500MarketService:
 
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
         self._last_source: Dict[str, str] = {}
+        self._last_debug: Dict[str, Dict[str, object]] = {}
 
         logger.info(
             "[MARKET CONFIG] symbols=%s fx_symbols=%s fallback=%s price_types=%s",
@@ -141,14 +158,35 @@ class SP500MarketService:
     def _set_last_source(self, index_type: str, source: str) -> None:
         index_type = self._normalize_index_type(index_type)
         self._last_source[index_type] = source
+        self._last_debug.setdefault(index_type, {})["source"] = source
+        logger.info("Market source decided index=%s source=%s", index_type, source)
 
     def get_last_source(self, index_type: str) -> str:
         index_type = self._normalize_index_type(index_type)
         return self._last_source.get(index_type, "real")
 
+    def _set_debug(self, index_type: str, **kwargs) -> None:
+        index_type = self._normalize_index_type(index_type)
+        self._last_debug.setdefault(index_type, {}).update(kwargs)
+
+    def get_last_debug(self, index_type: str) -> Dict[str, object]:
+        index_type = self._normalize_index_type(index_type)
+        return dict(self._last_debug.get(index_type, {}))
+
     def _resolve_fx_symbol(self, index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
         return self.fx_symbol_map.get(index_type)
+
+    def _resolve_fx_symbol_candidates(self, index_type: str) -> List[str]:
+        index_type = self._normalize_index_type(index_type)
+        primary = self._resolve_fx_symbol(index_type)
+        fallbacks = self.fx_symbol_fallback_map.get(index_type, [])
+        candidates = [primary, *fallbacks]
+        deduped: List[str] = []
+        for symbol in candidates:
+            if symbol and symbol not in deduped:
+                deduped.append(symbol)
+        return deduped
 
     def _resolve_nav_base(self, index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
@@ -247,6 +285,100 @@ class SP500MarketService:
 
         return None
 
+    def _quality_check_history(self, history: List[Tuple[str, float]]) -> Tuple[str, List[str]]:
+        if not history:
+            return "hard_ng", ["LOW_POINTS(points=0)"]
+        if len(history) < 50:
+            return "hard_ng", [f"LOW_POINTS(points={len(history)})"]
+
+        values: List[float] = []
+        nan_count = 0
+        for _, value in history:
+            if value is None:
+                nan_count += 1
+                continue
+            if isinstance(value, float) and math.isnan(value):
+                nan_count += 1
+                continue
+            values.append(float(value))
+
+        if not values:
+            return "hard_ng", ["HIGH_NAN_RATIO(nan_ratio=1.00)"]
+        if len(set(values)) == 1:
+            return "hard_ng", [f"TOO_FLAT(flat_days={len(history)})"]
+
+        soft_flags: List[str] = []
+        if nan_count > 0:
+            nan_ratio = nan_count / max(1, len(history))
+            soft_flags.append(f"HIGH_NAN_RATIO(nan_ratio={nan_ratio:.2f})")
+        if len(history) < 200:
+            soft_flags.append(f"LOW_POINTS(points={len(history)})")
+
+        # 連続同値が長い場合は劣化扱い
+        prev_value: Optional[float] = None
+        flat_run = 1
+        max_flat_run = 1
+        for value in values:
+            if prev_value is not None:
+                if abs(value - prev_value) < 1e-9:
+                    flat_run += 1
+                    max_flat_run = max(max_flat_run, flat_run)
+                else:
+                    flat_run = 1
+            prev_value = value
+        if max_flat_run > 30:
+            soft_flags.append(f"TOO_FLAT(flat_days={max_flat_run})")
+
+        if len(history) >= 252:
+            base_1y = history[-252][1]
+            last = history[-1][1]
+            if base_1y and base_1y > 0:
+                one_year_return = (last / base_1y - 1.0) * 100.0
+                if one_year_return < -80.0 or one_year_return > 200.0:
+                    soft_flags.append(f"ABNORMAL_RETURN(return={one_year_return:+.2f}%)")
+
+        if soft_flags:
+            return "soft_ng", soft_flags
+        return "ok", []
+
+    def _quality_check_index_jpy(
+        self,
+        *,
+        base_points: int,
+        fx_points: int,
+        combined_points: int,
+    ) -> Tuple[str, List[str]]:
+        if base_points < 50:
+            return "hard_ng", [f"LOW_POINTS(points={base_points})"]
+        if fx_points < 50:
+            return "hard_ng", [f"LOW_POINTS(points={fx_points})"]
+        if combined_points < 50:
+            return "hard_ng", [f"LOW_POINTS(points={combined_points})"]
+
+        denom = min(base_points, fx_points) if min(base_points, fx_points) > 0 else 1
+        missing_ratio = 1.0 - (combined_points / denom)
+        if missing_ratio >= 0.50:
+            return "hard_ng", [f"HIGH_NAN_RATIO(nan_ratio={missing_ratio:.2f})"]
+
+        soft_flags: List[str] = []
+        if base_points < 200:
+            soft_flags.append(f"LOW_POINTS(points={base_points})")
+        if fx_points < 200:
+            soft_flags.append(f"LOW_POINTS(points={fx_points})")
+        if combined_points < 200:
+            soft_flags.append(f"LOW_POINTS(points={combined_points})")
+        if missing_ratio >= 0.10:
+            soft_flags.append(f"HIGH_NAN_RATIO(nan_ratio={missing_ratio:.2f})")
+
+        if soft_flags:
+            return "soft_ng", soft_flags
+        return "ok", []
+
+    def _quality_summary(self, flags: List[str]) -> str:
+        if not flags:
+            return "QUALITY_OK"
+        return " | ".join(flags)
+
     def _update_last_good_history(self, index_type: str, history: List[Tuple[str, float]]) -> None:
         index_type = self._normalize_index_type(index_type)
         self._last_good_history[index_type] = [(d, round(float(v), 2)) for d, v in history]
@@ -295,9 +427,11 @@ class SP500MarketService:
                     attempt=attempt,
                     history=series,
                 )
+                self._set_debug(index_type, validation_reason=reason)
                 last_error = ValueError(reason)
             except Exception as exc:
                 last_error = exc
+                self._set_debug(index_type, fetch_error=str(exc))
                 logger.warning(
                     "Index JPY history fetch failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
                     index_type,
@@ -320,37 +454,93 @@ class SP500MarketService:
                 last_good[-1][1] if last_good else None,
             )
             self._set_last_source(index_type, "last_good")
+            self._set_debug(index_type, adoption_reason="last_good")
             return last_good
 
         if last_error:
-            raise last_error
-        raise ValueError("index_jpy history unavailable")
+            raise ValueError("data_unavailable") from last_error
+        raise ValueError("data_unavailable")
 
-    def _fetch_yfinance_history_with_retry(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+    def _fetch_yfinance_history_with_retry(
+        self,
+        start: date,
+        end: date,
+        index_type: str,
+        *,
+        enforce_quality: bool = True,
+    ) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
         symbol_candidates = self._resolve_symbol_candidates(index_type)
         symbol = symbol_candidates[0]
         price_type = self._resolve_price_type(index_type)
         backoffs = [0.2, 0.5, 1.0]
         last_error: Optional[Exception] = None
+        tried_symbols: List[str] = []
 
         for attempt, delay in enumerate(backoffs, start=1):
             for candidate_symbol in symbol_candidates:
                 symbol = candidate_symbol
+                if symbol not in tried_symbols:
+                    tried_symbols.append(symbol)
                 try:
                     closes = self._download_close_series(symbol, start, end)
                     history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
                     reason = self._validate_history(history, index_type)
                     if not reason:
+                        if enforce_quality:
+                            quality_status, quality_reason = self._quality_check_history(history)
+                            if quality_status == "hard_ng":
+                                summary = self._quality_summary(quality_reason)
+                                self._set_debug(
+                                    index_type,
+                                    quality_flags=quality_reason,
+                                    quality_summary=summary,
+                                    quality_check={"symbol": symbol, "result": "quality_ng", "reason": summary},
+                                )
+                                logger.warning(
+                                    "Candidate quality NG index=%s symbol=%s result=quality_ng reason=%s",
+                                    index_type,
+                                    symbol,
+                                    summary,
+                                )
+                                last_error = ValueError(summary)
+                                continue
+                            if quality_status == "soft_ng":
+                                summary = self._quality_summary(quality_reason)
+                                degrade_reason = f"LOW_QUALITY_DATA:{summary}"
+                                source = "real" if symbol == symbol_candidates[0] else "fallback_degraded"
+                                self._set_debug(
+                                    index_type,
+                                    validation_reason=degrade_reason,
+                                    quality_flags=quality_reason,
+                                    quality_summary=summary,
+                                )
+                            else:
+                                source = "real" if symbol == symbol_candidates[0] else "real_fallback"
+                        else:
+                            source = "real" if symbol == symbol_candidates[0] else "real_fallback"
                         logger.info(
-                            "Using yfinance history for %s (symbol=%s price_type=%s points=%d)",
+                            "Using yfinance history for %s (symbol=%s price_type=%s points=%d tried_symbols=%s source=%s)",
                             index_type,
                             symbol,
                             price_type,
                             len(history),
+                            tried_symbols,
+                            source,
                         )
                         self._update_last_good_history(index_type, history)
-                        self._set_last_source(index_type, "real")
+                        self._set_last_source(index_type, source)
+                        self._set_debug(
+                            index_type,
+                            tried_symbols=tried_symbols,
+                            adopted_symbol=symbol,
+                            adoption_reason="primary" if symbol == symbol_candidates[0] else "fallback",
+                            quality_check={
+                                "symbol": symbol,
+                                "result": "success" if not enforce_quality or quality_status == "ok" else "soft_ng_adopted",
+                                "reason": self._quality_summary(quality_reason) if enforce_quality and quality_status == "soft_ng" else None,
+                            },
+                        )
                         return history
                     self._log_validation_failure(
                         index_type=index_type,
@@ -360,9 +550,11 @@ class SP500MarketService:
                         attempt=attempt,
                         history=history,
                     )
+                    self._set_debug(index_type, validation_reason=reason)
                     last_error = ValueError(reason)
                 except Exception as exc:
                     last_error = exc
+                    self._set_debug(index_type, fetch_error=str(exc))
                     logger.warning(
                         "Price history attempt failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
                         index_type,
@@ -385,38 +577,151 @@ class SP500MarketService:
                 last_good[-1][1] if last_good else None,
             )
             self._set_last_source(index_type, "last_good")
+            self._set_debug(index_type, adoption_reason="last_good")
             return last_good
 
         if last_error:
-            raise last_error
-        raise ValueError("history unavailable")
+            logger.warning(
+                "No real history resolved index=%s tried_symbols=%s",
+                index_type,
+                tried_symbols,
+            )
+            self._set_debug(index_type, tried_symbols=tried_symbols)
+            raise ValueError("data_unavailable") from last_error
+        raise ValueError("data_unavailable")
 
     def _fetch_index_history_jpy(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
-        symbol = self._resolve_symbol(index_type)
-        fx_symbol = self._resolve_fx_symbol(index_type)
-        if not fx_symbol:
+        symbol_candidates = self._resolve_symbol_candidates(index_type)
+        fx_symbol_candidates = self._resolve_fx_symbol_candidates(index_type)
+        if not fx_symbol_candidates:
             raise ValueError("fx_symbol required for index_jpy")
 
-        idx_close = self._download_close_series(symbol, start, end).rename("close_usd")
-        fx_close = self._download_close_series(fx_symbol, start, end).rename("usdjpy")
+        tried_symbols: List[str] = []
+        tried_fx_symbols: List[str] = []
+        last_error: Optional[Exception] = None
 
-        combined = pd.concat([idx_close, fx_close], axis=1, join="inner").dropna()
-        if combined.empty:
-            raise ValueError("no overlapping dates for index and fx")
+        for symbol in symbol_candidates:
+            if symbol not in tried_symbols:
+                tried_symbols.append(symbol)
+            try:
+                idx_close = self._download_close_series(symbol, start, end).rename("close_usd")
+            except Exception as exc:
+                last_error = exc
+                self._set_debug(index_type, fetch_error=str(exc))
+                logger.warning("JPY candidate failed index=%s symbol=%s result=failed error=%s", index_type, symbol, exc)
+                continue
 
-        combined["close"] = combined["close_usd"] * combined["usdjpy"]
-        series = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in combined["close"].items()]
-        logger.info(
-            "Using yfinance history for %s (symbol=%s fx_symbol=%s price_type=%s points=%d)",
+            for fx_symbol in fx_symbol_candidates:
+                if fx_symbol not in tried_fx_symbols:
+                    tried_fx_symbols.append(fx_symbol)
+                try:
+                    fx_close = self._download_close_series(fx_symbol, start, end).rename("usdjpy")
+                    combined = pd.concat([idx_close, fx_close], axis=1, join="inner").dropna()
+                    if combined.empty:
+                        self._set_debug(index_type, fetch_error="no overlapping dates for index and fx", combined_points=0)
+                        last_error = ValueError("no overlapping dates for index and fx")
+                        logger.warning(
+                            "JPY candidate quality NG index=%s symbol=%s fx_symbol=%s result=quality_ng reason=no_overlapping_dates",
+                            index_type,
+                            symbol,
+                            fx_symbol,
+                        )
+                        continue
+
+                    combined["close"] = combined["close_usd"] * combined["usdjpy"]
+                    series = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in combined["close"].items()]
+                    quality_status, quality_reason = self._quality_check_index_jpy(
+                        base_points=len(idx_close),
+                        fx_points=len(fx_close),
+                        combined_points=len(combined),
+                    )
+                    if quality_status == "hard_ng":
+                        summary = self._quality_summary(quality_reason)
+                        self._set_debug(
+                            index_type,
+                            quality_flags=quality_reason,
+                            quality_summary=summary,
+                            quality_check={"symbol": symbol, "fx_symbol": fx_symbol, "result": "quality_ng", "reason": summary},
+                        )
+                        logger.warning(
+                            "JPY candidate quality NG index=%s symbol=%s fx_symbol=%s result=quality_ng reason=%s base_points=%d fx_points=%d combined_points=%d",
+                            index_type,
+                            symbol,
+                            fx_symbol,
+                            summary,
+                            len(idx_close),
+                            len(fx_close),
+                            len(combined),
+                        )
+                        last_error = ValueError(summary)
+                        continue
+                    source = "real"
+                    if symbol != symbol_candidates[0] or fx_symbol != fx_symbol_candidates[0]:
+                        source = "real_fallback"
+                    if quality_status == "soft_ng":
+                        source = "fallback_degraded"
+                        summary = self._quality_summary(quality_reason)
+                        self._set_debug(
+                            index_type,
+                            validation_reason=f"LOW_QUALITY_DATA:{summary}",
+                            quality_flags=quality_reason,
+                            quality_summary=summary,
+                        )
+                    logger.info(
+                        "Using yfinance history for %s (symbol=%s fx_symbol=%s price_type=%s points=%d tried_symbols=%s tried_fx_symbols=%s source=%s)",
+                        index_type,
+                        symbol,
+                        fx_symbol,
+                        self._resolve_price_type(index_type),
+                        len(series),
+                        tried_symbols,
+                        tried_fx_symbols,
+                        source,
+                    )
+                    self._set_last_source(index_type, source)
+                    self._set_debug(
+                        index_type,
+                        combined_points=len(series),
+                        tried_symbols=tried_symbols,
+                        tried_fx_symbols=tried_fx_symbols,
+                        adopted_symbol=symbol,
+                        adopted_fx_symbol=fx_symbol,
+                        adoption_reason=(
+                            "primary"
+                            if symbol == symbol_candidates[0] and fx_symbol == fx_symbol_candidates[0]
+                            else "fallback"
+                        ),
+                        quality_check={
+                            "symbol": symbol,
+                            "fx_symbol": fx_symbol,
+                            "result": "success" if quality_status == "ok" else "soft_ng_adopted",
+                            "reason": self._quality_summary(quality_reason) if quality_status == "soft_ng" else None,
+                        },
+                    )
+                    return series
+                except Exception as exc:
+                    last_error = exc
+                    self._set_debug(index_type, fetch_error=str(exc))
+                    logger.warning(
+                        "JPY candidate failed index=%s symbol=%s fx_symbol=%s result=failed error=%s",
+                        index_type,
+                        symbol,
+                        fx_symbol,
+                        exc,
+                    )
+                    continue
+
+        self._set_debug(index_type, tried_symbols=tried_symbols, tried_fx_symbols=tried_fx_symbols)
+        logger.warning(
+            "No real index_jpy history resolved index=%s tried_symbols=%s tried_fx_symbols=%s",
             index_type,
-            symbol,
-            fx_symbol,
-            self._resolve_price_type(index_type),
-            len(series),
+            tried_symbols,
+            tried_fx_symbols,
         )
-        self._set_last_source(index_type, "real")
-        return series
+        if last_error:
+            raise ValueError("data_unavailable") from last_error
+        raise ValueError("data_unavailable")
 
     def _fetch_nav_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         """Optional custom NAV API (if provided by env) returning date/close pairs."""
@@ -543,30 +848,66 @@ class SP500MarketService:
         if not history:
             return "fallback_empty"
         index_type = self._normalize_index_type(index_type)
+        quality_status, quality_reason = self._quality_check_history(history)
+        if quality_status == "hard_ng":
+            return self._quality_summary(quality_reason)
         start_price = self.start_prices.get(index_type)
         first = history[0][1]
         last = history[-1][1]
+        soft_reason: Optional[str] = None
+        if quality_status == "soft_ng":
+            soft_reason = self._quality_summary(quality_reason)
         if start_price and last < start_price * 0.6:
-            return f"fallback_too_low:{last:.2f}<{start_price * 0.6:.2f}"
+            if soft_reason:
+                return f"SOFT:{soft_reason},fallback_too_low:{last:.2f}<{start_price * 0.6:.2f}"
+            return f"SOFT:fallback_too_low:{last:.2f}<{start_price * 0.6:.2f}"
         if first > 0:
             five_year_return = (last / first - 1.0) * 100.0
             if five_year_return <= -50.0:
-                return f"fallback_5y_return_too_low:{five_year_return:.2f}%"
+                if soft_reason:
+                    return f"SOFT:{soft_reason},fallback_5y_return_too_low:{five_year_return:.2f}%"
+                return f"SOFT:fallback_5y_return_too_low:{five_year_return:.2f}%"
+        if soft_reason:
+            return f"SOFT:{soft_reason}"
         return None
 
     def _build_valid_fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
-        if index_type == "TOPIX":
-            return self._fallback_history(start, end, index_type)
         fallback = self._fallback_history(start, end, index_type)
+        if index_type == "TOPIX":
+            self._set_debug(index_type, quality_check={"type": "synthetic_fallback", "result": "success", "reason": "topix_bypass"})
+            return fallback
         reason = self._fallback_quality_reason(fallback, index_type)
         if not reason:
+            self._set_debug(index_type, quality_check={"type": "synthetic_fallback", "result": "success"})
+            return fallback
+        if reason.startswith("SOFT:"):
+            raw = reason.removeprefix("SOFT:")
+            normalized = raw.replace(",", " | ")
+            flags = [part.strip() for part in normalized.split("|") if part.strip()]
+            summary = self._quality_summary(flags)
+            low_quality_reason = f"LOW_QUALITY_DATA:{summary}"
+            self._set_debug(
+                index_type,
+                validation_reason=low_quality_reason,
+                quality_flags=flags,
+                quality_summary=summary,
+                quality_check={"type": "synthetic_fallback", "result": "soft_ng_adopted", "reason": low_quality_reason},
+                adoption_reason="fallback",
+            )
             return fallback
 
         logger.warning("Fallback quality check failed index=%s reason=%s", index_type, reason)
+        self._set_debug(
+            index_type,
+            validation_reason=reason,
+            quality_check={"type": "synthetic_fallback", "result": "quality_ng", "reason": reason},
+        )
         if index_type in self._last_good_history:
             last_good = self._last_good_history[index_type]
             logger.info("Using last good history after fallback quality fail index=%s points=%d", index_type, len(last_good))
+            self._set_last_source(index_type, "last_good")
+            self._set_debug(index_type, adoption_reason="last_good")
             return last_good
         raise ValueError("data_unavailable")
 
@@ -585,6 +926,22 @@ class SP500MarketService:
         today = date.today()
         start = today - timedelta(days=365 * 5)
         allow_synth = self._allow_synthetic_for_index(index_type)
+        self._set_debug(
+            index_type,
+            normalized_index_type=index_type,
+            symbol=self._resolve_symbol(index_type),
+            fx_symbol=self._resolve_fx_symbol(index_type),
+            price_type=self._resolve_price_type(index_type),
+            fetch_error=None,
+            validation_reason=None,
+            points=0,
+            first_close=None,
+            last_close=None,
+            one_year_return=None,
+            combined_points=None,
+            quality_flags=[],
+            quality_summary="",
+        )
         try:
             price_type = self._resolve_price_type(index_type)
             if price_type == "index_jpy":
@@ -616,6 +973,7 @@ class SP500MarketService:
 
             return self._fetch_yfinance_history_with_retry(start, today, index_type)
         except Exception as exc:
+            self._set_debug(index_type, fetch_error=str(exc))
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
             if index_type in self._last_good_history:
                 last_good = self._last_good_history[index_type]
@@ -632,6 +990,7 @@ class SP500MarketService:
             if not allow_synth:
                 raise
             fallback = self._build_valid_fallback_history(start, today, index_type)
+            self._update_last_good_history(index_type, fallback)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -639,8 +998,31 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
-            self._set_last_source(index_type, "fallback")
+            debug = self.get_last_debug(index_type)
+            validation_reason = str(debug.get("validation_reason") or "")
+            if index_type == "TOPIX":
+                source = "fallback"
+            else:
+                source = "fallback_degraded" if "LOW_QUALITY_DATA" in validation_reason else "real_fallback"
+            self._set_last_source(index_type, source)
             return fallback
+        finally:
+            history = self._last_good_history.get(index_type)
+            if history:
+                first = history[0][1]
+                last = history[-1][1]
+                one_year_return = None
+                if len(history) >= 252:
+                    base_1y = history[-252][1]
+                    if base_1y > 0:
+                        one_year_return = round((last / base_1y - 1.0) * 100.0, 2)
+                self._set_debug(
+                    index_type,
+                    points=len(history),
+                    first_close=first,
+                    last_close=last,
+                    one_year_return=one_year_return,
+                )
 
     def get_price_history_range(
         self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
@@ -677,7 +1059,7 @@ class SP500MarketService:
                     history=nav_hist,
                 )
 
-            return self._fetch_yfinance_history_with_retry(start, end, index_type)
+            return self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
         except Exception as exc:
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
             if index_type in self._last_good_history:
@@ -702,7 +1084,13 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
-            self._set_last_source(index_type, "fallback")
+            debug = self.get_last_debug(index_type)
+            validation_reason = str(debug.get("validation_reason") or "")
+            if index_type == "TOPIX":
+                source = "fallback"
+            else:
+                source = "fallback_degraded" if "LOW_QUALITY_DATA" in validation_reason else "real_fallback"
+            self._set_last_source(index_type, source)
             return fallback
 
     def get_usd_jpy(self) -> float:

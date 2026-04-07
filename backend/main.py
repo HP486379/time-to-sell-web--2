@@ -411,6 +411,38 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
     return snapshot
 
 
+def _build_debug_payload(requested_index_type: str, used_index_type: str, snapshot: dict) -> dict:
+    service_debug = market_service.get_last_debug(used_index_type)
+    price_history = snapshot.get("price_history") or []
+    technical_score = float((snapshot.get("scores") or {}).get("technical", 0.0) or 0.0)
+    period_scores = snapshot.get("period_scores") or {}
+    return {
+        "requested_index_type": requested_index_type,
+        "used_index_type": used_index_type,
+        "source": snapshot.get("source"),
+        "symbol": service_debug.get("symbol"),
+        "fx_symbol": service_debug.get("fx_symbol"),
+        "price_type": service_debug.get("price_type"),
+        "fetch_error": service_debug.get("fetch_error"),
+        "validation_reason": service_debug.get("validation_reason"),
+        "quality_flags": service_debug.get("quality_flags"),
+        "quality_summary": service_debug.get("quality_summary"),
+        "price_history_points": service_debug.get("points", len(price_history)),
+        "combined_points": service_debug.get("combined_points"),
+        "first_close": service_debug.get("first_close"),
+        "last_close": service_debug.get("last_close"),
+        "one_year_return": service_debug.get("one_year_return"),
+        "technical_score": technical_score,
+        "period_scores": {
+            "short": period_scores.get("short"),
+            "mid": period_scores.get("mid"),
+            "long": period_scores.get("long"),
+        },
+        "scores_total": (snapshot.get("scores") or {}).get("total"),
+        "reasons": (snapshot.get("technical_details") or {}).get("reason"),
+    }
+
+
 # ======================
 # NAV Endpoints
 # ======================
@@ -542,18 +574,36 @@ def run_backtest(payload: BacktestRequest):
 # ======================
 
 @app.post("/api/sp500/evaluate")
-def evaluate_sp500(position: PositionRequest):
+def evaluate_sp500(position: PositionRequest, debug: bool = Query(False)):
     try:
-        return get_cached_snapshot(position.index_type)
+        requested_index_type = str(position.index_type.value)
+        used_index_type = normalize_index_type(requested_index_type)
+        snapshot = get_cached_snapshot(position.index_type)
+        debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
+        logger.info("[evaluate] debug=%s", debug_payload)
+        if debug:
+            response = dict(snapshot)
+            response["debug"] = debug_payload
+            return response
+        return snapshot
     except Exception:
         logger.exception("Evaluation failed")
         raise HTTPException(status_code=502, detail="Evaluation failed")
 
 
 @app.post("/api/evaluate")
-def evaluate(position: PositionRequest):
+def evaluate(position: PositionRequest, debug: bool = Query(False)):
     try:
-        return get_cached_snapshot(position.index_type)
+        requested_index_type = str(position.index_type.value)
+        used_index_type = normalize_index_type(requested_index_type)
+        snapshot = get_cached_snapshot(position.index_type)
+        debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
+        logger.info("[evaluate] debug=%s", debug_payload)
+        if debug:
+            response = dict(snapshot)
+            response["debug"] = debug_payload
+            return response
+        return snapshot
     except Exception:
         logger.exception("Evaluation failed")
         raise HTTPException(status_code=502, detail="Evaluation failed")
