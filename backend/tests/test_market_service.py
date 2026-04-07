@@ -17,7 +17,7 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
     dates = pd.date_range("2020-01-01", periods=35, freq="B")
     df = pd.DataFrame({"Close": [1000.0 + i for i in range(35)]}, index=dates)
 
-    def fake_download(symbol, start, end, interval):  # pragma: no cover - simple stub
+    def fake_download(symbol, start, end, interval, **kwargs):  # pragma: no cover - simple stub
         return df
 
     monkeypatch.setattr(yf, "download", fake_download)
@@ -182,3 +182,41 @@ def test_topix_fallback_skips_strict_quality_gate(monkeypatch):
 
     history = service._build_valid_fallback_history(start, end, "TOPIX")
     assert history == degraded
+
+
+def test_last_good_source_marked_as_last_good(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    last_good = _history_from_values("2024-01-01", [4100.0 + i for i in range(60)])
+    service._last_good_history["SP500"] = last_good
+
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fail")))
+    monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
+
+    history = service.get_price_history_range(start, end, allow_fallback=False, index_type="SP500")
+    assert history == last_good
+    assert service.get_last_source("SP500") == "last_good"
+
+
+def test_topix_symbol_candidates_include_fallback():
+    service = SP500MarketService(symbol="TEST")
+    candidates = service._resolve_symbol_candidates("TOPIX")
+    assert "^TOPX" in candidates
+    assert "1306.T" in candidates
+
+
+def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    degraded = _history_from_values("2024-01-01", [1500.0, 500.0])
+
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fail")))
+    monkeypatch.setattr(service, "_fallback_history", lambda s, e, index_type: degraded)
+    monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
+
+    history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
+
+    assert history == degraded
+    assert service.get_last_source("TOPIX") == "fallback"

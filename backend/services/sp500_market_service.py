@@ -21,9 +21,19 @@ class SP500MarketService:
 
     def __init__(self, symbol: Optional[str] = None):
         load_dotenv()
+        self._yf_session = requests.Session()
+        self._yf_session.headers.update(
+            {
+                "User-Agent": os.getenv(
+                    "MARKET_DATA_USER_AGENT",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                )
+            }
+        )
         self.symbol_map = {
             "SP500": symbol or os.getenv("SP500_SYMBOL", "^GSPC"),
-            "TOPIX": os.getenv("TOPIX_SYMBOL", "1306.T"),
+            "TOPIX": os.getenv("TOPIX_SYMBOL", "^TOPX"),
             "NIKKEI225": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIFTY50": os.getenv("NIFTY50_SYMBOL", "^NSEI"),
             # オルカンは MSCI ACWI 連動 ETF（ACWI）をプロキシとして利用する
@@ -32,6 +42,9 @@ class SP500MarketService:
             "ALLCOUNTRY_JPY": os.getenv("ORUKAN_JPY_SYMBOL", os.getenv("ORUKAN_SYMBOL", "ACWI")),
             # S&P500 円建ては ^GSPC × USD/JPY を用いる
             "SP500_JPY": os.getenv("SP500_JPY_SYMBOL", os.getenv("SP500_SYMBOL", "^GSPC")),
+        }
+        self.symbol_fallback_map = {
+            "TOPIX": [os.getenv("TOPIX_SYMBOL_FALLBACK", "1306.T")],
         }
 
         self.fx_symbol_map = {
@@ -114,6 +127,17 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         return self.symbol_map.get(index_type, self.symbol_map["SP500"])
 
+    def _resolve_symbol_candidates(self, index_type: str) -> List[str]:
+        index_type = self._normalize_index_type(index_type)
+        primary = self._resolve_symbol(index_type)
+        fallbacks = self.symbol_fallback_map.get(index_type, [])
+        candidates = [primary, *fallbacks]
+        deduped: List[str] = []
+        for symbol in candidates:
+            if symbol and symbol not in deduped:
+                deduped.append(symbol)
+        return deduped
+
     def _set_last_source(self, index_type: str, source: str) -> None:
         index_type = self._normalize_index_type(index_type)
         self._last_source[index_type] = source
@@ -139,7 +163,27 @@ class SP500MarketService:
         return self.price_type_map.get(index_type)
 
     def _download_close_series(self, symbol: str, start: date, end: date) -> pd.Series:
-        hist = yf.download(symbol, start=start, end=end + timedelta(days=1), interval="1d")
+        try:
+            hist = yf.download(
+                symbol,
+                start=start,
+                end=end + timedelta(days=1),
+                interval="1d",
+                progress=False,
+                threads=False,
+                session=self._yf_session,
+            )
+        except Exception as exc:
+            if "requires curl_cffi session" not in str(exc):
+                raise
+            hist = yf.download(
+                symbol,
+                start=start,
+                end=end + timedelta(days=1),
+                interval="1d",
+                progress=False,
+                threads=False,
+            )
         hist = hist.dropna()
         closes = self._extract_close_series(hist)
         if closes.empty:
@@ -275,6 +319,7 @@ class SP500MarketService:
                 len(last_good),
                 last_good[-1][1] if last_good else None,
             )
+            self._set_last_source(index_type, "last_good")
             return last_good
 
         if last_error:
@@ -283,46 +328,49 @@ class SP500MarketService:
 
     def _fetch_yfinance_history_with_retry(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
-        symbol = self._resolve_symbol(index_type)
+        symbol_candidates = self._resolve_symbol_candidates(index_type)
+        symbol = symbol_candidates[0]
         price_type = self._resolve_price_type(index_type)
         backoffs = [0.2, 0.5, 1.0]
         last_error: Optional[Exception] = None
 
         for attempt, delay in enumerate(backoffs, start=1):
-            try:
-                closes = self._download_close_series(symbol, start, end)
-                history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
-                reason = self._validate_history(history, index_type)
-                if not reason:
-                    logger.info(
-                        "Using yfinance history for %s (symbol=%s price_type=%s points=%d)",
+            for candidate_symbol in symbol_candidates:
+                symbol = candidate_symbol
+                try:
+                    closes = self._download_close_series(symbol, start, end)
+                    history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
+                    reason = self._validate_history(history, index_type)
+                    if not reason:
+                        logger.info(
+                            "Using yfinance history for %s (symbol=%s price_type=%s points=%d)",
+                            index_type,
+                            symbol,
+                            price_type,
+                            len(history),
+                        )
+                        self._update_last_good_history(index_type, history)
+                        self._set_last_source(index_type, "real")
+                        return history
+                    self._log_validation_failure(
+                        index_type=index_type,
+                        symbol=symbol,
+                        price_type=price_type,
+                        reason=reason,
+                        attempt=attempt,
+                        history=history,
+                    )
+                    last_error = ValueError(reason)
+                except Exception as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Price history attempt failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
                         index_type,
                         symbol,
                         price_type,
-                        len(history),
+                        attempt,
+                        exc,
                     )
-                    self._update_last_good_history(index_type, history)
-                    self._set_last_source(index_type, "real")
-                    return history
-                self._log_validation_failure(
-                    index_type=index_type,
-                    symbol=symbol,
-                    price_type=price_type,
-                    reason=reason,
-                    attempt=attempt,
-                    history=history,
-                )
-                last_error = ValueError(reason)
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "Price history attempt failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
-                    index_type,
-                    symbol,
-                    price_type,
-                    attempt,
-                    exc,
-                )
             if attempt < len(backoffs):
                 time.sleep(delay)
 
@@ -336,6 +384,7 @@ class SP500MarketService:
                 len(last_good),
                 last_good[-1][1] if last_good else None,
             )
+            self._set_last_source(index_type, "last_good")
             return last_good
 
         if last_error:
@@ -453,13 +502,14 @@ class SP500MarketService:
 
         history: List[Tuple[str, float]] = []
         price = self.start_prices.get(index_type, 4000.0)
+        noise_span = 0.003 if index_type == "TOPIX" else 0.006
 
         current = start
         while current <= end:
             if current.weekday() < 5:  # 月〜金のみ
-                noise = rng.uniform(-0.006, 0.006)  # ±0.6% 程度の揺らぎ
-                # 半年ごとに5%程度の調整を入れて drawdown を作る
-                if (current.timetuple().tm_yday // 182) % 2 == 1:
+                noise = rng.uniform(-noise_span, noise_span)
+                # 半年ごとに5%程度の調整を入れて drawdown を作る（TOPIXは除外）
+                if index_type != "TOPIX" and (current.timetuple().tm_yday // 182) % 2 == 1:
                     noise -= 0.002
 
                 daily_change = 1 + daily_drift + noise
@@ -577,7 +627,7 @@ class SP500MarketService:
                     len(last_good),
                     last_good[-1][1] if last_good else None,
                 )
-                self._set_last_source(index_type, "fallback")
+                self._set_last_source(index_type, "last_good")
                 return last_good
             if not allow_synth:
                 raise
@@ -640,7 +690,7 @@ class SP500MarketService:
                     len(last_good),
                     last_good[-1][1] if last_good else None,
                 )
-                self._set_last_source(index_type, "fallback")
+                self._set_last_source(index_type, "last_good")
                 return last_good
             if not fallback_allowed:
                 raise
