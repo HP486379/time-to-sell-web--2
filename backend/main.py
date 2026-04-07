@@ -208,7 +208,12 @@ def _price_history_range():
 
 
 def _get_price_series(index_type: IndexType):
-    price_history = market_service.get_price_history(index_type.value)
+    price_history = market_service.get_price_history(index_type.value, allow_synthetic=False)
+    source = market_service.get_last_source(index_type.value)
+    restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
+    allowed_sources = {"nav_api", "stooq", "yfinance", "last_good", "bootstrap", "real", "real_fallback"}
+    if index_type in restricted and source not in allowed_sources:
+        raise PriceHistoryFetchError(f"price history unavailable for chart source={source}")
     return market_service.build_price_series_with_ma(price_history)
 
 
@@ -242,7 +247,7 @@ def _build_event_adjustment(target: date):
     return float(event_adjustment or 0.0), event_details, int(event_count or 0)
 
 
-def get_cached_snapshot(index_type: IndexType) -> dict:
+def get_cached_snapshot(index_type: IndexType, allow_synthetic: bool = False) -> dict:
     key = index_type.value
     now = datetime.now(timezone.utc)
     if key in _cached_at and (now - _cached_at[key]) < _cache_ttl:
@@ -267,7 +272,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
     }
 
     try:
-        price_history = market_service.get_price_history(index_type.value)
+        price_history = market_service.get_price_history(index_type.value, allow_synthetic=allow_synthetic)
     except PriceHistoryFetchError:
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
@@ -284,6 +289,16 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
 
     current_price = price_history[-1][1]
     snapshot["source"] = market_service.get_last_source(index_type.value)
+    restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
+    allowed_sources = {"nav_api", "stooq", "yfinance", "last_good", "bootstrap", "real", "real_fallback"}
+    if index_type in restricted and snapshot["source"] not in allowed_sources:
+        logger.warning(
+            "[snapshot] disallow non-real source for %s source=%s",
+            index_type.value,
+            snapshot["source"],
+        )
+        snapshot["source"] = "data_unavailable"
+        return snapshot
 
     try:
         technical_score, technical_details = calculate_technical_score(price_history)
@@ -420,6 +435,7 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "requested_index_type": requested_index_type,
         "used_index_type": used_index_type,
         "source": snapshot.get("source"),
+        "source_confidence": service_debug.get("source_confidence"),
         "symbol": service_debug.get("symbol"),
         "fx_symbol": service_debug.get("fx_symbol"),
         "price_type": service_debug.get("price_type"),
@@ -427,6 +443,8 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "validation_reason": service_debug.get("validation_reason"),
         "quality_flags": service_debug.get("quality_flags"),
         "quality_summary": service_debug.get("quality_summary"),
+        "tried_providers": service_debug.get("tried_providers"),
+        "adopted_provider": service_debug.get("adopted_provider"),
         "price_history_points": service_debug.get("points", len(price_history)),
         "combined_points": service_debug.get("combined_points"),
         "first_close": service_debug.get("first_close"),
@@ -578,7 +596,7 @@ def evaluate_sp500(position: PositionRequest, debug: bool = Query(False)):
     try:
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(position.index_type)
+        snapshot = get_cached_snapshot(position.index_type, allow_synthetic=debug)
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
         if debug:
@@ -596,7 +614,7 @@ def evaluate(position: PositionRequest, debug: bool = Query(False)):
     try:
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(position.index_type)
+        snapshot = get_cached_snapshot(position.index_type, allow_synthetic=debug)
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
         if debug:

@@ -3,7 +3,9 @@ import math
 import os
 import random
 import time
+import json
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -11,6 +13,12 @@ import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 from domain.index_type import normalize_index_type
+from services.market_data_provider import (
+    fetch_fx_from_stooq,
+    fetch_history_from_nav_api,
+    fetch_history_from_stooq,
+    fetch_history_from_yfinance,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +117,13 @@ class SP500MarketService:
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
         self._last_source: Dict[str, str] = {}
         self._last_debug: Dict[str, Dict[str, object]] = {}
+        self._enable_cache = symbol != "TEST"
+        self._cache_dir = Path(__file__).resolve().parent.parent / "data" / "cache"
+        self._bootstrap_synth_flag_file = self._cache_dir / "bootstrap_synth_once.json"
+        self._bootstrap_allow_synth_once = self._flag("BOOTSTRAP_ALLOW_SYNTHETIC_ONCE", default=True)
+        if self._enable_cache:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            self._load_last_good_cache()
 
         logger.info(
             "[MARKET CONFIG] symbols=%s fx_symbols=%s fallback=%s price_types=%s",
@@ -117,6 +132,58 @@ class SP500MarketService:
             self.allow_synth_map,
             self.price_type_map,
         )
+
+    def _cache_path(self, index_type: str) -> Path:
+        return self._cache_dir / f"{index_type}.json"
+
+    def _load_last_good_cache(self) -> None:
+        for index_type in self.symbol_map.keys():
+            path = self._cache_path(index_type)
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text())
+                history = payload.get("history")
+                if not isinstance(history, list) or not history:
+                    continue
+                normalized = [(str(d), float(v)) for d, v in history]
+                self._last_good_history[index_type] = normalized
+                logger.info("Loaded last_good cache index=%s points=%d", index_type, len(normalized))
+            except Exception as exc:
+                logger.warning("Failed loading cache index=%s path=%s err=%s", index_type, path, exc)
+
+    def _persist_last_good_cache(self, index_type: str) -> None:
+        if not self._enable_cache:
+            return
+        path = self._cache_path(index_type)
+        history = self._last_good_history.get(index_type)
+        if not history:
+            return
+        payload = {"index_type": index_type, "history": history}
+        path.write_text(json.dumps(payload, ensure_ascii=False))
+
+    def _mark_bootstrap_synth_used(self, index_type: str) -> None:
+        if not self._enable_cache:
+            return
+        used = set()
+        if self._bootstrap_synth_flag_file.exists():
+            try:
+                used = set(json.loads(self._bootstrap_synth_flag_file.read_text()).get("used", []))
+            except Exception:
+                used = set()
+        used.add(index_type)
+        self._bootstrap_synth_flag_file.write_text(json.dumps({"used": sorted(list(used))}, ensure_ascii=False))
+
+    def _is_bootstrap_synth_used(self, index_type: str) -> bool:
+        if not self._enable_cache:
+            return False
+        if not self._bootstrap_synth_flag_file.exists():
+            return False
+        try:
+            used = set(json.loads(self._bootstrap_synth_flag_file.read_text()).get("used", []))
+            return index_type in used
+        except Exception:
+            return False
 
     def _normalize_index_type(self, index_type: str) -> str:
         return normalize_index_type(index_type, default="SP500", logger=logger)
@@ -159,11 +226,23 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         self._last_source[index_type] = source
         self._last_debug.setdefault(index_type, {})["source"] = source
+        self._last_debug.setdefault(index_type, {})["source_confidence"] = self.get_source_confidence(source)
         logger.info("Market source decided index=%s source=%s", index_type, source)
 
     def get_last_source(self, index_type: str) -> str:
         index_type = self._normalize_index_type(index_type)
         return self._last_source.get(index_type, "real")
+
+    def get_source_confidence(self, source: str) -> str:
+        confidence_map = {
+            "stooq": "high",
+            "nav_api": "high",
+            "yfinance": "medium",
+            "last_good": "medium",
+            "bootstrap": "medium",
+            "synthetic": "low",
+        }
+        return confidence_map.get(source, "medium")
 
     def _set_debug(self, index_type: str, **kwargs) -> None:
         index_type = self._normalize_index_type(index_type)
@@ -201,32 +280,7 @@ class SP500MarketService:
         return self.price_type_map.get(index_type)
 
     def _download_close_series(self, symbol: str, start: date, end: date) -> pd.Series:
-        try:
-            hist = yf.download(
-                symbol,
-                start=start,
-                end=end + timedelta(days=1),
-                interval="1d",
-                progress=False,
-                threads=False,
-                session=self._yf_session,
-            )
-        except Exception as exc:
-            if "requires curl_cffi session" not in str(exc):
-                raise
-            hist = yf.download(
-                symbol,
-                start=start,
-                end=end + timedelta(days=1),
-                interval="1d",
-                progress=False,
-                threads=False,
-            )
-        hist = hist.dropna()
-        closes = self._extract_close_series(hist)
-        if closes.empty:
-            raise ValueError(f"empty history for {symbol}")
-        return closes
+        return fetch_history_from_yfinance(symbol, start, end, session=self._yf_session)
 
     def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
@@ -382,6 +436,21 @@ class SP500MarketService:
     def _update_last_good_history(self, index_type: str, history: List[Tuple[str, float]]) -> None:
         index_type = self._normalize_index_type(index_type)
         self._last_good_history[index_type] = [(d, round(float(v), 2)) for d, v in history]
+        self._persist_last_good_cache(index_type)
+
+    def _provider_acceptance_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
+        if len(history) < 200:
+            return f"provider_reject_points:{len(history)}<200"
+        values = [v for _, v in history]
+        if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in values):
+            return "provider_reject_nan"
+        first = values[0]
+        last = values[-1]
+        if first and first > 0:
+            total_return = (last / first - 1.0) * 100.0
+            if total_return < -90.0 or total_return > 400.0:
+                return f"provider_reject_abnormal_total_change:{total_return:.2f}%"
+        return None
 
     def _log_validation_failure(
         self,
@@ -488,6 +557,16 @@ class SP500MarketService:
                     reason = self._validate_history(history, index_type)
                     if not reason:
                         if enforce_quality:
+                            provider_reason = self._provider_acceptance_reason(history)
+                            if provider_reason:
+                                logger.warning(
+                                    "Provider reject index=%s provider=yfinance symbol=%s reason=%s",
+                                    index_type,
+                                    symbol,
+                                    provider_reason,
+                                )
+                                last_error = ValueError(provider_reason)
+                                continue
                             quality_status, quality_reason = self._quality_check_history(history)
                             if quality_status == "hard_ng":
                                 summary = self._quality_summary(quality_reason)
@@ -735,35 +814,99 @@ class SP500MarketService:
         price_type = self._resolve_price_type(index_type)
 
         try:
-            resp = requests.get(
-                f"{nav_base.rstrip('/')}/history",
-                params={
-                    "symbol": symbol,
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                    "price_type": price_type,
-                },
-                timeout=10,
+            series = fetch_history_from_nav_api(nav_base, symbol, str(price_type), start, end)
+            logger.info(
+                "[NAV API] index=%s symbol=%s price_type=%s points=%d",
+                index_type,
+                symbol,
+                price_type,
+                len(series),
             )
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, list) and data:
-                series = [
-                    (str(item["date"]), float(item["close"]))
-                    for item in data
-                    if "date" in item and "close" in item
-                ]
-                logger.info(
-                    "[NAV API] index=%s symbol=%s price_type=%s points=%d",
-                    index_type,
-                    symbol,
-                    price_type,
-                    len(series),
-                )
-                return series
+            return series
         except Exception as exc:
             logger.warning("NAV API fallback due to error: %s", exc)
         return []
+
+    def _fetch_sp500_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
+        index_type = "SP500"
+        tried_providers: List[str] = []
+        nav_hist = self._fetch_nav_history(start, end, index_type)
+        if nav_hist:
+            tried_providers.append("nav_api")
+            self._set_last_source(index_type, "nav_api")
+            self._update_last_good_history(index_type, nav_hist)
+            self._set_debug(index_type, tried_providers=tried_providers, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
+            return nav_hist
+        tried_providers.append("nav_api")
+        self._set_debug(index_type, tried_providers=tried_providers)
+
+        symbol = self._resolve_symbol(index_type)
+        try:
+            closes = fetch_history_from_stooq(symbol, start, end)
+            hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in closes.items()]
+            reason = self._validate_history(hist, index_type)
+            provider_reason = self._provider_acceptance_reason(hist)
+            if not reason and not provider_reason:
+                self._set_last_source(index_type, "stooq")
+                self._update_last_good_history(index_type, hist)
+                self._set_debug(index_type, tried_providers=tried_providers + ["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
+                return hist
+            logger.warning(
+                "Provider reject index=%s provider=stooq symbol=%s reason=%s",
+                index_type,
+                symbol,
+                provider_reason or reason,
+            )
+        except Exception:
+            pass
+        tried_providers.append("stooq")
+        self._set_debug(index_type, tried_providers=tried_providers)
+
+        hist = self._fetch_yfinance_history_with_retry(start, end, index_type)
+        self._set_last_source(index_type, "yfinance")
+        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"], adopted_provider="yfinance", adopted_symbol=self._resolve_symbol(index_type))
+        return hist
+
+    def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
+        index_type = "SP500_JPY"
+        tried_providers: List[str] = []
+        base_symbol = self._resolve_symbol(index_type)
+        fx_symbol = self._resolve_fx_symbol(index_type) or "JPY=X"
+        try:
+            base = fetch_history_from_stooq(base_symbol, start, end).rename("close_usd")
+            fx = fetch_fx_from_stooq(fx_symbol, start, end).rename("usdjpy")
+            combined = pd.concat([base, fx], axis=1, join="inner").dropna()
+            if len(combined) >= 50:
+                combined["close"] = combined["close_usd"] * combined["usdjpy"]
+                hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in combined["close"].items()]
+                provider_reason = self._provider_acceptance_reason(hist)
+                if not provider_reason:
+                    self._set_last_source(index_type, "stooq")
+                    self._update_last_good_history(index_type, hist)
+                    self._set_debug(
+                        index_type,
+                        tried_providers=["stooq"],
+                        adopted_provider="stooq",
+                        adopted_symbol=base_symbol,
+                        adopted_fx_symbol=fx_symbol,
+                    )
+                    return hist
+                logger.warning(
+                    "Provider reject index=%s provider=stooq symbol=%s fx_symbol=%s reason=%s",
+                    index_type,
+                    base_symbol,
+                    fx_symbol,
+                    provider_reason,
+                )
+        except Exception:
+            pass
+        tried_providers.append("stooq")
+        self._set_debug(index_type, tried_providers=tried_providers)
+
+        hist = self._get_validated_index_jpy_history(start, end, index_type)
+        self._set_last_source(index_type, "yfinance")
+        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"], adopted_provider="yfinance")
+        return hist
 
     def _fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
         """決定的で過度に膨らまないシンセティック履歴を生成する。
@@ -921,7 +1064,7 @@ class SP500MarketService:
             except Exception:
                 return str(idx)
 
-    def get_price_history(self, index_type: str = "SP500") -> List[Tuple[str, float]]:
+    def get_price_history(self, index_type: str = "SP500", allow_synthetic: bool = False) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
         today = date.today()
         start = today - timedelta(days=365 * 5)
@@ -941,8 +1084,15 @@ class SP500MarketService:
             combined_points=None,
             quality_flags=[],
             quality_summary="",
+            tried_providers=[],
+            adopted_provider=None,
         )
         try:
+            if index_type == "SP500":
+                return self._fetch_sp500_with_provider_priority(start, today)
+            if index_type == "SP500_JPY":
+                return self._fetch_sp500_jpy_with_provider_priority(start, today)
+
             price_type = self._resolve_price_type(index_type)
             if price_type == "index_jpy":
                 return self._get_validated_index_jpy_history(start, today, index_type)
@@ -987,10 +1137,24 @@ class SP500MarketService:
                 )
                 self._set_last_source(index_type, "last_good")
                 return last_good
-            if not allow_synth:
+            if not allow_synthetic and self._bootstrap_allow_synth_once and not self._is_bootstrap_synth_used(index_type):
+                bootstrap = self._fallback_history(start, today, index_type)
+                if bootstrap:
+                    logger.warning(
+                        "Bootstrap synthetic seed used once index=%s points=%d",
+                        index_type,
+                        len(bootstrap),
+                    )
+                    self._update_last_good_history(index_type, bootstrap)
+                    self._mark_bootstrap_synth_used(index_type)
+                    self._set_last_source(index_type, "bootstrap")
+                    self._set_debug(index_type, adoption_reason="bootstrap_seed")
+                    return bootstrap
+            if not allow_synth or not allow_synthetic:
                 raise
             fallback = self._build_valid_fallback_history(start, today, index_type)
-            self._update_last_good_history(index_type, fallback)
+            if index_type == "TOPIX":
+                self._update_last_good_history(index_type, fallback)
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -998,12 +1162,10 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
-            debug = self.get_last_debug(index_type)
-            validation_reason = str(debug.get("validation_reason") or "")
             if index_type == "TOPIX":
                 source = "fallback"
             else:
-                source = "fallback_degraded" if "LOW_QUALITY_DATA" in validation_reason else "real_fallback"
+                source = "synthetic"
             self._set_last_source(index_type, source)
             return fallback
         finally:
@@ -1084,12 +1246,10 @@ class SP500MarketService:
                 self._resolve_price_type(index_type),
                 len(fallback),
             )
-            debug = self.get_last_debug(index_type)
-            validation_reason = str(debug.get("validation_reason") or "")
             if index_type == "TOPIX":
                 source = "fallback"
             else:
-                source = "fallback_degraded" if "LOW_QUALITY_DATA" in validation_reason else "real_fallback"
+                source = "synthetic"
             self._set_last_source(index_type, source)
             return fallback
 
