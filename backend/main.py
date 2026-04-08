@@ -247,8 +247,12 @@ def _build_event_adjustment(target: date):
     return float(event_adjustment or 0.0), event_details, int(event_count or 0)
 
 
-def get_cached_snapshot(index_type: IndexType, allow_synthetic: bool = False) -> dict:
-    key = index_type.value
+def get_cached_snapshot(
+    index_type: IndexType,
+    allow_synthetic: bool = False,
+    allow_low_quality: bool = False,
+) -> dict:
+    key = f"{index_type.value}|synth={int(allow_synthetic)}|lowq={int(allow_low_quality)}"
     now = datetime.now(timezone.utc)
     if key in _cached_at and (now - _cached_at[key]) < _cache_ttl:
         return _cached_snapshot[key]
@@ -272,7 +276,11 @@ def get_cached_snapshot(index_type: IndexType, allow_synthetic: bool = False) ->
     }
 
     try:
-        price_history = market_service.get_price_history(index_type.value, allow_synthetic=allow_synthetic)
+        price_history = market_service.get_price_history(
+            index_type.value,
+            allow_synthetic=allow_synthetic,
+            allow_low_quality=allow_low_quality,
+        )
     except PriceHistoryFetchError:
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
@@ -291,6 +299,8 @@ def get_cached_snapshot(index_type: IndexType, allow_synthetic: bool = False) ->
     snapshot["source"] = market_service.get_last_source(index_type.value)
     restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
     allowed_sources = {"nav_api", "stooq", "yfinance", "last_good", "bootstrap", "real", "real_fallback"}
+    if allow_low_quality:
+        allowed_sources = set(allowed_sources) | {"fallback_degraded", "synthetic"}
     if index_type in restricted and snapshot["source"] not in allowed_sources:
         logger.warning(
             "[snapshot] disallow non-real source for %s source=%s",
@@ -445,6 +455,8 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "quality_summary": service_debug.get("quality_summary"),
         "tried_providers": service_debug.get("tried_providers"),
         "adopted_provider": service_debug.get("adopted_provider"),
+        "provider_reject_reasons": service_debug.get("provider_reject_reasons"),
+        "quality_check": service_debug.get("quality_check"),
         "price_history_points": service_debug.get("points", len(price_history)),
         "combined_points": service_debug.get("combined_points"),
         "first_close": service_debug.get("first_close"),
@@ -592,11 +604,19 @@ def run_backtest(payload: BacktestRequest):
 # ======================
 
 @app.post("/api/sp500/evaluate")
-def evaluate_sp500(position: PositionRequest, debug: bool = Query(False)):
+def evaluate_sp500(
+    position: PositionRequest,
+    debug: bool = Query(False),
+    allow_low_quality: bool = Query(False),
+):
     try:
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(position.index_type, allow_synthetic=debug)
+        snapshot = get_cached_snapshot(
+            position.index_type,
+            allow_synthetic=debug,
+            allow_low_quality=allow_low_quality,
+        )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
         if debug:
@@ -610,11 +630,19 @@ def evaluate_sp500(position: PositionRequest, debug: bool = Query(False)):
 
 
 @app.post("/api/evaluate")
-def evaluate(position: PositionRequest, debug: bool = Query(False)):
+def evaluate(
+    position: PositionRequest,
+    debug: bool = Query(False),
+    allow_low_quality: bool = Query(False),
+):
     try:
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(position.index_type, allow_synthetic=debug)
+        snapshot = get_cached_snapshot(
+            position.index_type,
+            allow_synthetic=debug,
+            allow_low_quality=allow_low_quality,
+        )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
         if debug:

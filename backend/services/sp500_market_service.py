@@ -30,6 +30,8 @@ class SP500MarketService:
     def __init__(self, symbol: Optional[str] = None):
         load_dotenv()
         self._yf_session = requests.Session()
+        self._yf_session.trust_env = False
+        self._yf_session.proxies.clear()
         self._yf_session.headers.update(
             {
                 "User-Agent": os.getenv(
@@ -121,6 +123,7 @@ class SP500MarketService:
         self._cache_dir = Path(__file__).resolve().parent.parent / "data" / "cache"
         self._bootstrap_synth_flag_file = self._cache_dir / "bootstrap_synth_once.json"
         self._bootstrap_allow_synth_once = self._flag("BOOTSTRAP_ALLOW_SYNTHETIC_ONCE", default=True)
+        self._force_stooq_only = self._flag("MARKET_FORCE_STOOQ_ONLY", default=False)
         if self._enable_cache:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
             self._load_last_good_cache()
@@ -132,6 +135,76 @@ class SP500MarketService:
             self.allow_synth_map,
             self.price_type_map,
         )
+        if self._force_stooq_only:
+            logger.warning("[MARKET CONFIG] MARKET_FORCE_STOOQ_ONLY=true (stooq only mode)")
+
+    def _cache_path(self, index_type: str) -> Path:
+        return self._cache_dir / f"{index_type}.json"
+
+    def _load_last_good_cache(self) -> None:
+        for index_type in self.symbol_map.keys():
+            path = self._cache_path(index_type)
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text())
+                history = payload.get("history")
+                if not isinstance(history, list) or not history:
+                    continue
+                normalized = [(str(d), float(v)) for d, v in history]
+                self._last_good_history[index_type] = normalized
+                logger.info("Loaded last_good cache index=%s points=%d", index_type, len(normalized))
+            except Exception as exc:
+                logger.warning("Failed loading cache index=%s path=%s err=%s", index_type, path, exc)
+
+    def _persist_last_good_cache(self, index_type: str, *, source_hint: Optional[str] = None) -> None:
+        if not self._enable_cache:
+            return
+        source = source_hint or self.get_last_source(index_type)
+        confidence = self.get_source_confidence(source)
+        debug = self._last_debug.get(index_type, {})
+        validation_reason = str(debug.get("validation_reason") or "")
+        if confidence == "low" or "LOW_QUALITY_DATA" in validation_reason:
+            logger.warning("Skip persisting last_good index=%s source=%s validation=%s", index_type, source, validation_reason)
+            return
+        path = self._cache_path(index_type)
+        history = self._last_good_history.get(index_type)
+        if not history:
+            return
+        payload = {
+            "index_type": index_type,
+            "history": history,
+            "source": source,
+            "quality_summary": debug.get("quality_summary", ""),
+            "saved_at": date.today().isoformat(),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False))
+
+    def _mark_bootstrap_synth_used(self, index_type: str) -> None:
+        if not self._enable_cache:
+            return
+        used = set()
+        if self._bootstrap_synth_flag_file.exists():
+            try:
+                used = set(json.loads(self._bootstrap_synth_flag_file.read_text()).get("used", []))
+            except Exception:
+                used = set()
+        used.add(index_type)
+        self._bootstrap_synth_flag_file.write_text(json.dumps({"used": sorted(list(used))}, ensure_ascii=False))
+
+    def _is_bootstrap_synth_used(self, index_type: str) -> bool:
+        if not self._enable_cache:
+            return False
+        if not self._bootstrap_synth_flag_file.exists():
+            return False
+        try:
+            used = set(json.loads(self._bootstrap_synth_flag_file.read_text()).get("used", []))
+            return index_type in used
+        except Exception:
+            return False
+
+    def _normalize_index_type(self, index_type: str) -> str:
+        return normalize_index_type(index_type, default="SP500", logger=logger)
 
     def _cache_path(self, index_type: str) -> Path:
         return self._cache_dir / f"{index_type}.json"
@@ -433,23 +506,48 @@ class SP500MarketService:
             return "QUALITY_OK"
         return " | ".join(flags)
 
-    def _update_last_good_history(self, index_type: str, history: List[Tuple[str, float]]) -> None:
+    def _update_last_good_history(
+        self,
+        index_type: str,
+        history: List[Tuple[str, float]],
+        *,
+        source_hint: Optional[str] = None,
+    ) -> None:
         index_type = self._normalize_index_type(index_type)
         self._last_good_history[index_type] = [(d, round(float(v), 2)) for d, v in history]
-        self._persist_last_good_cache(index_type)
+        self._persist_last_good_cache(index_type, source_hint=source_hint)
+
+    def _add_provider_reject_reason(self, index_type: str, reason: str) -> None:
+        index_type = self._normalize_index_type(index_type)
+        current = self._last_debug.setdefault(index_type, {}).get("provider_reject_reasons")
+        reasons: List[str] = list(current) if isinstance(current, list) else []
+        reasons.append(reason)
+        self._last_debug.setdefault(index_type, {})["provider_reject_reasons"] = reasons
 
     def _provider_acceptance_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
-        if len(history) < 200:
-            return f"provider_reject_points:{len(history)}<200"
+        points = len(history)
+        if points < 200:
+            return f"provider_reject_points:points={points}<200"
         values = [v for _, v in history]
-        if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in values):
-            return "provider_reject_nan"
-        first = values[0]
-        last = values[-1]
+        nan_count = sum(1 for v in values if v is None or (isinstance(v, float) and math.isnan(v)))
+        if nan_count > 0:
+            return f"provider_reject_nan:nan_count={nan_count}"
+        max_jump = 0.0
+        prev: Optional[float] = None
+        for value in values:
+            current = float(value)
+            if prev is not None and prev > 0:
+                jump = abs((current - prev) / prev)
+                max_jump = max(max_jump, jump)
+            prev = current
+        if max_jump > 0.15:
+            return f"provider_reject_abnormal_jump:max_jump={max_jump:.4f}>0.1500"
+        first = float(values[0])
+        last = float(values[-1])
         if first and first > 0:
             total_return = (last / first - 1.0) * 100.0
             if total_return < -90.0 or total_return > 400.0:
-                return f"provider_reject_abnormal_total_change:{total_return:.2f}%"
+                return f"provider_reject_abnormal_total_change:return={total_return:.2f}%"
         return None
 
     def _log_validation_failure(
@@ -474,7 +572,14 @@ class SP500MarketService:
             last_price,
         )
 
-    def _get_validated_index_jpy_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+    def _get_validated_index_jpy_history(
+        self,
+        start: date,
+        end: date,
+        index_type: str,
+        *,
+        allow_low_quality: bool = False,
+    ) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
         symbol = self._resolve_symbol(index_type)
         price_type = self._resolve_price_type(index_type)
@@ -483,10 +588,15 @@ class SP500MarketService:
 
         for attempt, delay in enumerate(backoffs, start=1):
             try:
-                series = self._fetch_index_history_jpy(start, end, index_type)
+                series = self._fetch_index_history_jpy(
+                    start,
+                    end,
+                    index_type,
+                    allow_low_quality=allow_low_quality,
+                )
                 reason = self._validate_history(series, index_type)
                 if not reason:
-                    self._update_last_good_history(index_type, series)
+                    self._update_last_good_history(index_type, series, source_hint=self.get_last_source(index_type))
                     return series
                 self._log_validation_failure(
                     index_type=index_type,
@@ -565,6 +675,7 @@ class SP500MarketService:
                                     symbol,
                                     provider_reason,
                                 )
+                                self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{provider_reason}")
                                 last_error = ValueError(provider_reason)
                                 continue
                             quality_status, quality_reason = self._quality_check_history(history)
@@ -607,7 +718,7 @@ class SP500MarketService:
                             tried_symbols,
                             source,
                         )
-                        self._update_last_good_history(index_type, history)
+                        self._update_last_good_history(index_type, history, source_hint=source)
                         self._set_last_source(index_type, source)
                         self._set_debug(
                             index_type,
@@ -669,7 +780,14 @@ class SP500MarketService:
             raise ValueError("data_unavailable") from last_error
         raise ValueError("data_unavailable")
 
-    def _fetch_index_history_jpy(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+    def _fetch_index_history_jpy(
+        self,
+        start: date,
+        end: date,
+        index_type: str,
+        *,
+        allow_low_quality: bool = False,
+    ) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
         symbol_candidates = self._resolve_symbol_candidates(index_type)
         fx_symbol_candidates = self._resolve_fx_symbol_candidates(index_type)
@@ -747,6 +865,13 @@ class SP500MarketService:
                             quality_flags=quality_reason,
                             quality_summary=summary,
                         )
+                        if not allow_low_quality:
+                            last_error = ValueError(summary)
+                            self._add_provider_reject_reason(
+                                index_type,
+                                f"yfinance:{symbol}+{fx_symbol}:LOW_QUALITY_DATA:{summary}",
+                            )
+                            continue
                     logger.info(
                         "Using yfinance history for %s (symbol=%s fx_symbol=%s price_type=%s points=%d tried_symbols=%s tried_fx_symbols=%s source=%s)",
                         index_type,
@@ -827,6 +952,23 @@ class SP500MarketService:
             logger.warning("NAV API fallback due to error: %s", exc)
         return []
 
+    def _fetch_stooq_history_with_validation(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
+        index_type = self._normalize_index_type(index_type)
+        symbol = self._resolve_symbol(index_type)
+        closes = fetch_history_from_stooq(symbol, start, end)
+        history = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in closes.items()]
+        reason = self._validate_history(history, index_type)
+        provider_reason = self._provider_acceptance_reason(history)
+        if reason or provider_reason:
+            msg = provider_reason or reason
+            self._add_provider_reject_reason(index_type, f"stooq:{symbol}:{msg}")
+            raise ValueError(msg)
+        self._set_last_source(index_type, "stooq")
+        self._update_last_good_history(index_type, history, source_hint="stooq")
+        self._set_debug(index_type, tried_providers=["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
+        logger.info("provider=stooq index=%s symbol=%s result=adopted points=%d", index_type, symbol, len(history))
+        return history
+
     def _fetch_sp500_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "SP500"
         tried_providers: List[str] = []
@@ -834,7 +976,7 @@ class SP500MarketService:
         if nav_hist:
             tried_providers.append("nav_api")
             self._set_last_source(index_type, "nav_api")
-            self._update_last_good_history(index_type, nav_hist)
+            self._update_last_good_history(index_type, nav_hist, source_hint="nav_api")
             self._set_debug(index_type, tried_providers=tried_providers, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
             return nav_hist
         tried_providers.append("nav_api")
@@ -848,7 +990,7 @@ class SP500MarketService:
             provider_reason = self._provider_acceptance_reason(hist)
             if not reason and not provider_reason:
                 self._set_last_source(index_type, "stooq")
-                self._update_last_good_history(index_type, hist)
+                self._update_last_good_history(index_type, hist, source_hint="stooq")
                 self._set_debug(index_type, tried_providers=tried_providers + ["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
                 return hist
             logger.warning(
@@ -857,6 +999,7 @@ class SP500MarketService:
                 symbol,
                 provider_reason or reason,
             )
+            self._add_provider_reject_reason(index_type, f"stooq:{symbol}:{provider_reason or reason}")
         except Exception:
             pass
         tried_providers.append("stooq")
@@ -882,7 +1025,7 @@ class SP500MarketService:
                 provider_reason = self._provider_acceptance_reason(hist)
                 if not provider_reason:
                     self._set_last_source(index_type, "stooq")
-                    self._update_last_good_history(index_type, hist)
+                    self._update_last_good_history(index_type, hist, source_hint="stooq")
                     self._set_debug(
                         index_type,
                         tried_providers=["stooq"],
@@ -898,6 +1041,7 @@ class SP500MarketService:
                     fx_symbol,
                     provider_reason,
                 )
+                self._add_provider_reject_reason(index_type, f"stooq:{base_symbol}+{fx_symbol}:{provider_reason}")
         except Exception:
             pass
         tried_providers.append("stooq")
@@ -1064,7 +1208,12 @@ class SP500MarketService:
             except Exception:
                 return str(idx)
 
-    def get_price_history(self, index_type: str = "SP500", allow_synthetic: bool = False) -> List[Tuple[str, float]]:
+    def get_price_history(
+        self,
+        index_type: str = "SP500",
+        allow_synthetic: bool = False,
+        allow_low_quality: bool = False,
+    ) -> List[Tuple[str, float]]:
         index_type = self._normalize_index_type(index_type)
         today = date.today()
         start = today - timedelta(days=365 * 5)
@@ -1086,6 +1235,7 @@ class SP500MarketService:
             quality_summary="",
             tried_providers=[],
             adopted_provider=None,
+            provider_reject_reasons=[],
         )
         try:
             if index_type == "SP500":
@@ -1095,7 +1245,14 @@ class SP500MarketService:
 
             price_type = self._resolve_price_type(index_type)
             if price_type == "index_jpy":
-                return self._get_validated_index_jpy_history(start, today, index_type)
+                return self._get_validated_index_jpy_history(
+                    start,
+                    today,
+                    index_type,
+                    allow_low_quality=allow_low_quality,
+                )
+            if self._force_stooq_only:
+                return self._fetch_stooq_history_with_validation(start, today, index_type)
 
             nav_hist = self._fetch_nav_history(start, today, index_type)
             if nav_hist:
@@ -1109,7 +1266,7 @@ class SP500MarketService:
                         price_type,
                         len(nav_hist),
                     )
-                    self._update_last_good_history(index_type, nav_hist)
+                    self._update_last_good_history(index_type, nav_hist, source_hint="real")
                     self._set_last_source(index_type, "real")
                     return nav_hist
                 self._log_validation_failure(
@@ -1121,7 +1278,12 @@ class SP500MarketService:
                     history=nav_hist,
                 )
 
-            return self._fetch_yfinance_history_with_retry(start, today, index_type)
+            return self._fetch_yfinance_history_with_retry(
+                start,
+                today,
+                index_type,
+                enforce_quality=not allow_low_quality,
+            )
         except Exception as exc:
             self._set_debug(index_type, fetch_error=str(exc))
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
@@ -1145,7 +1307,7 @@ class SP500MarketService:
                         index_type,
                         len(bootstrap),
                     )
-                    self._update_last_good_history(index_type, bootstrap)
+                    self._update_last_good_history(index_type, bootstrap, source_hint="bootstrap")
                     self._mark_bootstrap_synth_used(index_type)
                     self._set_last_source(index_type, "bootstrap")
                     self._set_debug(index_type, adoption_reason="bootstrap_seed")
@@ -1154,7 +1316,7 @@ class SP500MarketService:
                 raise
             fallback = self._build_valid_fallback_history(start, today, index_type)
             if index_type == "TOPIX":
-                self._update_last_good_history(index_type, fallback)
+                self._update_last_good_history(index_type, fallback, source_hint="fallback")
             logger.info(
                 "Using synthetic history for %s (symbol=%s price_type=%s points=%d)",
                 index_type,
@@ -1209,7 +1371,7 @@ class SP500MarketService:
                         price_type,
                         len(nav_hist),
                     )
-                    self._update_last_good_history(index_type, nav_hist)
+                    self._update_last_good_history(index_type, nav_hist, source_hint="real")
                     self._set_last_source(index_type, "real")
                     return nav_hist
                 self._log_validation_failure(
