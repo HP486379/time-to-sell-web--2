@@ -32,10 +32,6 @@ def _extract_close_series(hist: pd.DataFrame) -> pd.Series:
 
 
 def _fetch_yfinance(symbol: str, start: date, end: date) -> pd.Series:
-    session = requests.Session()
-    session.trust_env = False
-    session.headers.update(DEFAULT_HEADERS)
-    session.proxies.clear()
     hist = yf.download(
         symbol,
         start=start,
@@ -43,7 +39,6 @@ def _fetch_yfinance(symbol: str, start: date, end: date) -> pd.Series:
         interval="1d",
         progress=False,
         threads=False,
-        session=session,
         timeout=DEFAULT_TIMEOUT,
     )
     closes = _extract_close_series(hist.dropna())
