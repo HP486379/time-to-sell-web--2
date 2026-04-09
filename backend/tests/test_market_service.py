@@ -30,14 +30,14 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
     assert history == [(d.date().isoformat(), float(1000.0 + i)) for i, d in enumerate(dates)]
 
 
-def test_validate_history_rejects_abnormal_sp500_price():
+def test_validate_history_rejects_abnormal_relative_scale():
     service = SP500MarketService(symbol="TEST")
-    history = _history_from_values("2020-01-01", [4100.0 - i * 30 for i in range(40)])
+    history = _history_from_values("2020-01-01", [4100.0] + [100.0 for _ in range(39)])
 
     reason = service._validate_history(history, "SP500")
 
     assert reason is not None
-    assert "abnormal_sp500_price" in reason
+    assert "abnormal_scale_low" in reason
 
 
 def test_get_price_history_range_retries_and_recovers(monkeypatch):
@@ -45,7 +45,7 @@ def test_get_price_history_range_retries_and_recovers(monkeypatch):
     start = pd.Timestamp("2020-01-01").date()
     end = pd.Timestamp("2020-03-31").date()
 
-    abnormal = _history_from_values("2020-01-01", [4200.0] * 40 + [2000.0])
+    abnormal = _history_from_values("2020-01-01", [4200.0] * 40 + [50000.0])
     normal = _history_from_values("2020-01-01", [4200.0 + i * 2 for i in range(41)])
     responses = [abnormal, normal]
 
@@ -69,7 +69,7 @@ def test_get_price_history_range_uses_last_good_on_repeated_invalid(monkeypatch)
     end = pd.Timestamp("2020-03-31").date()
 
     normal = _history_from_values("2020-01-01", [4100.0 + i * 2 for i in range(41)])
-    abnormal = _history_from_values("2020-01-01", [4100.0] * 40 + [2000.0])
+    abnormal = _history_from_values("2020-01-01", [4100.0] * 40 + [50000.0])
 
     service._last_good_history["SP500"] = normal
 
@@ -126,6 +126,16 @@ def test_validate_history_accepts_sp500_jpy_realistic_scale():
     reason = service._validate_history(history, "SP500_JPY")
 
     assert reason is None
+
+
+def test_validate_history_rejects_only_extreme_jump():
+    service = SP500MarketService(symbol="TEST")
+    history = _history_from_values("2024-01-01", [100.0, 1200.0] + [1205.0 + i for i in range(48)])
+
+    reason = service._validate_history(history, "TOPIX")
+
+    assert reason is not None
+    assert "abnormal_daily_jump" in reason
 
 
 def test_fallback_sp500_jpy_is_built_from_sp500_and_fx(monkeypatch):

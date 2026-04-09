@@ -343,8 +343,25 @@ class SP500MarketService:
 
     def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
+        first_price = history[0][1] if history else None
+        last_price = history[-1][1] if history else None
+        ratio: Optional[float] = None
+        if first_price and first_price > 0 and last_price is not None:
+            ratio = float(last_price) / float(first_price)
+
+        def reject(reason: str) -> str:
+            logger.warning(
+                "Validation reject index=%s first_close=%s last_close=%s ratio=%s reason=%s",
+                index_type,
+                first_price,
+                last_price,
+                f"{ratio:.6f}" if ratio is not None else None,
+                reason,
+            )
+            return reason
+
         if not history:
-            return "empty_history"
+            return reject("empty_history")
 
         min_points_map = {
             "SP500": 450,
@@ -366,37 +383,43 @@ class SP500MarketService:
             span_days = 0
 
         if len(history) < 30:
-            return f"too_few_points:{len(history)}"
+            return reject(f"too_few_points:{len(history)}")
         if span_days >= 365 * 3 and len(history) < min_points:
-            return f"insufficient_points:{len(history)}<{min_points}"
+            return reject(f"insufficient_points:{len(history)}<{min_points}")
 
         prev: Optional[float] = None
         for _, value in history:
             if value is None:
-                return "invalid_price:none"
+                return reject("invalid_price:none")
             if isinstance(value, float) and math.isnan(value):
-                return "invalid_price:nan"
+                return reject("invalid_price:nan")
             if value <= 0:
-                return f"invalid_price:non_positive:{value}"
+                return reject(f"invalid_price:non_positive:{value}")
 
             if prev and prev > 0:
                 jump = abs((value - prev) / prev)
-                if jump > 1.00:
-                    return f"abnormal_daily_jump:{jump:.4f}"
+                # 10倍超のジャンプのみを明確な異常値として reject
+                if jump > 9.0:
+                    return reject(f"abnormal_daily_jump:{jump:.4f}")
             prev = value
 
-        last_price = history[-1][1]
-        if index_type == "SP500" and last_price < 3000:
-            return f"abnormal_sp500_price:{last_price:.2f}"
-
-        # 固定の start_prices に依存した閾値だと指数ごとのスケール差で誤検知しやすいため、
-        # 実測 series の先頭値ベースでスケール逸脱を判定する。
-        first_price = history[0][1]
-        if first_price and first_price > 0:
-            if last_price < first_price * 0.1:
-                return f"abnormal_scale_low:{last_price:.2f}<{first_price * 0.1:.2f}"
-            if last_price > first_price * 20.0:
-                return f"abnormal_scale_high:{last_price:.2f}>{first_price * 20.0:.2f}"
+        # 絶対値ではなく相対変化率 (last / first) で判定し、
+        # 指数ごとの特性差を許容する。
+        ratio_bounds = {
+            "SP500": (0.2, 8.0),
+            "SP500_JPY": (0.1, 15.0),
+            "TOPIX": (0.15, 10.0),
+            "NIKKEI225": (0.1, 12.0),
+            "NIFTY50": (0.08, 15.0),
+            "ALLCOUNTRY": (0.2, 8.0),
+            "ALLCOUNTRY_JPY": (0.1, 15.0),
+        }
+        low, high = ratio_bounds.get(index_type, (0.1, 12.0))
+        if ratio is not None:
+            if ratio < low:
+                return reject(f"abnormal_scale_low:ratio={ratio:.6f}<min={low:.6f}")
+            if ratio > high:
+                return reject(f"abnormal_scale_high:ratio={ratio:.6f}>max={high:.6f}")
 
         return None
 

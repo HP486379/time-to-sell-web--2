@@ -4,12 +4,14 @@ from datetime import date, timedelta
 from io import StringIO
 from typing import Literal
 
+import logging
 import pandas as pd
 import requests
 import yfinance as yf
 from fastapi import FastAPI, HTTPException, Query
 
 app = FastAPI(title="Market Fetcher Service", version="1.0.0")
+logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 12
 DEFAULT_HEADERS = {
@@ -52,6 +54,13 @@ def _fetch_yfinance(symbol: str, start: date, end: date) -> pd.Series:
     closes = _extract_close_series(hist.dropna())
     if closes.empty:
         raise ValueError(f"empty history for {yf_symbol}")
+    logger.info(
+        "provider=yfinance symbol=%s result=success points=%d first=%s last=%s",
+        yf_symbol,
+        len(closes),
+        float(closes.iloc[0]),
+        float(closes.iloc[-1]),
+    )
     return closes
 
 
@@ -88,7 +97,20 @@ def _fetch_stooq(symbol: str, start: date, end: date) -> pd.Series:
     sliced = df.loc[mask, ["Date", "Close"]].dropna().sort_values("Date")
     if sliced.empty:
         raise ValueError(f"empty stooq history for {normalized}")
-    return pd.Series(sliced["Close"].values, index=sliced["Date"])
+    series = pd.Series(sliced["Close"].values, index=sliced["Date"])
+    logger.info(
+        "provider=stooq symbol=%s result=success points=%d first=%s last=%s",
+        normalized,
+        len(series),
+        float(series.iloc[0]),
+        float(series.iloc[-1]),
+    )
+    return series
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
 
 
 @app.get("/fetch")
@@ -112,8 +134,17 @@ def fetch_prices(
         try:
             series = _fetch_stooq(symbol, start, end) if p == "stooq" else _fetch_yfinance(symbol, start, end)
             prices = [{"date": idx.date().isoformat(), "close": round(float(v), 2)} for idx, v in series.items()]
+            logger.info(
+                "fetch provider=%s symbol=%s result=success points=%d first=%s last=%s",
+                p,
+                symbol,
+                len(prices),
+                prices[0]["close"] if prices else None,
+                prices[-1]["close"] if prices else None,
+            )
             return {"symbol": symbol, "provider": p, "prices": prices}
         except Exception as exc:
+            logger.warning("fetch provider=%s symbol=%s result=failed error=%s", p, symbol, exc)
             last_error = exc
             continue
     raise HTTPException(status_code=502, detail=f"fetch_failed:{last_error}")

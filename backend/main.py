@@ -220,7 +220,10 @@ def _get_price_series(index_type: IndexType):
 def _get_price_series_or_503(index_type: IndexType):
     try:
         return _get_price_series(index_type)
-    except PriceHistoryFetchError:
+    except (PriceHistoryFetchError, ValueError):
+        raise HTTPException(status_code=503, detail="Price data unavailable.")
+    except Exception as exc:
+        logger.warning("price-history failed index=%s error=%s", index_type.value, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="Price data unavailable.")
 
 
