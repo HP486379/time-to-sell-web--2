@@ -273,6 +273,7 @@ def get_cached_snapshot(
         "price_history": [],
         "price_series": [],
         "source": "real",
+        "adopted_provider": None,
     }
 
     try:
@@ -284,19 +285,23 @@ def get_cached_snapshot(
     except PriceHistoryFetchError:
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         return snapshot
     except Exception:
         logger.exception("[snapshot] price history failed for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         return snapshot
 
     if not price_history:
         logger.warning("[snapshot] empty price history for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         return snapshot
 
     current_price = price_history[-1][1]
     snapshot["source"] = market_service.get_last_source(index_type.value)
+    snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
     restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
     allowed_sources = {"nav_api", "stooq", "yfinance", "last_good", "bootstrap", "real", "real_fallback"}
     if allow_low_quality:
@@ -308,6 +313,7 @@ def get_cached_snapshot(
             snapshot["source"],
         )
         snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         return snapshot
 
     try:
