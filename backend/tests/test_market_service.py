@@ -37,7 +37,7 @@ def test_validate_history_rejects_abnormal_relative_scale():
     reason = service._validate_history(history, "SP500")
 
     assert reason is not None
-    assert "abnormal_scale_low" in reason
+    assert "abnormal_ratio_low" in reason
 
 
 def test_get_price_history_range_retries_and_recovers(monkeypatch):
@@ -128,14 +128,13 @@ def test_validate_history_accepts_sp500_jpy_realistic_scale():
     assert reason is None
 
 
-def test_validate_history_rejects_only_extreme_jump():
+def test_validate_history_soft_range_is_not_rejected():
     service = SP500MarketService(symbol="TEST")
-    history = _history_from_values("2024-01-01", [100.0, 1200.0] + [1205.0 + i for i in range(48)])
+    history = _history_from_values("2024-01-01", [100.0 + i * 10 for i in range(50)])
 
     reason = service._validate_history(history, "TOPIX")
 
-    assert reason is not None
-    assert "abnormal_daily_jump" in reason
+    assert reason is None
 
 
 def test_fallback_sp500_jpy_is_built_from_sp500_and_fx(monkeypatch):
@@ -164,7 +163,7 @@ def test_invalid_fallback_uses_last_good_history(monkeypatch):
     monkeypatch.setattr(
         service,
         "_fallback_history",
-        lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 500.0]),
+        lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 100.0]),
     )
 
     history = service._build_valid_fallback_history(start, end, "SP500")
@@ -179,7 +178,7 @@ def test_invalid_fallback_without_last_good_is_data_unavailable(monkeypatch):
     monkeypatch.setattr(
         service,
         "_fallback_history",
-        lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 500.0]),
+        lambda s, e, index_type: _history_from_values("2024-01-01", [1500.0, 100.0]),
     )
 
     with pytest.raises(ValueError, match="data_unavailable"):
@@ -190,7 +189,7 @@ def test_topix_fallback_skips_strict_quality_gate(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
-    degraded = _history_from_values("2024-01-01", [1500.0, 500.0])
+    degraded = _history_from_values("2024-01-01", [1500.0, 100.0])
 
     monkeypatch.setattr(service, "_fallback_history", lambda s, e, index_type: degraded)
 
@@ -260,12 +259,13 @@ def test_debug_has_provider_attempt_fields(monkeypatch):
         assert "success" in attempt
         assert "first_close" in attempt
         assert "last_close" in attempt
+        assert "ratio" in attempt
         assert "validation_passed" in attempt
         assert "reject_reason" in attempt
-    assert debug.get("provider_reject_reasons")
+    assert isinstance(debug.get("provider_reject_reasons"), list)
 
 
-def test_provider_reject_reasons_never_empty(monkeypatch):
+def test_provider_reject_reasons_is_reasonable_list(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
@@ -280,4 +280,3 @@ def test_provider_reject_reasons_never_empty(monkeypatch):
 
     assert history == last_good
     assert isinstance(debug.get("provider_reject_reasons"), list)
-    assert debug["provider_reject_reasons"]

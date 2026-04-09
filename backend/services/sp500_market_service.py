@@ -286,11 +286,15 @@ class SP500MarketService:
         fx_symbol: Optional[str] = None,
     ) -> None:
         index_type = self._normalize_index_type(index_type)
+        self._last_debug.setdefault(index_type, {}).setdefault("provider_reject_reasons", [])
         first_close: Optional[float] = None
         last_close: Optional[float] = None
         if history:
             first_close = float(history[0][1])
             last_close = float(history[-1][1])
+        ratio: Optional[float] = None
+        if first_close is not None and first_close > 0 and last_close is not None:
+            ratio = last_close / first_close
         attempts = self._last_debug.setdefault(index_type, {}).get("provider_attempts")
         attempt_list: List[Dict[str, object]] = list(attempts) if isinstance(attempts, list) else []
         attempt_list.append(
@@ -299,6 +303,7 @@ class SP500MarketService:
                 "success": success,
                 "first_close": first_close,
                 "last_close": last_close,
+                "ratio": ratio,
                 "validation_passed": validation_reason is None,
                 "reject_reason": validation_reason,
                 "symbol": symbol,
@@ -346,7 +351,7 @@ class SP500MarketService:
         first_price = history[0][1] if history else None
         last_price = history[-1][1] if history else None
         ratio: Optional[float] = None
-        if first_price and first_price > 0 and last_price is not None:
+        if first_price is not None and first_price > 0 and last_price is not None:
             ratio = float(last_price) / float(first_price)
 
         def reject(reason: str) -> str:
@@ -363,63 +368,27 @@ class SP500MarketService:
         if not history:
             return reject("empty_history")
 
-        min_points_map = {
-            "SP500": 450,
-            "TOPIX": 400,
-            "NIKKEI225": 400,
-            "NIFTY50": 350,
-            "ALLCOUNTRY": 300,
-            "ALLCOUNTRY_JPY": 300,
-            "SP500_JPY": 450,
-        }
-        min_points = min_points_map.get(index_type, 300)
-
-        span_days = 0
-        try:
-            start_d = date.fromisoformat(history[0][0])
-            end_d = date.fromisoformat(history[-1][0])
-            span_days = max(0, (end_d - start_d).days)
-        except Exception:
-            span_days = 0
-
-        if len(history) < 30:
-            return reject(f"too_few_points:{len(history)}")
-        if span_days >= 365 * 3 and len(history) < min_points:
-            return reject(f"insufficient_points:{len(history)}<{min_points}")
-
-        prev: Optional[float] = None
-        for _, value in history:
-            if value is None:
-                return reject("invalid_price:none")
-            if isinstance(value, float) and math.isnan(value):
-                return reject("invalid_price:nan")
-            if value <= 0:
-                return reject(f"invalid_price:non_positive:{value}")
-
-            if prev and prev > 0:
-                jump = abs((value - prev) / prev)
-                # 10倍超のジャンプのみを明確な異常値として reject
-                if jump > 9.0:
-                    return reject(f"abnormal_daily_jump:{jump:.4f}")
-            prev = value
-
-        # 絶対値ではなく相対変化率 (last / first) で判定し、
-        # 指数ごとの特性差を許容する。
-        ratio_bounds = {
-            "SP500": (0.2, 8.0),
-            "SP500_JPY": (0.1, 15.0),
-            "TOPIX": (0.15, 10.0),
-            "NIKKEI225": (0.1, 12.0),
-            "NIFTY50": (0.08, 15.0),
-            "ALLCOUNTRY": (0.2, 8.0),
-            "ALLCOUNTRY_JPY": (0.1, 15.0),
-        }
-        low, high = ratio_bounds.get(index_type, (0.1, 12.0))
-        if ratio is not None:
-            if ratio < low:
-                return reject(f"abnormal_scale_low:ratio={ratio:.6f}<min={low:.6f}")
-            if ratio > high:
-                return reject(f"abnormal_scale_high:ratio={ratio:.6f}>max={high:.6f}")
+        # スケール判定は絶対価格ではなく ratio を使用する。
+        # 通常レンジ: 0.2 < ratio < 5.0（ここは reject ではなくログのみ）
+        # reject は明らかな異常値のみに限定する。
+        if first_price is None or first_price <= 0:
+            return reject(f"invalid_first_close:{first_price}")
+        if last_price is None or last_price <= 0:
+            return reject(f"invalid_last_close:{last_price}")
+        if ratio is None:
+            return reject("invalid_ratio:none")
+        if ratio < 0.2 or ratio > 5.0:
+            logger.info(
+                "Validation soft-range index=%s first_close=%s last_close=%s ratio=%.6f range=(0.2,5.0)",
+                index_type,
+                first_price,
+                last_price,
+                ratio,
+            )
+        if ratio < 0.1:
+            return reject(f"abnormal_ratio_low:ratio={ratio:.6f}<min=0.100000")
+        if ratio > 10.0:
+            return reject(f"abnormal_ratio_high:ratio={ratio:.6f}>max=10.000000")
 
         return None
 
@@ -532,7 +501,6 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         current = self._last_debug.setdefault(index_type, {}).get("provider_reject_reasons")
         reasons: List[str] = list(current) if isinstance(current, list) else []
-        reasons = [r for r in reasons if r != "no_reject"]
         reasons.append(reason)
         self._last_debug.setdefault(index_type, {})["provider_reject_reasons"] = reasons
 
@@ -1065,7 +1033,6 @@ class SP500MarketService:
                 validation_reason="not_configured",
                 symbol=self._resolve_symbol(index_type),
             )
-            self._add_provider_reject_reason(index_type, f"nav_api:{self._resolve_symbol(index_type)}:not_configured")
             return []
 
         symbol = self._resolve_symbol(index_type)
@@ -1458,7 +1425,7 @@ class SP500MarketService:
             quality_summary="",
             tried_providers=[],
             adopted_provider=None,
-            provider_reject_reasons=["no_reject"],
+            provider_reject_reasons=[],
             provider_attempts=[],
         )
         try:
@@ -1492,6 +1459,7 @@ class SP500MarketService:
                     )
                     self._update_last_good_history(index_type, nav_hist, source_hint="real")
                     self._set_last_source(index_type, "real")
+                    self._set_debug(index_type, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
@@ -1597,6 +1565,7 @@ class SP500MarketService:
                     )
                     self._update_last_good_history(index_type, nav_hist, source_hint="real")
                     self._set_last_source(index_type, "real")
+                    self._set_debug(index_type, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
