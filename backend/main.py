@@ -6,7 +6,7 @@ from typing import List, Optional
 import logging
 from enum import Enum
 
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
@@ -479,6 +479,30 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
     }
 
 
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+async def _resolve_debug_flag(request: Request, query_debug: bool) -> bool:
+    query_raw = request.query_params.get("debug")
+    body_raw = None
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            body_raw = payload.get("debug")
+    except Exception:
+        body_raw = None
+    resolved = _truthy(query_debug) or _truthy(query_raw) or _truthy(body_raw)
+    logger.info("[evaluate] debug_resolved=%s query=%s body=%s", resolved, query_raw, body_raw)
+    return resolved
+
+
 # ======================
 # NAV Endpoints
 # ======================
@@ -610,23 +634,29 @@ def run_backtest(payload: BacktestRequest):
 # ======================
 
 @app.post("/api/sp500/evaluate")
-def evaluate_sp500(
+async def evaluate_sp500(
+    request: Request,
     position: PositionRequest,
     debug: bool = Query(False),
     allow_low_quality: bool = Query(False),
 ):
     try:
+        debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
         snapshot = get_cached_snapshot(
             position.index_type,
-            allow_synthetic=debug,
+            allow_synthetic=debug_flag,
             allow_low_quality=allow_low_quality,
         )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
-        if debug:
+        if debug_flag:
             response = dict(snapshot)
+            response["source"] = debug_payload.get("source", response.get("source"))
+            response["adopted_provider"] = debug_payload.get("adopted_provider", response.get("adopted_provider"))
+            if debug_payload.get("provider_reject_reasons"):
+                response["provider_reject_reasons"] = debug_payload.get("provider_reject_reasons")
             response["debug"] = debug_payload
             return response
         return snapshot
@@ -636,23 +666,29 @@ def evaluate_sp500(
 
 
 @app.post("/api/evaluate")
-def evaluate(
+async def evaluate(
+    request: Request,
     position: PositionRequest,
     debug: bool = Query(False),
     allow_low_quality: bool = Query(False),
 ):
     try:
+        debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
         snapshot = get_cached_snapshot(
             position.index_type,
-            allow_synthetic=debug,
+            allow_synthetic=debug_flag,
             allow_low_quality=allow_low_quality,
         )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
-        if debug:
+        if debug_flag:
             response = dict(snapshot)
+            response["source"] = debug_payload.get("source", response.get("source"))
+            response["adopted_provider"] = debug_payload.get("adopted_provider", response.get("adopted_provider"))
+            if debug_payload.get("provider_reject_reasons"):
+                response["provider_reject_reasons"] = debug_payload.get("provider_reject_reasons")
             response["debug"] = debug_payload
             return response
         return snapshot
