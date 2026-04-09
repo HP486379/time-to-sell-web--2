@@ -334,7 +334,9 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       }
     }
 
-    const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body)
+    const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body, {
+      params: { debug: true },
+    })
 
     if (reqSeq !== evalReqSeqRef.current) return
 
