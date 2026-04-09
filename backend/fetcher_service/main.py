@@ -32,8 +32,16 @@ def _extract_close_series(hist: pd.DataFrame) -> pd.Series:
 
 
 def _fetch_yfinance(symbol: str, start: date, end: date) -> pd.Series:
+    symbol_map = {
+        "SP500": "^GSPC",
+        "NIKKEI225": "^N225",
+        "TOPIX": "^TOPX",
+        "NIFTY50": "^NSEI",
+        "USDJPY": "JPY=X",
+    }
+    yf_symbol = symbol_map.get(symbol, symbol)
     hist = yf.download(
-        symbol,
+        yf_symbol,
         start=start,
         end=end + timedelta(days=1),
         interval="1d",
@@ -43,7 +51,7 @@ def _fetch_yfinance(symbol: str, start: date, end: date) -> pd.Series:
     )
     closes = _extract_close_series(hist.dropna())
     if closes.empty:
-        raise ValueError(f"empty history for {symbol}")
+        raise ValueError(f"empty history for {yf_symbol}")
     return closes
 
 
@@ -87,10 +95,18 @@ def _fetch_stooq(symbol: str, start: date, end: date) -> pd.Series:
 def fetch_prices(
     provider: Literal["stooq", "yfinance", "auto"] = Query("auto"),
     symbol: str = Query(...),
-    start: date = Query(...),
-    end: date = Query(...),
+    start: date | None = Query(None),
+    end: date | None = Query(None),
 ):
-    providers = ["stooq", "yfinance"] if provider == "auto" else [provider]
+    if end is None:
+        end = date.today()
+    if start is None:
+        start = end - timedelta(days=365 * 5)
+    # SP500 だけは一時的に yfinance を除外し、stooq 経路を強制する
+    if symbol == "SP500":
+        providers = ["stooq"]
+    else:
+        providers = ["stooq", "yfinance"] if provider == "auto" else [provider]
     last_error: Exception | None = None
     for p in providers:
         try:

@@ -206,61 +206,6 @@ class SP500MarketService:
     def _normalize_index_type(self, index_type: str) -> str:
         return normalize_index_type(index_type, default="SP500", logger=logger)
 
-    def _cache_path(self, index_type: str) -> Path:
-        return self._cache_dir / f"{index_type}.json"
-
-    def _load_last_good_cache(self) -> None:
-        for index_type in self.symbol_map.keys():
-            path = self._cache_path(index_type)
-            if not path.exists():
-                continue
-            try:
-                payload = json.loads(path.read_text())
-                history = payload.get("history")
-                if not isinstance(history, list) or not history:
-                    continue
-                normalized = [(str(d), float(v)) for d, v in history]
-                self._last_good_history[index_type] = normalized
-                logger.info("Loaded last_good cache index=%s points=%d", index_type, len(normalized))
-            except Exception as exc:
-                logger.warning("Failed loading cache index=%s path=%s err=%s", index_type, path, exc)
-
-    def _persist_last_good_cache(self, index_type: str) -> None:
-        if not self._enable_cache:
-            return
-        path = self._cache_path(index_type)
-        history = self._last_good_history.get(index_type)
-        if not history:
-            return
-        payload = {"index_type": index_type, "history": history}
-        path.write_text(json.dumps(payload, ensure_ascii=False))
-
-    def _mark_bootstrap_synth_used(self, index_type: str) -> None:
-        if not self._enable_cache:
-            return
-        used = set()
-        if self._bootstrap_synth_flag_file.exists():
-            try:
-                used = set(json.loads(self._bootstrap_synth_flag_file.read_text()).get("used", []))
-            except Exception:
-                used = set()
-        used.add(index_type)
-        self._bootstrap_synth_flag_file.write_text(json.dumps({"used": sorted(list(used))}, ensure_ascii=False))
-
-    def _is_bootstrap_synth_used(self, index_type: str) -> bool:
-        if not self._enable_cache:
-            return False
-        if not self._bootstrap_synth_flag_file.exists():
-            return False
-        try:
-            used = set(json.loads(self._bootstrap_synth_flag_file.read_text()).get("used", []))
-            return index_type in used
-        except Exception:
-            return False
-
-    def _normalize_index_type(self, index_type: str) -> str:
-        return normalize_index_type(index_type, default="SP500", logger=logger)
-
     def _extract_close_series(self, hist: pd.DataFrame) -> pd.Series:
         """Extract a 1-D close/adj close series from yfinance DataFrame."""
 

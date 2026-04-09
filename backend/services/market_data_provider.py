@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from io import StringIO
 from typing import List, Tuple
 
 import logging
 import os
 import pandas as pd
 import requests
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +17,7 @@ DEFAULT_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
 }
-FETCH_API_BASE = os.getenv("MARKET_FETCH_API_BASE", "https://time-to-sell-fetcher.onrender.com")
+FETCH_API_BASE = os.getenv("MARKET_FETCH_API_BASE", "http://127.0.0.1:9000")
 
 
 def _build_direct_session() -> requests.Session:
@@ -43,7 +41,7 @@ def _extract_close_series(hist: pd.DataFrame) -> pd.Series:
 
 def _fetch_from_gateway(provider: str, symbol: str, start: date, end: date) -> pd.Series | None:
     if not FETCH_API_BASE:
-        return None
+        raise ValueError("MARKET_FETCH_API_BASE is required")
     session = _build_direct_session()
     url = f"{FETCH_API_BASE.rstrip('/')}/fetch"
     resp = session.get(
@@ -70,48 +68,10 @@ def _fetch_from_gateway(provider: str, symbol: str, start: date, end: date) -> p
 
 
 def fetch_history_from_yfinance(symbol: str, start: date, end: date, session: requests.Session | None = None) -> pd.Series:
-    try:
-        gateway_series = _fetch_from_gateway("yfinance", symbol, start, end)
-        if gateway_series is not None:
-            return gateway_series
-    except Exception as exc:
-        logger.warning(
-            "provider=gateway upstream=yfinance symbol=%s result=error base=%s err=%s fallback=direct",
-            symbol,
-            FETCH_API_BASE,
-            exc,
-        )
-    try:
-        hist = yf.download(
-            symbol,
-            start=start,
-            end=end + timedelta(days=1),
-            interval="1d",
-            progress=False,
-            threads=False,
-            session=session,
-            timeout=DEFAULT_TIMEOUT,
-        )
-    except Exception as exc:
-        if "requires curl_cffi session" not in str(exc):
-            logger.warning("provider=yfinance symbol=%s result=error err=%s", symbol, exc)
-            raise
-        logger.warning("provider=yfinance symbol=%s result=session_incompatible retry_without_session=true", symbol)
-        hist = yf.download(
-            symbol,
-            start=start,
-            end=end + timedelta(days=1),
-            interval="1d",
-            progress=False,
-            threads=False,
-            timeout=DEFAULT_TIMEOUT,
-        )
-    hist = hist.dropna()
-    closes = _extract_close_series(hist)
-    if closes.empty:
-        raise ValueError(f"empty history for {symbol}")
-    logger.info("provider=yfinance symbol=%s result=success points=%d", symbol, len(closes))
-    return closes
+    gateway_series = _fetch_from_gateway("yfinance", symbol, start, end)
+    if gateway_series is None:
+        raise ValueError(f"gateway empty history for {symbol}")
+    return gateway_series
 
 
 def fetch_history_from_nav_api(base_url: str, symbol: str, price_type: str, start: date, end: date) -> List[Tuple[str, float]]:
@@ -143,37 +103,13 @@ def fetch_history_from_nav_api(base_url: str, symbol: str, price_type: str, star
 
 
 def _fetch_from_stooq(stooq_symbol: str, start: date, end: date) -> pd.Series:
-    url = f"https://stooq.com/q/d/l/?s={stooq_symbol}&i=d"
-    session = _build_direct_session()
-    logger.info("provider=stooq symbol=%s result=request_start url=%s", stooq_symbol, url)
-    resp = session.get(url, proxies={}, timeout=DEFAULT_TIMEOUT)
-    logger.info("provider=stooq symbol=%s result=http status=%s bytes=%d", stooq_symbol, resp.status_code, len(resp.text or ""))
-    resp.raise_for_status()
-    df = pd.read_csv(StringIO(resp.text))
-    if "Date" not in df.columns or "Close" not in df.columns:
-        raise ValueError(f"stooq response invalid for {stooq_symbol}")
-    df["Date"] = pd.to_datetime(df["Date"])
-    mask = (df["Date"].dt.date >= start) & (df["Date"].dt.date <= end)
-    sliced = df.loc[mask, ["Date", "Close"]].dropna()
-    if sliced.empty:
-        raise ValueError(f"empty stooq history for {stooq_symbol}")
-    sliced = sliced.sort_values("Date")
-    logger.info("provider=stooq symbol=%s result=success points=%d", stooq_symbol, len(sliced))
-    return pd.Series(sliced["Close"].values, index=sliced["Date"])
+    gateway_series = _fetch_from_gateway("stooq", stooq_symbol, start, end)
+    if gateway_series is None:
+        raise ValueError(f"gateway empty history for {stooq_symbol}")
+    return gateway_series
 
 
 def fetch_history_from_stooq(symbol: str, start: date, end: date) -> pd.Series:
-    try:
-        gateway_series = _fetch_from_gateway("stooq", symbol, start, end)
-        if gateway_series is not None:
-            return gateway_series
-    except Exception as exc:
-        logger.warning(
-            "provider=gateway upstream=stooq symbol=%s result=error base=%s err=%s fallback=direct",
-            symbol,
-            FETCH_API_BASE,
-            exc,
-        )
     symbol_map = {
         "^GSPC": "^spx",
         "SP500": "^spx",

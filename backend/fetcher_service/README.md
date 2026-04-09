@@ -21,6 +21,8 @@ query:
 - `start`: `YYYY-MM-DD`
 - `end`: `YYYY-MM-DD`
 
+`start`/`end` を省略した場合は直近5年を自動選択します。
+
 response:
 
 ```json

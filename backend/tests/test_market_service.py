@@ -21,6 +21,10 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
         return df
 
     monkeypatch.setattr(yf, "download", fake_download)
+    monkeypatch.setattr(
+        "services.market_data_provider._fetch_from_gateway",
+        lambda provider, symbol, start, end: df["Close"],
+    )
 
     history = service.get_price_history_range(dates[0].date(), dates[-1].date(), allow_fallback=False, index_type="TOPIX")
     assert history == [(d.date().isoformat(), float(1000.0 + i)) for i, d in enumerate(dates)]
