@@ -152,6 +152,14 @@ class SP500MarketService:
                 if not isinstance(history, list) or not history:
                     continue
                 normalized = [(str(d), float(v)) for d, v in history]
+                reason = self._validate_history(normalized, index_type)
+                if reason:
+                    logger.warning(
+                        "Skip invalid last_good cache index=%s reason=%s",
+                        index_type,
+                        reason,
+                    )
+                    continue
                 self._last_good_history[index_type] = normalized
                 logger.info("Loaded last_good cache index=%s points=%d", index_type, len(normalized))
             except Exception as exc:
@@ -266,6 +274,39 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         self._last_debug.setdefault(index_type, {}).update(kwargs)
 
+    def _record_provider_attempt(
+        self,
+        index_type: str,
+        *,
+        provider: str,
+        success: bool,
+        history: Optional[List[Tuple[str, float]]] = None,
+        validation_reason: Optional[str] = None,
+        symbol: Optional[str] = None,
+        fx_symbol: Optional[str] = None,
+    ) -> None:
+        index_type = self._normalize_index_type(index_type)
+        first_close: Optional[float] = None
+        last_close: Optional[float] = None
+        if history:
+            first_close = float(history[0][1])
+            last_close = float(history[-1][1])
+        attempts = self._last_debug.setdefault(index_type, {}).get("provider_attempts")
+        attempt_list: List[Dict[str, object]] = list(attempts) if isinstance(attempts, list) else []
+        attempt_list.append(
+            {
+                "provider": provider,
+                "success": success,
+                "first_close": first_close,
+                "last_close": last_close,
+                "validation_passed": validation_reason is None,
+                "reject_reason": validation_reason,
+                "symbol": symbol,
+                "fx_symbol": fx_symbol,
+            }
+        )
+        self._last_debug.setdefault(index_type, {})["provider_attempts"] = attempt_list
+
     def get_last_debug(self, index_type: str) -> Dict[str, object]:
         index_type = self._normalize_index_type(index_type)
         return dict(self._last_debug.get(index_type, {}))
@@ -348,12 +389,14 @@ class SP500MarketService:
         if index_type == "SP500" and last_price < 3000:
             return f"abnormal_sp500_price:{last_price:.2f}"
 
-        start_price = self.start_prices.get(index_type)
-        if start_price:
-            if last_price < start_price * 0.4:
-                return f"abnormal_scale_low:{last_price:.2f}<{start_price * 0.4:.2f}"
-            if last_price > start_price * 5.0:
-                return f"abnormal_scale_high:{last_price:.2f}>{start_price * 5.0:.2f}"
+        # 固定の start_prices に依存した閾値だと指数ごとのスケール差で誤検知しやすいため、
+        # 実測 series の先頭値ベースでスケール逸脱を判定する。
+        first_price = history[0][1]
+        if first_price and first_price > 0:
+            if last_price < first_price * 0.1:
+                return f"abnormal_scale_low:{last_price:.2f}<{first_price * 0.1:.2f}"
+            if last_price > first_price * 20.0:
+                return f"abnormal_scale_high:{last_price:.2f}>{first_price * 20.0:.2f}"
 
         return None
 
@@ -466,8 +509,24 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         current = self._last_debug.setdefault(index_type, {}).get("provider_reject_reasons")
         reasons: List[str] = list(current) if isinstance(current, list) else []
+        reasons = [r for r in reasons if r != "no_reject"]
         reasons.append(reason)
         self._last_debug.setdefault(index_type, {})["provider_reject_reasons"] = reasons
+
+    def _get_valid_last_good_history(self, index_type: str) -> Optional[List[Tuple[str, float]]]:
+        index_type = self._normalize_index_type(index_type)
+        history = self._last_good_history.get(index_type)
+        if not history:
+            return None
+        reason = self._validate_history(history, index_type)
+        if reason:
+            logger.warning(
+                "Ignore broken last_good index=%s reason=%s",
+                index_type,
+                reason,
+            )
+            return None
+        return history
 
     def _provider_acceptance_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
         points = len(history)
@@ -541,8 +600,23 @@ class SP500MarketService:
                 )
                 reason = self._validate_history(series, index_type)
                 if not reason:
+                    self._record_provider_attempt(
+                        index_type,
+                        provider="yfinance",
+                        success=True,
+                        history=series,
+                        symbol=symbol,
+                    )
                     self._update_last_good_history(index_type, series, source_hint=self.get_last_source(index_type))
                     return series
+                self._record_provider_attempt(
+                    index_type,
+                    provider="yfinance",
+                    success=False,
+                    history=series,
+                    validation_reason=reason,
+                    symbol=symbol,
+                )
                 self._log_validation_failure(
                     index_type=index_type,
                     symbol=symbol,
@@ -552,8 +626,17 @@ class SP500MarketService:
                     history=series,
                 )
                 self._set_debug(index_type, validation_reason=reason)
+                self._add_provider_reject_reason(index_type, f"index_jpy:{symbol}:{reason}")
                 last_error = ValueError(reason)
             except Exception as exc:
+                self._record_provider_attempt(
+                    index_type,
+                    provider="yfinance",
+                    success=False,
+                    validation_reason=f"fetch_error:{exc}",
+                    symbol=symbol,
+                )
+                self._add_provider_reject_reason(index_type, f"index_jpy:{symbol}:fetch_error:{exc}")
                 last_error = exc
                 self._set_debug(index_type, fetch_error=str(exc))
                 logger.warning(
@@ -567,8 +650,8 @@ class SP500MarketService:
             if attempt < len(backoffs):
                 time.sleep(delay)
 
-        if index_type in self._last_good_history:
-            last_good = self._last_good_history[index_type]
+        last_good = self._get_valid_last_good_history(index_type)
+        if last_good:
             logger.info(
                 "Using last good history index=%s symbol=%s price_type=%s points=%d last=%s",
                 index_type,
@@ -663,11 +746,19 @@ class SP500MarketService:
                             tried_symbols,
                             source,
                         )
+                        self._record_provider_attempt(
+                            index_type,
+                            provider="yfinance",
+                            success=True,
+                            history=history,
+                            symbol=symbol,
+                        )
                         self._update_last_good_history(index_type, history, source_hint=source)
                         self._set_last_source(index_type, source)
                         self._set_debug(
                             index_type,
                             tried_symbols=tried_symbols,
+                            adopted_provider="yfinance",
                             adopted_symbol=symbol,
                             adoption_reason="primary" if symbol == symbol_candidates[0] else "fallback",
                             quality_check={
@@ -685,9 +776,26 @@ class SP500MarketService:
                         attempt=attempt,
                         history=history,
                     )
+                    self._record_provider_attempt(
+                        index_type,
+                        provider="yfinance",
+                        success=False,
+                        history=history,
+                        validation_reason=reason,
+                        symbol=symbol,
+                    )
                     self._set_debug(index_type, validation_reason=reason)
+                    self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{reason}")
                     last_error = ValueError(reason)
                 except Exception as exc:
+                    self._record_provider_attempt(
+                        index_type,
+                        provider="yfinance",
+                        success=False,
+                        validation_reason=f"fetch_error:{exc}",
+                        symbol=symbol,
+                    )
+                    self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:fetch_error:{exc}")
                     last_error = exc
                     self._set_debug(index_type, fetch_error=str(exc))
                     logger.warning(
@@ -701,8 +809,8 @@ class SP500MarketService:
             if attempt < len(backoffs):
                 time.sleep(delay)
 
-        if index_type in self._last_good_history:
-            last_good = self._last_good_history[index_type]
+        last_good = self._get_valid_last_good_history(index_type)
+        if last_good:
             logger.info(
                 "Using last good history index=%s symbol=%s price_type=%s points=%d last=%s",
                 index_type,
@@ -763,6 +871,18 @@ class SP500MarketService:
                     if combined.empty:
                         self._set_debug(index_type, fetch_error="no overlapping dates for index and fx", combined_points=0)
                         last_error = ValueError("no overlapping dates for index and fx")
+                        self._record_provider_attempt(
+                            index_type,
+                            provider="yfinance",
+                            success=False,
+                            validation_reason="no_overlapping_dates",
+                            symbol=symbol,
+                            fx_symbol=fx_symbol,
+                        )
+                        self._add_provider_reject_reason(
+                            index_type,
+                            f"yfinance:{symbol}+{fx_symbol}:no_overlapping_dates",
+                        )
                         logger.warning(
                             "JPY candidate quality NG index=%s symbol=%s fx_symbol=%s result=quality_ng reason=no_overlapping_dates",
                             index_type,
@@ -780,6 +900,16 @@ class SP500MarketService:
                     )
                     if quality_status == "hard_ng":
                         summary = self._quality_summary(quality_reason)
+                        self._record_provider_attempt(
+                            index_type,
+                            provider="yfinance",
+                            success=False,
+                            history=series,
+                            validation_reason=summary,
+                            symbol=symbol,
+                            fx_symbol=fx_symbol,
+                        )
+                        self._add_provider_reject_reason(index_type, f"yfinance:{symbol}+{fx_symbol}:{summary}")
                         self._set_debug(
                             index_type,
                             quality_flags=quality_reason,
@@ -816,6 +946,15 @@ class SP500MarketService:
                                 index_type,
                                 f"yfinance:{symbol}+{fx_symbol}:LOW_QUALITY_DATA:{summary}",
                             )
+                            self._record_provider_attempt(
+                                index_type,
+                                provider="yfinance",
+                                success=False,
+                                history=series,
+                                validation_reason=f"LOW_QUALITY_DATA:{summary}",
+                                symbol=symbol,
+                                fx_symbol=fx_symbol,
+                            )
                             continue
                     logger.info(
                         "Using yfinance history for %s (symbol=%s fx_symbol=%s price_type=%s points=%d tried_symbols=%s tried_fx_symbols=%s source=%s)",
@@ -828,9 +967,18 @@ class SP500MarketService:
                         tried_fx_symbols,
                         source,
                     )
+                    self._record_provider_attempt(
+                        index_type,
+                        provider="yfinance",
+                        success=True,
+                        history=series,
+                        symbol=symbol,
+                        fx_symbol=fx_symbol,
+                    )
                     self._set_last_source(index_type, source)
                     self._set_debug(
                         index_type,
+                        adopted_provider="yfinance",
                         combined_points=len(series),
                         tried_symbols=tried_symbols,
                         tried_fx_symbols=tried_fx_symbols,
@@ -850,6 +998,15 @@ class SP500MarketService:
                     )
                     return series
                 except Exception as exc:
+                    self._record_provider_attempt(
+                        index_type,
+                        provider="yfinance",
+                        success=False,
+                        validation_reason=f"fetch_error:{exc}",
+                        symbol=symbol,
+                        fx_symbol=fx_symbol,
+                    )
+                    self._add_provider_reject_reason(index_type, f"yfinance:{symbol}+{fx_symbol}:fetch_error:{exc}")
                     last_error = exc
                     self._set_debug(index_type, fetch_error=str(exc))
                     logger.warning(
@@ -878,6 +1035,14 @@ class SP500MarketService:
 
         nav_base = self._resolve_nav_base(index_type)
         if not nav_base:
+            self._record_provider_attempt(
+                index_type,
+                provider="nav_api",
+                success=False,
+                validation_reason="not_configured",
+                symbol=self._resolve_symbol(index_type),
+            )
+            self._add_provider_reject_reason(index_type, f"nav_api:{self._resolve_symbol(index_type)}:not_configured")
             return []
 
         symbol = self._resolve_symbol(index_type)
@@ -885,6 +1050,26 @@ class SP500MarketService:
 
         try:
             series = fetch_history_from_nav_api(nav_base, symbol, str(price_type), start, end)
+            nav_reason = self._validate_history(series, index_type)
+            if nav_reason:
+                self._record_provider_attempt(
+                    index_type,
+                    provider="nav_api",
+                    success=False,
+                    history=series,
+                    validation_reason=nav_reason,
+                    symbol=symbol,
+                )
+                self._add_provider_reject_reason(index_type, f"nav_api:{symbol}:{nav_reason}")
+                logger.warning("NAV API invalid index=%s symbol=%s reason=%s", index_type, symbol, nav_reason)
+                return []
+            self._record_provider_attempt(
+                index_type,
+                provider="nav_api",
+                success=True,
+                history=series,
+                symbol=symbol,
+            )
             logger.info(
                 "[NAV API] index=%s symbol=%s price_type=%s points=%d",
                 index_type,
@@ -894,6 +1079,14 @@ class SP500MarketService:
             )
             return series
         except Exception as exc:
+            self._record_provider_attempt(
+                index_type,
+                provider="nav_api",
+                success=False,
+                validation_reason=f"fetch_error:{exc}",
+                symbol=symbol,
+            )
+            self._add_provider_reject_reason(index_type, f"nav_api:{symbol}:fetch_error:{exc}")
             logger.warning("NAV API fallback due to error: %s", exc)
         return []
 
@@ -906,8 +1099,23 @@ class SP500MarketService:
         provider_reason = self._provider_acceptance_reason(history)
         if reason or provider_reason:
             msg = provider_reason or reason
+            self._record_provider_attempt(
+                index_type,
+                provider="stooq",
+                success=False,
+                history=history,
+                validation_reason=msg,
+                symbol=symbol,
+            )
             self._add_provider_reject_reason(index_type, f"stooq:{symbol}:{msg}")
             raise ValueError(msg)
+        self._record_provider_attempt(
+            index_type,
+            provider="stooq",
+            success=True,
+            history=history,
+            symbol=symbol,
+        )
         self._set_last_source(index_type, "stooq")
         self._update_last_good_history(index_type, history, source_hint="stooq")
         self._set_debug(index_type, tried_providers=["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
@@ -934,10 +1142,25 @@ class SP500MarketService:
             reason = self._validate_history(hist, index_type)
             provider_reason = self._provider_acceptance_reason(hist)
             if not reason and not provider_reason:
+                self._record_provider_attempt(
+                    index_type,
+                    provider="stooq",
+                    success=True,
+                    history=hist,
+                    symbol=symbol,
+                )
                 self._set_last_source(index_type, "stooq")
                 self._update_last_good_history(index_type, hist, source_hint="stooq")
                 self._set_debug(index_type, tried_providers=tried_providers + ["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
                 return hist
+            self._record_provider_attempt(
+                index_type,
+                provider="stooq",
+                success=False,
+                history=hist,
+                validation_reason=provider_reason or reason,
+                symbol=symbol,
+            )
             logger.warning(
                 "Provider reject index=%s provider=stooq symbol=%s reason=%s",
                 index_type,
@@ -945,8 +1168,15 @@ class SP500MarketService:
                 provider_reason or reason,
             )
             self._add_provider_reject_reason(index_type, f"stooq:{symbol}:{provider_reason or reason}")
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_provider_attempt(
+                index_type,
+                provider="stooq",
+                success=False,
+                validation_reason=f"fetch_error:{exc}",
+                symbol=symbol,
+            )
+            self._add_provider_reject_reason(index_type, f"stooq:{symbol}:fetch_error:{exc}")
         tried_providers.append("stooq")
         self._set_debug(index_type, tried_providers=tried_providers)
 
@@ -969,6 +1199,14 @@ class SP500MarketService:
                 hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in combined["close"].items()]
                 provider_reason = self._provider_acceptance_reason(hist)
                 if not provider_reason:
+                    self._record_provider_attempt(
+                        index_type,
+                        provider="stooq",
+                        success=True,
+                        history=hist,
+                        symbol=base_symbol,
+                        fx_symbol=fx_symbol,
+                    )
                     self._set_last_source(index_type, "stooq")
                     self._update_last_good_history(index_type, hist, source_hint="stooq")
                     self._set_debug(
@@ -979,6 +1217,15 @@ class SP500MarketService:
                         adopted_fx_symbol=fx_symbol,
                     )
                     return hist
+                self._record_provider_attempt(
+                    index_type,
+                    provider="stooq",
+                    success=False,
+                    history=hist,
+                    validation_reason=provider_reason,
+                    symbol=base_symbol,
+                    fx_symbol=fx_symbol,
+                )
                 logger.warning(
                     "Provider reject index=%s provider=stooq symbol=%s fx_symbol=%s reason=%s",
                     index_type,
@@ -987,8 +1234,16 @@ class SP500MarketService:
                     provider_reason,
                 )
                 self._add_provider_reject_reason(index_type, f"stooq:{base_symbol}+{fx_symbol}:{provider_reason}")
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_provider_attempt(
+                index_type,
+                provider="stooq",
+                success=False,
+                validation_reason=f"fetch_error:{exc}",
+                symbol=base_symbol,
+                fx_symbol=fx_symbol,
+            )
+            self._add_provider_reject_reason(index_type, f"stooq:{base_symbol}+{fx_symbol}:fetch_error:{exc}")
         tried_providers.append("stooq")
         self._set_debug(index_type, tried_providers=tried_providers)
 
@@ -1180,7 +1435,8 @@ class SP500MarketService:
             quality_summary="",
             tried_providers=[],
             adopted_provider=None,
-            provider_reject_reasons=[],
+            provider_reject_reasons=["no_reject"],
+            provider_attempts=[],
         )
         try:
             if index_type == "SP500":
@@ -1232,8 +1488,8 @@ class SP500MarketService:
         except Exception as exc:
             self._set_debug(index_type, fetch_error=str(exc))
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
-            if index_type in self._last_good_history:
-                last_good = self._last_good_history[index_type]
+            last_good = self._get_valid_last_good_history(index_type)
+            if last_good:
                 logger.info(
                     "Using last good history after fetch failure index=%s symbol=%s price_type=%s points=%d last=%s",
                     index_type,
@@ -1331,8 +1587,8 @@ class SP500MarketService:
             return self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
         except Exception as exc:
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
-            if index_type in self._last_good_history:
-                last_good = self._last_good_history[index_type]
+            last_good = self._get_valid_last_good_history(index_type)
+            if last_good:
                 logger.info(
                     "Using last good history after fetch failure index=%s symbol=%s price_type=%s points=%d last=%s",
                     index_type,

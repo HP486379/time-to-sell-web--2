@@ -224,3 +224,50 @@ def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
 
     assert history == degraded
     assert service.get_last_source("TOPIX") == "fallback"
+
+
+def test_debug_has_provider_attempt_fields(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(80)])
+
+    def fake_download(symbol, s, e):
+        dates = pd.to_datetime([d for d, _ in ok])
+        values = [v for _, v in ok]
+        return pd.Series(values, index=dates)
+
+    monkeypatch.setattr(service, "_download_close_series", fake_download)
+    history = service.get_price_history_range(start, end, allow_fallback=False, index_type="TOPIX")
+
+    debug = service.get_last_debug("TOPIX")
+    attempts = debug.get("provider_attempts")
+    assert history == ok
+    assert isinstance(attempts, list)
+    assert attempts
+    for attempt in attempts:
+        assert "provider" in attempt
+        assert "success" in attempt
+        assert "first_close" in attempt
+        assert "last_close" in attempt
+        assert "validation_passed" in attempt
+        assert "reject_reason" in attempt
+    assert debug.get("provider_reject_reasons")
+
+
+def test_provider_reject_reasons_never_empty(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    last_good = _history_from_values("2024-01-01", [4100.0 + i for i in range(60)])
+    service._last_good_history["SP500"] = last_good
+
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fail")))
+    monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
+
+    history = service.get_price_history_range(start, end, allow_fallback=False, index_type="SP500")
+    debug = service.get_last_debug("SP500")
+
+    assert history == last_good
+    assert isinstance(debug.get("provider_reject_reasons"), list)
+    assert debug["provider_reject_reasons"]
