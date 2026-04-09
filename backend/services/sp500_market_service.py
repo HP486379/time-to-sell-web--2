@@ -395,7 +395,7 @@ class SP500MarketService:
 
             if prev and prev > 0:
                 jump = abs((value - prev) / prev)
-                if jump > 0.20:
+                if jump > 1.00:
                     return f"abnormal_daily_jump:{jump:.4f}"
             prev = value
 
