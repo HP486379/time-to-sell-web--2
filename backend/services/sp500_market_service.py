@@ -534,6 +534,7 @@ class SP500MarketService:
             last_good_date=checks.get("last_good_date"),
             last_good_age_days=checks.get("age_days"),
             last_good_freshness_ok=checks.get("freshness_ok"),
+            last_good_eligible=ok,
             last_good_quality_check=checks.get("quality_check"),
             last_good_tail_check=checks.get("tail_check"),
             last_good_reject_reason=checks.get("reject_reason"),
@@ -757,7 +758,7 @@ class SP500MarketService:
                 index_type,
                 adopted_provider="last_good",
                 adoption_reason="last_good",
-                quality_check={"symbol": symbol, "result": "last_good_adopted", "reason": None},
+                quality_check={"symbol": symbol, "result": "fallback_last_good", "reason": "provider_failed"},
             )
             return last_good
 
@@ -955,7 +956,7 @@ class SP500MarketService:
                 index_type,
                 adopted_provider="last_good",
                 adoption_reason="last_good",
-                quality_check={"symbol": symbol, "result": "last_good_adopted", "reason": None},
+                quality_check={"symbol": symbol, "result": "fallback_last_good", "reason": "provider_failed"},
             )
             return last_good
 

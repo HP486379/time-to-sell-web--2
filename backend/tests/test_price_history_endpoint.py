@@ -17,3 +17,36 @@ def test_sp500_price_history_builds_response(monkeypatch):
     payload = main._get_price_series_or_503(main.IndexType.SP500)
     assert len(payload) == 2
     assert payload[-1]["close"] == 101.0
+
+
+def test_scoring_guard_rejects_last_good_without_freshness(monkeypatch):
+    monkeypatch.setattr(
+        main.market_service,
+        "get_last_debug",
+        lambda *_: {
+            "adopted_provider": "last_good",
+            "fetch_error": None,
+            "quality_check": {"result": "fallback_last_good", "reason": "provider_failed"},
+            "last_good_freshness_ok": False,
+            "last_good_quality_check": {"result": "failed", "reason": "stale_or_invalid_date"},
+            "last_good_tail_check": {"result": "unknown", "reason": None},
+        },
+    )
+    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500)
+    assert ok is False
+    assert "last_good_not_fresh" in reason
+
+
+def test_scoring_guard_accepts_success_provider(monkeypatch):
+    monkeypatch.setattr(
+        main.market_service,
+        "get_last_debug",
+        lambda *_: {
+            "adopted_provider": "yfinance",
+            "fetch_error": None,
+            "quality_check": {"result": "success", "reason": None},
+        },
+    )
+    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500)
+    assert ok is True
+    assert reason == "ok_provider"

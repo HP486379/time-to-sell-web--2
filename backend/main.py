@@ -227,6 +227,42 @@ def _get_price_series_or_503(index_type: IndexType):
         raise HTTPException(status_code=503, detail="Price data unavailable.")
 
 
+def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
+    debug = market_service.get_last_debug(index_type.value)
+    adopted_provider = debug.get("adopted_provider")
+    fetch_error = debug.get("fetch_error")
+    quality_check = debug.get("quality_check") if isinstance(debug.get("quality_check"), dict) else {}
+    quality_result = quality_check.get("result")
+
+    if fetch_error:
+        return False, f"fetch_error_present:{fetch_error}"
+    if not adopted_provider:
+        return False, "missing_adopted_provider"
+    if not quality_check:
+        return False, "missing_quality_check"
+
+    if adopted_provider == "last_good":
+        freshness_ok = debug.get("last_good_freshness_ok") is True
+        lg_quality = debug.get("last_good_quality_check") if isinstance(debug.get("last_good_quality_check"), dict) else {}
+        lg_tail = debug.get("last_good_tail_check") if isinstance(debug.get("last_good_tail_check"), dict) else {}
+        if not freshness_ok:
+            return False, "last_good_not_fresh"
+        if lg_quality.get("result") != "success":
+            return False, f"last_good_quality_ng:{lg_quality.get('reason')}"
+        if lg_tail.get("result") not in {"passed", "success"}:
+            return False, f"last_good_tail_ng:{lg_tail.get('reason')}"
+        if quality_result not in {"fallback_last_good"}:
+            return False, f"unexpected_last_good_quality_result:{quality_result}"
+        return True, "ok_last_good"
+
+    if adopted_provider in {"yfinance", "stooq", "nav_api"}:
+        if quality_result not in {"success", "soft_ng_adopted"}:
+            return False, f"quality_not_success:{quality_result}"
+        return True, "ok_provider"
+
+    return False, f"unsupported_adopted_provider:{adopted_provider}"
+
+
 def _build_event_adjustment(target: date):
     events = event_service.get_events_for_date(target)
     try:
@@ -318,6 +354,16 @@ def get_cached_snapshot(
         snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         return snapshot
+
+    eligible, reason = _is_debug_eligible_for_scoring(index_type)
+    if not eligible:
+        logger.warning("[snapshot] scoring blocked index=%s reason=%s", index_type.value, reason)
+        snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        market_service._set_debug(index_type.value, scoring_allowed=False, scoring_block_reason=reason)
+        snapshot["debug"] = market_service.get_last_debug(index_type.value)
+        return snapshot
+    market_service._set_debug(index_type.value, scoring_allowed=True, scoring_block_reason=None)
 
     try:
         technical_score, technical_details = calculate_technical_score(price_history)
