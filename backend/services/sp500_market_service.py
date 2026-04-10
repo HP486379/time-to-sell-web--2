@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import random
+import statistics
 import time
 import json
 from datetime import date, timedelta
@@ -282,6 +283,10 @@ class SP500MarketService:
         success: bool,
         history: Optional[List[Tuple[str, float]]] = None,
         validation_reason: Optional[str] = None,
+        quality_result: Optional[str] = None,
+        fetch_error: Optional[str] = None,
+        validation_result: Optional[str] = None,
+        adopted: Optional[bool] = None,
         symbol: Optional[str] = None,
         fx_symbol: Optional[str] = None,
     ) -> None:
@@ -297,6 +302,14 @@ class SP500MarketService:
             ratio = last_close / first_close
         attempts = self._last_debug.setdefault(index_type, {}).get("provider_attempts")
         attempt_list: List[Dict[str, object]] = list(attempts) if isinstance(attempts, list) else []
+        if adopted is None:
+            adopted = success
+        if validation_result is None:
+            validation_result = "passed" if success else "failed"
+        if quality_result is None and success:
+            quality_result = "success"
+        if fetch_error is None and validation_reason and validation_reason.startswith("fetch_error:"):
+            fetch_error = validation_reason.split("fetch_error:", 1)[1]
         attempt_list.append(
             {
                 "provider": provider,
@@ -305,7 +318,11 @@ class SP500MarketService:
                 "last_close": last_close,
                 "ratio": ratio,
                 "validation_passed": validation_reason is None,
+                "validation_result": validation_result,
                 "reject_reason": validation_reason,
+                "quality_result": quality_result,
+                "fetch_error": fetch_error,
+                "adopted": adopted,
                 "symbol": symbol,
                 "fx_symbol": fx_symbol,
             }
@@ -543,6 +560,15 @@ class SP500MarketService:
             total_return = (last / first - 1.0) * 100.0
             if total_return < -90.0 or total_return > 400.0:
                 return f"provider_reject_abnormal_total_change:return={total_return:.2f}%"
+        if len(values) >= 25:
+            recent = float(values[-1])
+            prev_window = [float(v) for v in values[-21:-1]]
+            if prev_window:
+                recent_median = statistics.median(prev_window)
+                if recent_median > 0:
+                    tail_ratio = recent / recent_median
+                    if tail_ratio < 0.70 or tail_ratio > 1.30:
+                        return f"provider_reject_tail_outlier:tail_ratio={tail_ratio:.4f}"
         return None
 
     def _log_validation_failure(
@@ -652,7 +678,12 @@ class SP500MarketService:
                 last_good[-1][1] if last_good else None,
             )
             self._set_last_source(index_type, "last_good")
-            self._set_debug(index_type, adoption_reason="last_good")
+            self._set_debug(
+                index_type,
+                adopted_provider="last_good",
+                adoption_reason="last_good",
+                quality_check={"symbol": symbol, "result": "last_good_adopted", "reason": None},
+            )
             return last_good
 
         if last_error:
@@ -695,6 +726,17 @@ class SP500MarketService:
                                     provider_reason,
                                 )
                                 self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{provider_reason}")
+                                self._record_provider_attempt(
+                                    index_type,
+                                    provider="yfinance",
+                                    success=False,
+                                    history=history,
+                                    validation_reason=provider_reason,
+                                    quality_result="provider_reject",
+                                    validation_result="failed",
+                                    adopted=False,
+                                    symbol=symbol,
+                                )
                                 last_error = ValueError(provider_reason)
                                 continue
                             quality_status, quality_reason = self._quality_check_history(history)
@@ -712,6 +754,18 @@ class SP500MarketService:
                                     symbol,
                                     summary,
                                 )
+                                self._record_provider_attempt(
+                                    index_type,
+                                    provider="yfinance",
+                                    success=False,
+                                    history=history,
+                                    validation_reason=summary,
+                                    quality_result="hard_ng",
+                                    validation_result="failed",
+                                    adopted=False,
+                                    symbol=symbol,
+                                )
+                                self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{summary}")
                                 last_error = ValueError(summary)
                                 continue
                             if quality_status == "soft_ng":
@@ -742,6 +796,9 @@ class SP500MarketService:
                             provider="yfinance",
                             success=True,
                             history=history,
+                            quality_result="ok" if (not enforce_quality or quality_status == "ok") else "soft_ng_adopted",
+                            validation_result="passed",
+                            adopted=True,
                             symbol=symbol,
                         )
                         self._update_last_good_history(index_type, history, source_hint=source)
@@ -757,6 +814,7 @@ class SP500MarketService:
                                 "result": "success" if not enforce_quality or quality_status == "ok" else "soft_ng_adopted",
                                 "reason": self._quality_summary(quality_reason) if enforce_quality and quality_status == "soft_ng" else None,
                             },
+                            fetch_error=None,
                         )
                         return history
                     self._log_validation_failure(
@@ -773,6 +831,9 @@ class SP500MarketService:
                         success=False,
                         history=history,
                         validation_reason=reason,
+                        quality_result="validation_ng",
+                        validation_result="failed",
+                        adopted=False,
                         symbol=symbol,
                     )
                     self._set_debug(index_type, validation_reason=reason)
@@ -784,6 +845,10 @@ class SP500MarketService:
                         provider="yfinance",
                         success=False,
                         validation_reason=f"fetch_error:{exc}",
+                        quality_result="fetch_error",
+                        fetch_error=str(exc),
+                        validation_result="failed",
+                        adopted=False,
                         symbol=symbol,
                     )
                     self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:fetch_error:{exc}")
@@ -811,7 +876,12 @@ class SP500MarketService:
                 last_good[-1][1] if last_good else None,
             )
             self._set_last_source(index_type, "last_good")
-            self._set_debug(index_type, adoption_reason="last_good")
+            self._set_debug(
+                index_type,
+                adopted_provider="last_good",
+                adoption_reason="last_good",
+                quality_check={"symbol": symbol, "result": "last_good_adopted", "reason": None},
+            )
             return last_good
 
         if last_error:
@@ -970,6 +1040,7 @@ class SP500MarketService:
                     self._set_debug(
                         index_type,
                         adopted_provider="yfinance",
+                        fetch_error=None,
                         combined_points=len(series),
                         tried_symbols=tried_symbols,
                         tried_fx_symbols=tried_fx_symbols,
@@ -1108,7 +1179,14 @@ class SP500MarketService:
         )
         self._set_last_source(index_type, "stooq")
         self._update_last_good_history(index_type, history, source_hint="stooq")
-        self._set_debug(index_type, tried_providers=["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
+        self._set_debug(
+            index_type,
+            tried_providers=["stooq"],
+            adopted_provider="stooq",
+            adopted_symbol=symbol,
+            fetch_error=None,
+            quality_check={"symbol": symbol, "result": "success", "reason": None},
+        )
         logger.info("provider=stooq index=%s symbol=%s result=adopted points=%d", index_type, symbol, len(history))
         return history
 
@@ -1120,7 +1198,14 @@ class SP500MarketService:
             tried_providers.append("nav_api")
             self._set_last_source(index_type, "nav_api")
             self._update_last_good_history(index_type, nav_hist, source_hint="nav_api")
-            self._set_debug(index_type, tried_providers=tried_providers, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
+            self._set_debug(
+                index_type,
+                tried_providers=tried_providers,
+                adopted_provider="nav_api",
+                adopted_symbol=self._resolve_symbol(index_type),
+                fetch_error=None,
+                quality_check={"symbol": self._resolve_symbol(index_type), "result": "success", "reason": None},
+            )
             return nav_hist
         tried_providers.append("nav_api")
         self._set_debug(index_type, tried_providers=tried_providers)
@@ -1141,7 +1226,14 @@ class SP500MarketService:
                 )
                 self._set_last_source(index_type, "stooq")
                 self._update_last_good_history(index_type, hist, source_hint="stooq")
-                self._set_debug(index_type, tried_providers=tried_providers + ["stooq"], adopted_provider="stooq", adopted_symbol=symbol)
+                self._set_debug(
+                    index_type,
+                    tried_providers=tried_providers + ["stooq"],
+                    adopted_provider="stooq",
+                    adopted_symbol=symbol,
+                    fetch_error=None,
+                    quality_check={"symbol": symbol, "result": "success", "reason": None},
+                )
                 return hist
             self._record_provider_attempt(
                 index_type,
@@ -1171,8 +1263,7 @@ class SP500MarketService:
         self._set_debug(index_type, tried_providers=tried_providers)
 
         hist = self._fetch_yfinance_history_with_retry(start, end, index_type)
-        self._set_last_source(index_type, "yfinance")
-        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"], adopted_provider="yfinance", adopted_symbol=self._resolve_symbol(index_type))
+        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"])
         return hist
 
     def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
@@ -1205,6 +1296,8 @@ class SP500MarketService:
                         adopted_provider="stooq",
                         adopted_symbol=base_symbol,
                         adopted_fx_symbol=fx_symbol,
+                        fetch_error=None,
+                        quality_check={"symbol": base_symbol, "fx_symbol": fx_symbol, "result": "success", "reason": None},
                     )
                     return hist
                 self._record_provider_attempt(
@@ -1238,8 +1331,7 @@ class SP500MarketService:
         self._set_debug(index_type, tried_providers=tried_providers)
 
         hist = self._get_validated_index_jpy_history(start, end, index_type)
-        self._set_last_source(index_type, "yfinance")
-        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"], adopted_provider="yfinance")
+        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"])
         return hist
 
     def _fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
@@ -1459,7 +1551,13 @@ class SP500MarketService:
                     )
                     self._update_last_good_history(index_type, nav_hist, source_hint="real")
                     self._set_last_source(index_type, "real")
-                    self._set_debug(index_type, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
+                    self._set_debug(
+                        index_type,
+                        adopted_provider="nav_api",
+                        adopted_symbol=self._resolve_symbol(index_type),
+                        fetch_error=None,
+                        quality_check={"symbol": self._resolve_symbol(index_type), "result": "success", "reason": None},
+                    )
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
@@ -1565,7 +1663,13 @@ class SP500MarketService:
                     )
                     self._update_last_good_history(index_type, nav_hist, source_hint="real")
                     self._set_last_source(index_type, "real")
-                    self._set_debug(index_type, adopted_provider="nav_api", adopted_symbol=self._resolve_symbol(index_type))
+                    self._set_debug(
+                        index_type,
+                        adopted_provider="nav_api",
+                        adopted_symbol=self._resolve_symbol(index_type),
+                        fetch_error=None,
+                        quality_check={"symbol": self._resolve_symbol(index_type), "result": "success", "reason": None},
+                    )
                     return nav_hist
                 self._log_validation_failure(
                     index_type=index_type,
