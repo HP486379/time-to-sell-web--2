@@ -153,6 +153,12 @@ export interface EvaluateResponse {
     warning?: string
   }
   price_series: PricePoint[]
+  adopted_provider?: string | null
+  debug?: {
+    source?: string
+    adopted_provider?: string | null
+    provider_reject_reasons?: string[]
+  }
 }
 
 export interface SyntheticNavResponse {
