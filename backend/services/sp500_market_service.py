@@ -125,6 +125,7 @@ class SP500MarketService:
         self._bootstrap_synth_flag_file = self._cache_dir / "bootstrap_synth_once.json"
         self._bootstrap_allow_synth_once = self._flag("BOOTSTRAP_ALLOW_SYNTHETIC_ONCE", default=True)
         self._force_stooq_only = self._flag("MARKET_FORCE_STOOQ_ONLY", default=False)
+        self._last_good_max_stale_days = int(os.getenv("MARKET_LAST_GOOD_MAX_STALE_DAYS", "10"))
         if self._enable_cache:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
             self._load_last_good_cache()
@@ -525,16 +526,90 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         history = self._last_good_history.get(index_type)
         if not history:
+            self._set_debug(index_type, last_good_reject_reason="missing")
             return None
+        ok, checks = self._evaluate_last_good_eligibility(index_type, history)
+        self._set_debug(
+            index_type,
+            last_good_date=checks.get("last_good_date"),
+            last_good_age_days=checks.get("age_days"),
+            last_good_freshness_ok=checks.get("freshness_ok"),
+            last_good_quality_check=checks.get("quality_check"),
+            last_good_tail_check=checks.get("tail_check"),
+            last_good_reject_reason=checks.get("reject_reason"),
+        )
+        if not ok:
+            logger.warning("Ignore broken last_good index=%s reason=%s", index_type, checks.get("reject_reason"))
+            return None
+        self._set_debug(index_type, last_good_reject_reason=None)
+        return history
+
+    def _evaluate_last_good_eligibility(
+        self, index_type: str, history: List[Tuple[str, float]]
+    ) -> Tuple[bool, Dict[str, object]]:
+        last_good_date = history[-1][0] if history else None
+        age_days: Optional[int] = None
+        freshness_ok = False
+        try:
+            if last_good_date:
+                parsed = date.fromisoformat(str(last_good_date))
+                age_days = max(0, (date.today() - parsed).days)
+                freshness_ok = age_days <= self._last_good_max_stale_days
+        except Exception:
+            freshness_ok = False
+        if not freshness_ok:
+            return False, {
+                "last_good_date": last_good_date,
+                "age_days": age_days,
+                "freshness_ok": False,
+                "quality_check": {"result": "failed", "reason": "stale_or_invalid_date"},
+                "tail_check": {"result": "unknown", "reason": None},
+                "reject_reason": f"last_good_stale_or_invalid:max_age_days={self._last_good_max_stale_days}",
+            }
+
         reason = self._validate_history(history, index_type)
         if reason:
-            logger.warning(
-                "Ignore broken last_good index=%s reason=%s",
-                index_type,
-                reason,
-            )
-            return None
-        return history
+            return False, {
+                "last_good_date": last_good_date,
+                "age_days": age_days,
+                "freshness_ok": True,
+                "quality_check": {"result": "failed", "reason": reason},
+                "tail_check": {"result": "failed", "reason": reason},
+                "reject_reason": reason,
+            }
+
+        provider_reason = self._provider_acceptance_reason(history)
+        tail_reason = provider_reason if provider_reason and "tail_outlier" in provider_reason else None
+        if provider_reason:
+            return False, {
+                "last_good_date": last_good_date,
+                "age_days": age_days,
+                "freshness_ok": True,
+                "quality_check": {"result": "failed", "reason": provider_reason},
+                "tail_check": {"result": "failed" if tail_reason else "passed", "reason": tail_reason},
+                "reject_reason": provider_reason,
+            }
+
+        quality_status, quality_reason = self._quality_check_history(history)
+        if quality_status != "ok":
+            summary = self._quality_summary(quality_reason)
+            return False, {
+                "last_good_date": last_good_date,
+                "age_days": age_days,
+                "freshness_ok": True,
+                "quality_check": {"result": "failed", "reason": summary},
+                "tail_check": {"result": "passed", "reason": None},
+                "reject_reason": f"last_good_quality_ng:{summary}",
+            }
+
+        return True, {
+            "last_good_date": last_good_date,
+            "age_days": age_days,
+            "freshness_ok": True,
+            "quality_check": {"result": "success", "reason": None},
+            "tail_check": {"result": "passed", "reason": None},
+            "reject_reason": None,
+        }
 
     def _provider_acceptance_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
         points = len(history)

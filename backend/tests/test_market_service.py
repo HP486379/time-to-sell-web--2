@@ -11,6 +11,12 @@ def _history_from_values(start: str, values):
     return [(d.date().isoformat(), float(v)) for d, v in zip(dates, values)]
 
 
+def _recent_history_from_values(values):
+    end = pd.Timestamp.today().normalize()
+    dates = pd.date_range(end=end, periods=len(values), freq="B")
+    return [(d.date().isoformat(), float(v)) for d, v in zip(dates, values)]
+
+
 def test_get_price_history_range_handles_dataframe(monkeypatch):
     service = SP500MarketService(symbol="TEST")
 
@@ -68,7 +74,7 @@ def test_get_price_history_range_uses_last_good_on_repeated_invalid(monkeypatch)
     start = pd.Timestamp("2020-01-01").date()
     end = pd.Timestamp("2020-03-31").date()
 
-    normal = _history_from_values("2020-01-01", [4100.0 + i * 2 for i in range(41)])
+    normal = _recent_history_from_values([4100.0 + i * 2 for i in range(260)])
     abnormal = _history_from_values("2020-01-01", [4100.0] * 40 + [50000.0])
 
     service._last_good_history["SP500"] = normal
@@ -157,7 +163,7 @@ def test_invalid_fallback_uses_last_good_history(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
-    last_good = _history_from_values("2024-01-01", [1500.0 + i for i in range(60)])
+    last_good = _recent_history_from_values([1500.0 + i for i in range(60)])
     service._last_good_history["SP500"] = last_good
 
     monkeypatch.setattr(
@@ -201,7 +207,7 @@ def test_last_good_source_marked_as_last_good(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
-    last_good = _history_from_values("2024-01-01", [4100.0 + i for i in range(60)])
+    last_good = _recent_history_from_values([4100.0 + i for i in range(260)])
     service._last_good_history["SP500"] = last_good
 
     monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fail")))
@@ -269,7 +275,7 @@ def test_provider_reject_reasons_is_reasonable_list(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
-    last_good = _history_from_values("2024-01-01", [4100.0 + i for i in range(60)])
+    last_good = _recent_history_from_values([4100.0 + i for i in range(260)])
     service._last_good_history["SP500"] = last_good
 
     monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fail")))
@@ -280,3 +286,17 @@ def test_provider_reject_reasons_is_reasonable_list(monkeypatch):
 
     assert history == last_good
     assert isinstance(debug.get("provider_reject_reasons"), list)
+
+
+def test_stale_last_good_is_rejected(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    service._last_good_history["SP500"] = _history_from_values("2020-01-01", [4100.0 + i for i in range(80)])
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("fail")))
+    monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
+
+    history = service.get_price_history(index_type="SP500", allow_synthetic=False)
+    assert history
+
+    debug = service.get_last_debug("SP500")
+    assert debug.get("last_good_freshness_ok") is False
+    assert service.get_last_source("SP500") in {"bootstrap", "synthetic", "fallback"}
