@@ -1966,7 +1966,7 @@ class SP500MarketService:
         取得できない場合は S&P500 指数を為替で円換算した値でフォールバックする。
         """
 
-        fund_symbol = os.getenv("SP500_FUND_SYMBOL", "03311187.T")
+        fund_symbol = os.getenv("SP500_FUND_SYMBOL", "VOO")
         try:
             fund = yf.download(fund_symbol, period="1mo", interval="1d")
             fund = fund.dropna()
