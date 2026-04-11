@@ -399,6 +399,13 @@ class SP500MarketService:
                 topix_raw_ohlcv_tail10=raw_meta.get("raw_tail_ohlcv", []),
                 topix_raw_column_names=raw_meta.get("column_names", []),
                 topix_selected_price_column=raw_meta.get("selected_price_column"),
+                price_column_used=(
+                    "adj_close"
+                    if str(raw_meta.get("selected_price_column", "")).lower() == "adj close"
+                    else "close"
+                    if str(raw_meta.get("selected_price_column", "")).lower() == "close"
+                    else None
+                ),
                 topix_used_adjusted_close=raw_meta.get("used_adjusted_close"),
                 topix_source_path=raw_meta.get("source_path"),
                 topix_raw_is_ascending=raw_meta.get("raw_is_ascending"),
@@ -854,6 +861,12 @@ class SP500MarketService:
                     history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
                     reason = self._validate_history(history, index_type)
                     if not reason:
+                        topix_price_column_used = (
+                            self.get_last_debug(index_type).get("price_column_used") if index_type == "TOPIX" else None
+                        )
+                        topix_quality_result = (
+                            "warning_close_fallback" if topix_price_column_used == "close" else "success"
+                        )
                         if enforce_quality:
                             provider_reason = self._provider_acceptance_reason(history, index_type)
                             if provider_reason:
@@ -936,7 +949,11 @@ class SP500MarketService:
                             provider="yfinance",
                             success=True,
                             history=history,
-                            quality_result="ok" if (not enforce_quality or quality_status == "ok") else "soft_ng_adopted",
+                            quality_result=(
+                                topix_quality_result
+                                if index_type == "TOPIX"
+                                else ("ok" if (not enforce_quality or quality_status == "ok") else "soft_ng_adopted")
+                            ),
                             validation_result="passed",
                             adopted=True,
                             symbol=symbol,
@@ -952,7 +969,11 @@ class SP500MarketService:
                             adoption_reason="primary" if symbol == symbol_candidates[0] else "fallback",
                             quality_check={
                                 "symbol": symbol,
-                                "result": "success" if not enforce_quality or quality_status == "ok" else "soft_ng_adopted",
+                                "result": (
+                                    topix_quality_result
+                                    if index_type == "TOPIX"
+                                    else ("success" if not enforce_quality or quality_status == "ok" else "soft_ng_adopted")
+                                ),
                                 "reason": self._quality_summary(quality_reason) if enforce_quality and quality_status == "soft_ng" else None,
                             },
                             fetch_error=None,

@@ -52,19 +52,19 @@ def test_scoring_guard_accepts_success_provider(monkeypatch):
     assert reason == "ok_provider"
 
 
-def test_scoring_guard_blocks_topix_when_not_adjusted(monkeypatch):
+def test_scoring_guard_allows_topix_close_fallback(monkeypatch):
     monkeypatch.setattr(
         main.market_service,
         "get_last_debug",
         lambda *_: {
             "adopted_provider": "yfinance",
             "fetch_error": None,
-            "quality_check": {"result": "success", "reason": None},
-            "topix_selected_price_column": "Close",
+            "quality_check": {"result": "warning_close_fallback", "reason": None},
+            "price_column_used": "close",
             "topix_raw_is_ascending": True,
-            "topix_close_adj_gap_ratio": 0.9,
+            "topix_close_adj_gap_ratio": 0.2,
         },
     )
     ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.TOPIX)
-    assert ok is False
-    assert "topix_price_column_not_adjusted" in reason
+    assert ok is True
+    assert reason == "ok_provider"
