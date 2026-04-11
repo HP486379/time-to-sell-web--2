@@ -171,11 +171,11 @@ const normalizeEvaluateResponse = (res: EvaluateResponse, series: PricePoint[]):
     status: 'degraded',
     scores: {
       ...normalized.scores,
-      technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : 0,
-      macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : 0,
+      technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : null,
+      macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : null,
       event_adjustment: eventAdjustmentPt,
-      total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : 0,
-      label: withFallback.scores?.label ?? '計算中',
+      total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : null,
+      label: withFallback.scores?.label ?? 'データ取得失敗',
     },
     reasons: [...(withFallback.reasons ?? []), 'TECHNICAL_UNAVAILABLE'],
   }
