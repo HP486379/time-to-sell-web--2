@@ -2,6 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import List
+from domain.index_type import normalize_index_type
 
 DB_PATH = os.getenv("DB_PATH", "./purchases.sqlite")
 
@@ -40,7 +41,7 @@ def init_db() -> None:
 
 
 def add_purchase(user_id: str, product_id: str, transaction_id: str) -> bool:
-    granted_index_type = PRODUCT_TO_INDEX[product_id]
+    granted_index_type = normalize_index_type(PRODUCT_TO_INDEX[product_id])
     created_at = datetime.now(timezone.utc).isoformat()
 
     with _connect() as conn:
