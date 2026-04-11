@@ -55,7 +55,7 @@ def test_get_price_history_range_retries_and_recovers(monkeypatch):
     normal = _history_from_values("2020-01-01", [4200.0 + i * 2 for i in range(41)])
     responses = [abnormal, normal]
 
-    def fake_fetch(symbol, s, e):
+    def fake_fetch(symbol, s, e, index_type=None):
         hist = responses.pop(0)
         dates = pd.to_datetime([d for d, _ in hist])
         values = [v for _, v in hist]
@@ -79,7 +79,7 @@ def test_get_price_history_range_uses_last_good_on_repeated_invalid(monkeypatch)
 
     service._last_good_history["SP500"] = normal
 
-    def always_bad(symbol, s, e):
+    def always_bad(symbol, s, e, **kwargs):
         dates = pd.to_datetime([d for d, _ in abnormal])
         values = [v for _, v in abnormal]
         return pd.Series(values, index=dates)
@@ -246,7 +246,7 @@ def test_topix_uses_yfinance_etf_proxy(monkeypatch):
     end = date(2024, 12, 31)
     points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_download(symbol, s, e):
+    def fake_download(symbol, s, e, index_type=None):
         assert symbol == "1306.T"
         dates = pd.to_datetime([d for d, _ in points])
         values = [v for _, v in points]
@@ -303,7 +303,7 @@ def test_debug_has_provider_attempt_fields(monkeypatch):
     end = date(2024, 3, 31)
     ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_download(symbol, s, e):
+    def fake_download(symbol, s, e, index_type=None):
         dates = pd.to_datetime([d for d, _ in ok])
         values = [v for _, v in ok]
         return pd.Series(values, index=dates)

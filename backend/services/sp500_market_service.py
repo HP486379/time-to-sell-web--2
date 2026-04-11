@@ -19,6 +19,7 @@ from services.market_data_provider import (
     fetch_history_from_nav_api,
     fetch_history_from_stooq,
     fetch_history_from_yfinance,
+    fetch_history_from_yfinance_with_debug,
 )
 
 
@@ -378,7 +379,41 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         return self.price_type_map.get(index_type)
 
-    def _download_close_series(self, symbol: str, start: date, end: date) -> pd.Series:
+    def _download_close_series(self, symbol: str, start: date, end: date, index_type: Optional[str] = None) -> pd.Series:
+        normalized_index_type = self._normalize_index_type(index_type or "SP500")
+        if normalized_index_type == "TOPIX" and symbol == "1306.T":
+            closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=True)
+            sorted_closes = closes.sort_index()
+            series_head = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in sorted_closes.head(5).items()]
+            series_tail = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in sorted_closes.tail(10).items()]
+            close_first = raw_meta.get("raw_close_head5", [None])[0] if raw_meta.get("raw_close_head5") else None
+            close_last = raw_meta.get("raw_close_tail10", [None])[-1] if raw_meta.get("raw_close_tail10") else None
+            adj_first = raw_meta.get("raw_adj_close_head5", [None])[0] if raw_meta.get("raw_adj_close_head5") else None
+            adj_last = raw_meta.get("raw_adj_close_tail10", [None])[-1] if raw_meta.get("raw_adj_close_tail10") else None
+            close_adj_gap_ratio = None
+            if close_last and adj_last and adj_last != 0:
+                close_adj_gap_ratio = abs(float(close_last) / float(adj_last) - 1.0)
+            self._set_debug(
+                normalized_index_type,
+                topix_raw_ohlcv_head5=raw_meta.get("raw_head_ohlcv", []),
+                topix_raw_ohlcv_tail10=raw_meta.get("raw_tail_ohlcv", []),
+                topix_raw_column_names=raw_meta.get("column_names", []),
+                topix_selected_price_column=raw_meta.get("selected_price_column"),
+                topix_used_adjusted_close=raw_meta.get("used_adjusted_close"),
+                topix_source_path=raw_meta.get("source_path"),
+                topix_raw_is_ascending=raw_meta.get("raw_is_ascending"),
+                topix_raw_is_descending=raw_meta.get("raw_is_descending"),
+                topix_scoring_series_head5=series_head,
+                topix_scoring_series_tail10=series_tail,
+                topix_split_column_present=raw_meta.get("split_column_present"),
+                topix_auto_adjust=raw_meta.get("auto_adjust"),
+                topix_close_first=close_first,
+                topix_close_last=close_last,
+                topix_adj_close_first=adj_first,
+                topix_adj_close_last=adj_last,
+                topix_close_adj_gap_ratio=close_adj_gap_ratio,
+            )
+            return sorted_closes
         return fetch_history_from_yfinance(symbol, start, end)
 
     def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
@@ -815,7 +850,7 @@ class SP500MarketService:
                 if symbol not in tried_symbols:
                     tried_symbols.append(symbol)
                 try:
-                    closes = self._download_close_series(symbol, start, end)
+                    closes = self._download_close_series(symbol, start, end, index_type)
                     history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
                     reason = self._validate_history(history, index_type)
                     if not reason:

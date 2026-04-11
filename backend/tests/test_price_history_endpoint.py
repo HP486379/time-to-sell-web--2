@@ -50,3 +50,21 @@ def test_scoring_guard_accepts_success_provider(monkeypatch):
     ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500)
     assert ok is True
     assert reason == "ok_provider"
+
+
+def test_scoring_guard_blocks_topix_when_not_adjusted(monkeypatch):
+    monkeypatch.setattr(
+        main.market_service,
+        "get_last_debug",
+        lambda *_: {
+            "adopted_provider": "yfinance",
+            "fetch_error": None,
+            "quality_check": {"result": "success", "reason": None},
+            "topix_selected_price_column": "Close",
+            "topix_raw_is_ascending": True,
+            "topix_close_adj_gap_ratio": 0.9,
+        },
+    )
+    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.TOPIX)
+    assert ok is False
+    assert "topix_price_column_not_adjusted" in reason

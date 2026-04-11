@@ -244,6 +244,17 @@ def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
     if adopted_provider == "last_good":
         return False, "last_good_scoring_disabled"
 
+    if index_type == IndexType.TOPIX:
+        selected_column = debug.get("topix_selected_price_column")
+        is_ascending = bool(debug.get("topix_raw_is_ascending"))
+        close_adj_gap = debug.get("topix_close_adj_gap_ratio")
+        if selected_column != "Adj Close":
+            return False, f"topix_price_column_not_adjusted:{selected_column}"
+        if not is_ascending:
+            return False, "topix_series_order_invalid"
+        if isinstance(close_adj_gap, (int, float)) and close_adj_gap > 0.5:
+            return False, f"topix_close_adj_gap_too_large:{close_adj_gap:.4f}"
+
     if adopted_provider in {"yfinance", "stooq", "nav_api"}:
         if quality_result not in {"success", "soft_ng_adopted"}:
             return False, f"quality_not_success:{quality_result}"
