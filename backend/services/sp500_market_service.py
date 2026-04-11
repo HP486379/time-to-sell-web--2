@@ -45,7 +45,7 @@ class SP500MarketService:
         )
         self.symbol_map = {
             "SP500": symbol or os.getenv("SP500_SYMBOL", "^GSPC"),
-            "TOPIX": "1306.T",
+            "TOPIX": os.getenv("TOPIX_SYMBOL", "^TOPX"),
             "NIKKEI225": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIFTY50": os.getenv("NIFTY50_SYMBOL", "^NSEI"),
             # オルカンは MSCI ACWI 連動 ETF（ACWI）をプロキシとして利用する
@@ -381,53 +381,21 @@ class SP500MarketService:
 
     def _download_close_series(self, symbol: str, start: date, end: date, index_type: Optional[str] = None) -> pd.Series:
         normalized_index_type = self._normalize_index_type(index_type or "SP500")
-        if normalized_index_type == "TOPIX" and symbol == "1306.T":
-            closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=True)
-            sorted_closes = closes.sort_index()
-            series_head = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in sorted_closes.head(5).items()]
-            series_tail = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in sorted_closes.tail(10).items()]
-            close_first = raw_meta.get("raw_close_head5", [None])[0] if raw_meta.get("raw_close_head5") else None
-            close_last = raw_meta.get("raw_close_tail10", [None])[-1] if raw_meta.get("raw_close_tail10") else None
-            adj_first = raw_meta.get("raw_adj_close_head5", [None])[0] if raw_meta.get("raw_adj_close_head5") else None
-            adj_last = raw_meta.get("raw_adj_close_tail10", [None])[-1] if raw_meta.get("raw_adj_close_tail10") else None
-            close_adj_gap_ratio = None
-            if close_last and adj_last and adj_last != 0:
-                close_adj_gap_ratio = abs(float(close_last) / float(adj_last) - 1.0)
-            self._set_debug(
-                normalized_index_type,
-                topix_raw_ohlcv_head5=raw_meta.get("raw_head_ohlcv", []),
-                topix_raw_ohlcv_tail10=raw_meta.get("raw_tail_ohlcv", []),
-                topix_raw_column_names=raw_meta.get("column_names", []),
-                topix_selected_price_column=raw_meta.get("selected_price_column"),
-                price_column_used=(
-                    "adj_close"
-                    if str(raw_meta.get("selected_price_column", "")).lower() == "adj close"
-                    else "close"
-                    if str(raw_meta.get("selected_price_column", "")).lower() == "close"
-                    else None
-                ),
-                topix_used_adjusted_close=raw_meta.get("used_adjusted_close"),
-                topix_source_path=raw_meta.get("source_path"),
-                topix_raw_is_ascending=raw_meta.get("raw_is_ascending"),
-                topix_raw_is_descending=raw_meta.get("raw_is_descending"),
-                topix_scoring_series_head5=series_head,
-                topix_scoring_series_tail10=series_tail,
-                topix_split_column_present=raw_meta.get("split_column_present"),
-                topix_auto_adjust=raw_meta.get("auto_adjust"),
-                topix_close_first=close_first,
-                topix_close_last=close_last,
-                topix_adj_close_first=adj_first,
-                topix_adj_close_last=adj_last,
-                topix_close_adj_gap_ratio=close_adj_gap_ratio,
-                raw_close_tail=raw_meta.get("raw_close_tail10", []),
-                raw_adj_close_tail=raw_meta.get("raw_adj_close_tail10", []),
-                normalized_series_tail=[round(float(v), 2) for v in sorted_closes.tail(10)],
-                series_sort_order=(
-                    "asc" if bool(sorted_closes.index.is_monotonic_increasing) else "desc" if bool(sorted_closes.index.is_monotonic_decreasing) else "unsorted"
-                ),
-            )
-            return sorted_closes
-        return fetch_history_from_yfinance(symbol, start, end)
+        closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=False)
+        sorted_closes = closes.sort_index()
+        price_column_used = str(raw_meta.get("selected_price_column", "")).lower().replace(" ", "_") or "close"
+        self._set_debug(
+            normalized_index_type,
+            resolved_symbol=symbol,
+            price_column_used=price_column_used,
+            raw_close_tail=raw_meta.get("raw_close_tail10", []),
+            raw_adj_close_tail=raw_meta.get("raw_adj_close_tail10", []),
+            normalized_series_tail=[round(float(v), 2) for v in sorted_closes.tail(10)],
+            series_sort_order=(
+                "asc" if bool(sorted_closes.index.is_monotonic_increasing) else "desc" if bool(sorted_closes.index.is_monotonic_decreasing) else "unsorted"
+            ),
+        )
+        return sorted_closes
 
     def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
@@ -867,12 +835,6 @@ class SP500MarketService:
                     history = [(self._to_iso_date(idx), round(float(val), 2)) for idx, val in closes.items()]
                     reason = self._validate_history(history, index_type)
                     if not reason:
-                        topix_price_column_used = (
-                            self.get_last_debug(index_type).get("price_column_used") if index_type == "TOPIX" else None
-                        )
-                        topix_quality_result = (
-                            "warning_close_fallback" if topix_price_column_used == "close" else "success"
-                        )
                         if enforce_quality:
                             provider_reason = self._provider_acceptance_reason(history, index_type)
                             if provider_reason:
@@ -955,11 +917,7 @@ class SP500MarketService:
                             provider="yfinance",
                             success=True,
                             history=history,
-                            quality_result=(
-                                topix_quality_result
-                                if index_type == "TOPIX"
-                                else ("ok" if (not enforce_quality or quality_status == "ok") else "soft_ng_adopted")
-                            ),
+                            quality_result="ok" if (not enforce_quality or quality_status == "ok") else "soft_ng_adopted",
                             validation_result="passed",
                             adopted=True,
                             symbol=symbol,
@@ -975,11 +933,7 @@ class SP500MarketService:
                             adoption_reason="primary" if symbol == symbol_candidates[0] else "fallback",
                             quality_check={
                                 "symbol": symbol,
-                                "result": (
-                                    topix_quality_result
-                                    if index_type == "TOPIX"
-                                    else ("success" if not enforce_quality or quality_status == "ok" else "soft_ng_adopted")
-                                ),
+                                "result": "success" if not enforce_quality or quality_status == "ok" else "soft_ng_adopted",
                                 "reason": self._quality_summary(quality_reason) if enforce_quality and quality_status == "soft_ng" else None,
                             },
                             fetch_error=None,
@@ -1458,49 +1412,18 @@ class SP500MarketService:
 
     def _fetch_topix_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "TOPIX"
-        resolved_symbol = "1306.T"
-        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="etf_proxy")
-        try:
-            hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
-            self._set_debug(
-                index_type,
-                tried_providers=["yfinance"],
-                adopted_provider="yfinance",
-                adopted_symbol=resolved_symbol,
-                resolved_symbol=resolved_symbol,
-                index_mode="etf_proxy",
-            )
-            logger.info("[TOPIX DEBUG] provider=yfinance symbol=%s result=adopted", resolved_symbol)
-            return hist
-        except Exception as exc:
-            logger.warning("[TOPIX DEBUG] provider=yfinance symbol=%s result=failed error=%s", resolved_symbol, exc)
-            last_good = self._get_valid_last_good_history(index_type)
-            if last_good:
-                self._set_last_source(index_type, "last_good")
-                self._set_debug(
-                    index_type,
-                    tried_providers=["yfinance"],
-                    adopted_provider="last_good",
-                    adopted_symbol=resolved_symbol,
-                    resolved_symbol=resolved_symbol,
-                    index_mode="etf_proxy",
-                    adoption_reason="last_good",
-                )
-                return last_good
-            fallback = self._build_valid_fallback_history(start, end, index_type)
-            self._set_last_source(index_type, "fallback")
-            self._update_last_good_history(index_type, fallback, source_hint="fallback")
-            self._set_debug(
-                index_type,
-                tried_providers=["yfinance"],
-                adopted_provider="synthetic_fallback",
-                adopted_symbol=resolved_symbol,
-                resolved_symbol=resolved_symbol,
-                index_mode="etf_proxy",
-                adoption_reason="topix_stability_fallback",
-                fetch_error=str(exc),
-            )
-            return fallback
+        resolved_symbol = self._resolve_symbol(index_type)
+        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="index")
+        hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
+        self._set_debug(
+            index_type,
+            tried_providers=["yfinance"],
+            adopted_provider="yfinance",
+            adopted_symbol=resolved_symbol,
+            resolved_symbol=resolved_symbol,
+            index_mode="index",
+        )
+        return hist
 
     def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "SP500_JPY"

@@ -59,7 +59,7 @@ def test_scoring_guard_allows_topix_close_fallback_warning(monkeypatch):
         lambda *_: {
             "adopted_provider": "yfinance",
             "fetch_error": None,
-            "quality_check": {"result": "warning_close_fallback", "reason": None},
+            "quality_check": {"result": "success", "reason": None},
             "price_column_used": "close",
             "topix_raw_is_ascending": True,
             "topix_close_adj_gap_ratio": 0.2,

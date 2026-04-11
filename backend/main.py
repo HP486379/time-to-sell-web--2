@@ -250,7 +250,7 @@ def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
             return False, f"topix_price_column_missing:{price_column_used}"
 
     if adopted_provider in {"yfinance", "stooq", "nav_api"}:
-        if quality_result not in {"success", "warning_close_fallback", "soft_ng_adopted"}:
+        if quality_result not in {"success", "soft_ng_adopted"}:
             return False, f"quality_not_success:{quality_result}"
         return True, "ok_provider"
 
@@ -496,6 +496,7 @@ def get_cached_snapshot(
             "price_series": market_service.build_price_series_with_ma(price_history),
         }
     )
+    market_service._set_debug(index_type.value, scores_total=total_score)
     _cached_snapshot[key] = snapshot
     _cached_at[key] = now
     return snapshot
@@ -512,6 +513,8 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "source": snapshot.get("source"),
         "source_confidence": service_debug.get("source_confidence"),
         "symbol": service_debug.get("symbol"),
+        "resolved_symbol": service_debug.get("resolved_symbol"),
+        "price_column_used": service_debug.get("price_column_used"),
         "fx_symbol": service_debug.get("fx_symbol"),
         "price_type": service_debug.get("price_type"),
         "fetch_error": service_debug.get("fetch_error"),
@@ -527,6 +530,7 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "first_close": service_debug.get("first_close"),
         "last_close": service_debug.get("last_close"),
         "one_year_return": service_debug.get("one_year_return"),
+        "scores_total": service_debug.get("scores_total"),
         "technical_score": technical_score,
         "period_scores": {
             "short": period_scores.get("short"),
