@@ -12,7 +12,7 @@ class FundNavService:
         fund_symbol: Optional[str] = None,
     ):
         self.base_symbol = base_symbol or os.getenv("SP500_NAV_BASE_SYMBOL", "VOO")
-        self.fund_symbol = fund_symbol or os.getenv("SP500_FUND_SYMBOL", "03311187.T")
+        self.fund_symbol = fund_symbol or os.getenv("SP500_FUND_SYMBOL", "VOO")
 
     def fetch_sp500_price_usd(self) -> Tuple[float, str]:
         """Fetch the latest close for the S&P500 proxy in USD and its date."""
