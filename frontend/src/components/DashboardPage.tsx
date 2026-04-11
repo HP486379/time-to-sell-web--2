@@ -803,6 +803,11 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
               </MenuItem>
             ))}
           </Select>
+          {indexType === 'TOPIX' && (
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+              TOPIX（ETFベース）
+            </Typography>
+          )}
         </FormControl>
 
         <Box display="flex" alignItems="center" gap={1}>
