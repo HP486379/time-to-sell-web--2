@@ -158,6 +158,8 @@ export interface EvaluateResponse {
     source?: string
     adopted_provider?: string | null
     provider_reject_reasons?: string[]
+    resolved_symbol?: string
+    index_mode?: string
   }
 }
 

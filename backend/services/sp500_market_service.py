@@ -44,7 +44,7 @@ class SP500MarketService:
         )
         self.symbol_map = {
             "SP500": symbol or os.getenv("SP500_SYMBOL", "^GSPC"),
-            "TOPIX": os.getenv("TOPIX_SYMBOL", "^TOPX"),
+            "TOPIX": "1306.T",
             "NIKKEI225": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIFTY50": os.getenv("NIFTY50_SYMBOL", "^NSEI"),
             # オルカンは MSCI ACWI 連動 ETF（ACWI）をプロキシとして利用する
@@ -55,7 +55,7 @@ class SP500MarketService:
             "SP500_JPY": os.getenv("SP500_JPY_SYMBOL", os.getenv("SP500_SYMBOL", "^GSPC")),
         }
         self.symbol_fallback_map = {
-            "TOPIX": [os.getenv("TOPIX_SYMBOL_FALLBACK", "1306.T")],
+            "TOPIX": [],
             "NIFTY50": [
                 os.getenv("NIFTY50_SYMBOL_FALLBACK", "NIFTYBEES.NS"),
                 os.getenv("NIFTY50_SYMBOL_FALLBACK_2", "INDY"),
@@ -420,10 +420,12 @@ class SP500MarketService:
                 last_price,
                 ratio,
             )
-        if ratio < 0.1:
-            return reject(f"abnormal_ratio_low:ratio={ratio:.6f}<min=0.100000")
-        if ratio > 10.0:
-            return reject(f"abnormal_ratio_high:ratio={ratio:.6f}>max=10.000000")
+        low_threshold = 0.05 if index_type == "TOPIX" else 0.1
+        high_threshold = 20.0 if index_type == "TOPIX" else 10.0
+        if ratio < low_threshold:
+            return reject(f"abnormal_ratio_low:ratio={ratio:.6f}<min={low_threshold:.6f}")
+        if ratio > high_threshold:
+            return reject(f"abnormal_ratio_high:ratio={ratio:.6f}>max={high_threshold:.6f}")
 
         return None
 
@@ -596,7 +598,7 @@ class SP500MarketService:
                 "reject_reason": reason,
             }
 
-        provider_reason = self._provider_acceptance_reason(history)
+        provider_reason = self._provider_acceptance_reason(history, index_type)
         tail_reason = provider_reason if provider_reason and "tail_outlier" in provider_reason else None
         if provider_reason:
             return False, {
@@ -629,10 +631,12 @@ class SP500MarketService:
             "reject_reason": None,
         }
 
-    def _provider_acceptance_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
+    def _provider_acceptance_reason(self, history: List[Tuple[str, float]], index_type: str = "SP500") -> Optional[str]:
+        index_type = self._normalize_index_type(index_type)
         points = len(history)
-        if points < 200:
-            return f"provider_reject_points:points={points}<200"
+        min_points = 35 if index_type == "TOPIX" else 200
+        if points < min_points:
+            return f"provider_reject_points:points={points}<{min_points}"
         values = [v for _, v in history]
         nan_count = sum(1 for v in values if v is None or (isinstance(v, float) and math.isnan(v)))
         if nan_count > 0:
@@ -645,13 +649,15 @@ class SP500MarketService:
                 jump = abs((current - prev) / prev)
                 max_jump = max(max_jump, jump)
             prev = current
-        if max_jump > 0.15:
-            return f"provider_reject_abnormal_jump:max_jump={max_jump:.4f}>0.1500"
+        max_jump_threshold = 0.30 if index_type == "TOPIX" else 0.15
+        if max_jump > max_jump_threshold:
+            return f"provider_reject_abnormal_jump:max_jump={max_jump:.4f}>{max_jump_threshold:.4f}"
         first = float(values[0])
         last = float(values[-1])
         if first and first > 0:
             total_return = (last / first - 1.0) * 100.0
-            if total_return < -90.0 or total_return > 400.0:
+            low_return, high_return = (-95.0, 500.0) if index_type == "TOPIX" else (-90.0, 400.0)
+            if total_return < low_return or total_return > high_return:
                 return f"provider_reject_abnormal_total_change:return={total_return:.2f}%"
         if len(values) >= 25:
             recent = float(values[-1])
@@ -660,7 +666,8 @@ class SP500MarketService:
                 recent_median = statistics.median(prev_window)
                 if recent_median > 0:
                     tail_ratio = recent / recent_median
-                    if tail_ratio < 0.70 or tail_ratio > 1.30:
+                    tail_min, tail_max = (0.50, 1.50) if index_type == "TOPIX" else (0.70, 1.30)
+                    if tail_ratio < tail_min or tail_ratio > tail_max:
                         return f"provider_reject_tail_outlier:tail_ratio={tail_ratio:.4f}"
         return None
 
@@ -813,7 +820,7 @@ class SP500MarketService:
                     reason = self._validate_history(history, index_type)
                     if not reason:
                         if enforce_quality:
-                            provider_reason = self._provider_acceptance_reason(history)
+                            provider_reason = self._provider_acceptance_reason(history, index_type)
                             if provider_reason:
                                 logger.warning(
                                     "Provider reject index=%s provider=yfinance symbol=%s reason=%s",
@@ -1276,7 +1283,7 @@ class SP500MarketService:
         closes = fetch_history_from_stooq(symbol, start, end)
         history = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in closes.items()]
         reason = self._validate_history(history, index_type)
-        provider_reason = self._provider_acceptance_reason(history)
+        provider_reason = self._provider_acceptance_reason(history, index_type)
         if reason or provider_reason:
             msg = provider_reason or reason
             self._set_provider_health(index_type, "stooq", "degraded", reason=msg)
@@ -1336,7 +1343,7 @@ class SP500MarketService:
             closes = fetch_history_from_stooq(symbol, start, end)
             hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in closes.items()]
             reason = self._validate_history(hist, index_type)
-            provider_reason = self._provider_acceptance_reason(hist)
+            provider_reason = self._provider_acceptance_reason(hist, index_type)
             if not reason and not provider_reason:
                 self._record_provider_attempt(
                     index_type,
@@ -1383,9 +1390,55 @@ class SP500MarketService:
         tried_providers.append("stooq")
         self._set_debug(index_type, tried_providers=tried_providers)
 
-        hist = self._fetch_yfinance_history_with_retry(start, end, index_type)
+        hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
         self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"])
         return hist
+
+    def _fetch_topix_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
+        index_type = "TOPIX"
+        resolved_symbol = "1306.T"
+        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="etf_proxy")
+        try:
+            hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
+            self._set_debug(
+                index_type,
+                tried_providers=["yfinance"],
+                adopted_provider="yfinance",
+                adopted_symbol=resolved_symbol,
+                resolved_symbol=resolved_symbol,
+                index_mode="etf_proxy",
+            )
+            logger.info("[TOPIX DEBUG] provider=yfinance symbol=%s result=adopted", resolved_symbol)
+            return hist
+        except Exception as exc:
+            logger.warning("[TOPIX DEBUG] provider=yfinance symbol=%s result=failed error=%s", resolved_symbol, exc)
+            last_good = self._get_valid_last_good_history(index_type)
+            if last_good:
+                self._set_last_source(index_type, "last_good")
+                self._set_debug(
+                    index_type,
+                    tried_providers=["yfinance"],
+                    adopted_provider="last_good",
+                    adopted_symbol=resolved_symbol,
+                    resolved_symbol=resolved_symbol,
+                    index_mode="etf_proxy",
+                    adoption_reason="last_good",
+                )
+                return last_good
+            fallback = self._build_valid_fallback_history(start, end, index_type)
+            self._set_last_source(index_type, "fallback")
+            self._update_last_good_history(index_type, fallback, source_hint="fallback")
+            self._set_debug(
+                index_type,
+                tried_providers=["yfinance"],
+                adopted_provider="synthetic_fallback",
+                adopted_symbol=resolved_symbol,
+                resolved_symbol=resolved_symbol,
+                index_mode="etf_proxy",
+                adoption_reason="topix_stability_fallback",
+                fetch_error=str(exc),
+            )
+            return fallback
 
     def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "SP500_JPY"
@@ -1399,7 +1452,7 @@ class SP500MarketService:
             if len(combined) >= 50:
                 combined["close"] = combined["close_usd"] * combined["usdjpy"]
                 hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in combined["close"].items()]
-                provider_reason = self._provider_acceptance_reason(hist)
+                provider_reason = self._provider_acceptance_reason(hist, index_type)
                 if not provider_reason:
                     self._record_provider_attempt(
                         index_type,
@@ -1625,6 +1678,8 @@ class SP500MarketService:
             index_type,
             normalized_index_type=index_type,
             symbol=self._resolve_symbol(index_type),
+            resolved_symbol="1306.T" if index_type == "TOPIX" else self._resolve_symbol(index_type),
+            index_mode="etf_proxy" if index_type == "TOPIX" else "index",
             fx_symbol=self._resolve_fx_symbol(index_type),
             price_type=self._resolve_price_type(index_type),
             fetch_error=None,
@@ -1644,6 +1699,8 @@ class SP500MarketService:
         try:
             if index_type == "SP500":
                 return self._fetch_sp500_with_provider_priority(start, today)
+            if index_type == "TOPIX":
+                return self._fetch_topix_with_provider_priority(start, today)
             if index_type == "SP500_JPY":
                 return self._fetch_sp500_jpy_with_provider_priority(start, today)
 
@@ -1767,6 +1824,8 @@ class SP500MarketService:
         fallback_allowed = allow_fallback and allow_synth
         try:
             price_type = self._resolve_price_type(index_type)
+            if index_type == "TOPIX":
+                return self._fetch_topix_with_provider_priority(start, end)
             if price_type == "index_jpy":
                 return self._get_validated_index_jpy_history(start, end, index_type)
 

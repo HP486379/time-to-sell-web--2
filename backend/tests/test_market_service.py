@@ -221,8 +221,47 @@ def test_last_good_source_marked_as_last_good(monkeypatch):
 def test_topix_symbol_candidates_include_fallback():
     service = SP500MarketService(symbol="TEST")
     candidates = service._resolve_symbol_candidates("TOPIX")
-    assert "^TOPX" in candidates
     assert "1306.T" in candidates
+    assert len(candidates) == 1
+
+
+def test_topix_tail_outlier_is_relaxed():
+    service = SP500MarketService(symbol="TEST")
+    base = [100.0 for _ in range(219)]
+    prev_window = [105.0 for _ in range(19)] + [120.0]
+    topix_history = _history_from_values("2024-01-01", base + prev_window + [138.0])
+    sp500_history = _history_from_values("2024-01-01", base + prev_window + [138.0])
+
+    topix_reason = service._provider_acceptance_reason(topix_history, "TOPIX")
+    sp500_reason = service._provider_acceptance_reason(sp500_history, "SP500")
+
+    assert topix_reason is None
+    assert sp500_reason is not None
+    assert "tail_outlier" in sp500_reason
+
+
+def test_topix_uses_yfinance_etf_proxy(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 12, 31)
+    points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
+
+    def fake_download(symbol, s, e):
+        assert symbol == "1306.T"
+        dates = pd.to_datetime([d for d, _ in points])
+        values = [v for _, v in points]
+        return pd.Series(values, index=dates)
+
+    monkeypatch.setattr(service, "_download_close_series", fake_download)
+
+    history = service.get_price_history_range(start, end, allow_fallback=False, index_type="TOPIX")
+    debug = service.get_last_debug("TOPIX")
+
+    assert history == points
+    assert debug.get("adopted_provider") == "yfinance"
+    assert debug.get("adopted_symbol") == "1306.T"
+    assert debug.get("resolved_symbol") == "1306.T"
+    assert debug.get("index_mode") == "etf_proxy"
 
 
 def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
@@ -240,12 +279,29 @@ def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
     assert history == degraded
     assert service.get_last_source("TOPIX") == "fallback"
 
+def test_topix_never_raises_data_unavailable_when_yfinance_fails(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 31)
+    fallback = _history_from_values("2024-01-01", [1500.0 + i for i in range(40)])
+
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("yf down")))
+    monkeypatch.setattr(service, "_build_valid_fallback_history", lambda s, e, index_type: fallback)
+    monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
+
+    history = service.get_price_history_range(start, end, allow_fallback=False, index_type="TOPIX")
+    debug = service.get_last_debug("TOPIX")
+    assert history == fallback
+    assert debug.get("resolved_symbol") == "1306.T"
+    assert debug.get("index_mode") == "etf_proxy"
+    assert debug.get("adopted_provider") == "synthetic_fallback"
+
 
 def test_debug_has_provider_attempt_fields(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
-    ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(80)])
+    ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
     def fake_download(symbol, s, e):
         dates = pd.to_datetime([d for d, _ in ok])
