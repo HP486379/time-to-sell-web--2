@@ -1,6 +1,7 @@
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from backend.services import market_data_provider as mdp
 
@@ -50,3 +51,26 @@ def test_fetch_history_from_yfinance_with_debug_prefers_adj_close(monkeypatch):
     result, debug = mdp.fetch_history_from_yfinance_with_debug("1306.T", start, end, prefer_adj_close=True)
     assert float(result.iloc[0]) == 390.0
     assert debug["selected_price_column"] == "Adj Close"
+
+
+def test_extract_price_series_robust_accepts_lowercase_close():
+    idx = pd.to_datetime(["2024-01-04", "2024-01-05"])
+    df = pd.DataFrame({"close": [10.0, 11.0]}, index=idx)
+    series, used = mdp._extract_price_series_robust(df, prefer_adj_close=False)
+    assert used == "close"
+    assert float(series.iloc[-1]) == 11.0
+
+
+def test_extract_price_series_robust_accepts_single_numeric_column():
+    idx = pd.to_datetime(["2024-01-04", "2024-01-05"])
+    df = pd.DataFrame({"value": [20.0, 21.0]}, index=idx)
+    series, used = mdp._extract_price_series_robust(df, prefer_adj_close=False)
+    assert used == "value"
+    assert float(series.iloc[0]) == 20.0
+
+
+def test_extract_price_series_robust_raises_on_empty_dataframe():
+    idx = pd.DatetimeIndex([], name="Date")
+    df = pd.DataFrame(columns=pd.MultiIndex.from_tuples([("Close", "^TOPX"), ("Adj Close", "^TOPX")]), index=idx)
+    with pytest.raises(ValueError):
+        mdp._extract_price_series_robust(df)

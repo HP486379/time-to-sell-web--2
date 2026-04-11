@@ -4,6 +4,7 @@ from datetime import date
 import pytest
 
 from backend.services.sp500_market_service import SP500MarketService
+from backend.services.market_data_provider import YFinanceStructureError
 
 
 def _history_from_values(start: str, values):
@@ -240,27 +241,23 @@ def test_topix_tail_outlier_is_relaxed():
     assert "tail_outlier" in sp500_reason
 
 
-def test_topix_uses_yfinance_index_symbol(monkeypatch):
+def test_topix_uses_stooq_index_provider(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 12, 31)
     points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_download(symbol, s, e, index_type=None):
-        assert symbol == "^TOPX"
-        dates = pd.to_datetime([d for d, _ in points])
-        values = [v for _, v in points]
-        return pd.Series(values, index=dates)
-
-    monkeypatch.setattr(service, "_download_close_series", fake_download)
+    dates = pd.to_datetime([d for d, _ in points])
+    values = [v for _, v in points]
+    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: pd.Series(values, index=dates))
 
     history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
     debug = service.get_last_debug("TOPIX")
 
     assert history == points
-    assert debug.get("adopted_provider") == "yfinance"
-    assert debug.get("adopted_symbol") == "^TOPX"
-    assert debug.get("resolved_symbol") == "^TOPX"
+    assert debug.get("adopted_provider") == "stooq"
+    assert debug.get("adopted_symbol") == "TOPIX"
+    assert debug.get("resolved_symbol") == "TOPIX"
     assert debug.get("index_mode") == "index"
 
 
@@ -285,16 +282,30 @@ def test_topix_returns_fallback_when_yfinance_fails(monkeypatch):
     end = date(2024, 3, 31)
     fallback = _history_from_values("2024-01-01", [1500.0 + i for i in range(40)])
 
-    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("yf down")))
+    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("403 blocked")))
     monkeypatch.setattr(service, "_build_valid_fallback_history", lambda s, e, index_type: fallback)
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
 
     history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
     debug = service.get_last_debug("TOPIX")
     assert history == fallback
-    assert debug.get("resolved_symbol") == "^TOPX"
+    assert debug.get("resolved_symbol") == "TOPIX"
     assert debug.get("index_mode") == "index"
     assert service.get_last_source("TOPIX") == "fallback"
+    assert "stooq:TOPIX:403_blocked" in (debug.get("provider_reject_reasons") or [])
+
+
+def test_topix_sets_empty_dataframe_fetch_error(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("empty dataframe")))
+    monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
+
+    with pytest.raises(ValueError, match="data_unavailable"):
+        service._fetch_topix_with_provider_priority(start, end)
+    debug = service.get_last_debug("TOPIX")
+    assert debug.get("fetch_error") == "empty_dataframe"
 
 
 def test_debug_has_provider_attempt_fields(monkeypatch):
@@ -303,12 +314,12 @@ def test_debug_has_provider_attempt_fields(monkeypatch):
     end = date(2024, 3, 31)
     ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_download(symbol, s, e, index_type=None):
+    def fake_stooq(*args, **kwargs):
         dates = pd.to_datetime([d for d, _ in ok])
         values = [v for _, v in ok]
         return pd.Series(values, index=dates)
 
-    monkeypatch.setattr(service, "_download_close_series", fake_download)
+    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", fake_stooq)
     history = service.get_price_history_range(start, end, allow_fallback=False, index_type="TOPIX")
 
     debug = service.get_last_debug("TOPIX")
@@ -363,6 +374,31 @@ def test_topix_debug_includes_required_normalization_fields(monkeypatch):
     assert debug.get("raw_adj_close_tail") == [400.0]
     assert debug.get("normalized_series_tail") == [390.0, 400.0]
     assert debug.get("series_sort_order") == "asc"
+
+
+def test_topix_debug_captures_raw_shape_on_column_error(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    debug_meta = {
+        "column_names": ["Open", "High"],
+        "raw_shape": [0, 2],
+        "raw_is_multiindex": True,
+        "raw_head_ohlcv": [],
+        "raw_tail_ohlcv": [],
+    }
+    monkeypatch.setattr(
+        "backend.services.sp500_market_service.fetch_history_from_yfinance_with_debug",
+        lambda *args, **kwargs: (_ for _ in ()).throw(YFinanceStructureError("close column missing", debug_meta=debug_meta)),
+    )
+
+    with pytest.raises(YFinanceStructureError):
+        service._download_close_series("^TOPX", start, end, "TOPIX")
+
+    debug = service.get_last_debug("TOPIX")
+    assert debug.get("raw_columns") == ["Open", "High"]
+    assert debug.get("raw_shape") == [0, 2]
+    assert debug.get("raw_is_multiindex") is True
 
 
 def test_provider_reject_reasons_is_reasonable_list(monkeypatch):

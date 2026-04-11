@@ -381,7 +381,20 @@ class SP500MarketService:
 
     def _download_close_series(self, symbol: str, start: date, end: date, index_type: Optional[str] = None) -> pd.Series:
         normalized_index_type = self._normalize_index_type(index_type or "SP500")
-        closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=False)
+        try:
+            closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=False)
+        except Exception as exc:
+            raw_meta = getattr(exc, "debug_meta", {}) if hasattr(exc, "debug_meta") else {}
+            self._set_debug(
+                normalized_index_type,
+                resolved_symbol=symbol,
+                raw_columns=raw_meta.get("column_names"),
+                raw_shape=raw_meta.get("raw_shape"),
+                raw_is_multiindex=raw_meta.get("raw_is_multiindex"),
+                raw_head=raw_meta.get("raw_head_ohlcv"),
+                raw_tail=raw_meta.get("raw_tail_ohlcv"),
+            )
+            raise
         sorted_closes = closes.sort_index()
         price_column_used = str(raw_meta.get("selected_price_column", "")).lower().replace(" ", "_") or "close"
         self._set_debug(
@@ -389,10 +402,13 @@ class SP500MarketService:
             resolved_symbol=symbol,
             price_column_used=price_column_used,
             raw_columns=raw_meta.get("column_names", []),
+            raw_shape=raw_meta.get("raw_shape"),
+            raw_is_multiindex=raw_meta.get("raw_is_multiindex"),
             raw_head=raw_meta.get("raw_head_ohlcv", []),
             raw_tail=raw_meta.get("raw_tail_ohlcv", []),
             raw_close_tail=raw_meta.get("raw_close_tail10", []),
             raw_adj_close_tail=raw_meta.get("raw_adj_close_tail10", []),
+            normalized_series_head=[round(float(v), 2) for v in sorted_closes.head(5)],
             normalized_series_tail=[round(float(v), 2) for v in sorted_closes.tail(10)],
             series_sort_order=(
                 "asc" if bool(sorted_closes.index.is_monotonic_increasing) else "desc" if bool(sorted_closes.index.is_monotonic_decreasing) else "unsorted"
@@ -1417,16 +1433,64 @@ class SP500MarketService:
         index_type = "TOPIX"
         resolved_symbol = self._resolve_symbol(index_type)
         self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="index")
-        hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
-        self._set_debug(
-            index_type,
-            tried_providers=["yfinance"],
-            adopted_provider="yfinance",
-            adopted_symbol=resolved_symbol,
-            resolved_symbol=resolved_symbol,
-            index_mode="index",
-        )
-        return hist
+        tried_providers: List[str] = []
+        stooq_symbol = "TOPIX"
+        try:
+            closes = fetch_history_from_stooq(stooq_symbol, start, end)
+            hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in closes.items()]
+            reason = self._validate_history(hist, index_type)
+            provider_reason = self._provider_acceptance_reason(hist, index_type)
+            if reason or provider_reason:
+                reject = provider_reason or reason or "invalid_history"
+                self._add_provider_reject_reason(index_type, f"stooq:{stooq_symbol}:{reject}")
+                self._set_debug(index_type, fetch_error="empty_dataframe" if "empty" in str(reject) else None)
+                raise ValueError(reject)
+            self._record_provider_attempt(
+                index_type,
+                provider="stooq",
+                success=True,
+                history=hist,
+                symbol=stooq_symbol,
+            )
+            self._set_last_source(index_type, "stooq")
+            self._update_last_good_history(index_type, hist, source_hint="stooq")
+            self._set_debug(
+                index_type,
+                tried_providers=["stooq"],
+                adopted_provider="stooq",
+                adopted_symbol=stooq_symbol,
+                resolved_symbol=stooq_symbol,
+                index_mode="index",
+                fetch_error=None,
+                quality_check={"symbol": stooq_symbol, "result": "success", "reason": None},
+            )
+            return hist
+        except Exception as exc:
+            err_text = str(exc)
+            blocked = "403" in err_text or "blocked" in err_text.lower()
+            if blocked:
+                self._add_provider_reject_reason(index_type, "stooq:TOPIX:403_blocked")
+            self._record_provider_attempt(
+                index_type,
+                provider="stooq",
+                success=False,
+                validation_reason=f"fetch_error:{err_text}",
+                fetch_error=err_text,
+                quality_result="fetch_error",
+                validation_result="failed",
+                adopted=False,
+                symbol=stooq_symbol,
+            )
+            self._set_debug(
+                index_type,
+                tried_providers=["stooq"],
+                adopted_provider=None,
+                fetch_error="empty_dataframe" if "empty" in err_text.lower() else err_text,
+                resolved_symbol=stooq_symbol,
+                index_mode="index",
+            )
+            tried_providers.append("stooq")
+            raise ValueError("data_unavailable") from exc
 
     def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "SP500_JPY"

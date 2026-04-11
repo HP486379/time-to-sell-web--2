@@ -21,6 +21,12 @@ DEFAULT_HEADERS = {
 DEFAULT_FETCH_API_BASE = "http://127.0.0.1:9000"
 
 
+class YFinanceStructureError(ValueError):
+    def __init__(self, message: str, *, debug_meta: dict):
+        super().__init__(message)
+        self.debug_meta = debug_meta
+
+
 def _build_direct_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -33,7 +39,9 @@ def _fetch_api_base() -> str:
     return os.getenv("MARKET_FETCH_API_BASE", DEFAULT_FETCH_API_BASE).strip()
 
 
-def _flatten_ohlcv_frame(hist: pd.DataFrame) -> pd.DataFrame:
+def _flatten_ohlcv_frame(hist: pd.DataFrame | pd.Series) -> pd.DataFrame:
+    if isinstance(hist, pd.Series):
+        return hist.to_frame(name="value")
     normalized = hist.copy()
     if isinstance(normalized.columns, pd.MultiIndex):
         # yfinance may return MultiIndex columns: (Price, Ticker)
@@ -41,25 +49,47 @@ def _flatten_ohlcv_frame(hist: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _extract_close_series(hist: pd.DataFrame, *, prefer_adj_close: bool = False) -> tuple[pd.Series, str]:
+def _extract_price_series_robust(hist: pd.DataFrame | pd.Series, *, prefer_adj_close: bool = False) -> tuple[pd.Series, str]:
     frame = _flatten_ohlcv_frame(hist)
-    order = ["Adj Close", "Close"] if prefer_adj_close else ["Close", "Adj Close"]
-    selected_col = None
-    series: pd.Series | None = None
-    for col in order:
-        candidate = frame.get(col)
+    cols = list(frame.columns)
+    lower_map = {str(c).lower(): c for c in cols}
+    ordered_names = ["Adj Close", "Close", "close"] if prefer_adj_close else ["Close", "Adj Close", "close"]
+
+    def _series_from_col(col_name: object) -> pd.Series | None:
+        candidate = frame.get(col_name)
         if candidate is None:
-            continue
+            return None
         if isinstance(candidate, pd.DataFrame):
             candidate = candidate.iloc[:, 0]
         candidate = candidate.dropna()
-        if not candidate.empty:
-            selected_col = col
-            series = candidate
-            break
-    if series is None or selected_col is None:
-        raise ValueError("close column missing")
-    return series, selected_col
+        return candidate if not candidate.empty else None
+
+    for name in ordered_names:
+        key = lower_map.get(name.lower())
+        if key is None:
+            continue
+        series = _series_from_col(key)
+        if series is not None:
+            return series, str(key)
+
+    for col in cols:
+        if "close" in str(col).lower():
+            series = _series_from_col(col)
+            if series is not None:
+                return series, str(col)
+
+    numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(frame[c])]
+    if len(numeric_cols) == 1:
+        series = _series_from_col(numeric_cols[0])
+        if series is not None:
+            return series, str(numeric_cols[0])
+
+    if isinstance(hist, pd.Series):
+        series = hist.dropna()
+        if not series.empty:
+            return series, "series"
+
+    raise ValueError("close column missing")
 
 
 def _fetch_from_gateway(provider: str, symbol: str, start: date, end: date) -> pd.Series | None:
@@ -121,10 +151,27 @@ def _fetch_from_yfinance_direct(symbol: str, start: date, end: date, *, prefer_a
         threads=False,
         timeout=DEFAULT_TIMEOUT,
     )
+    raw_columns = list(hist.columns) if hasattr(hist, "columns") else []
     normalized_hist = _flatten_ohlcv_frame(hist)
-    closes, selected_column = _extract_close_series(normalized_hist.dropna(), prefer_adj_close=prefer_adj_close)
+    debug_meta = {
+        "raw_type": type(hist).__name__,
+        "column_names": [str(c) for c in raw_columns],
+        "raw_shape": list(hist.shape) if hasattr(hist, "shape") else None,
+        "raw_is_multiindex": bool(isinstance(getattr(hist, "columns", None), pd.MultiIndex)),
+        "raw_index_type": type(hist.index).__name__ if hasattr(hist, "index") else None,
+        "raw_index_name": str(getattr(hist.index, "name", None)) if hasattr(hist, "index") else None,
+        "raw_head_ohlcv": normalized_hist.head(5).reset_index().astype(str).to_dict(orient="records"),
+        "raw_tail_ohlcv": normalized_hist.tail(5).reset_index().astype(str).to_dict(orient="records"),
+        "raw_is_empty": bool(normalized_hist.empty),
+    }
+    if normalized_hist.empty:
+        raise YFinanceStructureError("empty_dataframe", debug_meta=debug_meta)
+    try:
+        closes, selected_column = _extract_price_series_robust(normalized_hist, prefer_adj_close=prefer_adj_close)
+    except Exception as exc:
+        raise YFinanceStructureError(f"close column missing:{exc}", debug_meta=debug_meta) from exc
     if closes.empty:
-        raise ValueError(f"empty history for {symbol}")
+        raise YFinanceStructureError("empty_dataframe", debug_meta=debug_meta)
     used_adjusted = selected_column == "Adj Close"
     raw_close = normalized_hist.get("Close")
     raw_adj_close = normalized_hist.get("Adj Close")
@@ -133,12 +180,13 @@ def _fetch_from_yfinance_direct(symbol: str, start: date, end: date, *, prefer_a
     if isinstance(raw_adj_close, pd.DataFrame):
         raw_adj_close = raw_adj_close.iloc[:, 0]
     meta = {
-        "column_names": list(normalized_hist.columns),
+        **debug_meta,
+        "column_names": [str(c) for c in normalized_hist.columns],
         "selected_price_column": selected_column,
         "prefer_adj_close": prefer_adj_close,
         "used_adjusted_close": used_adjusted,
         "raw_head_ohlcv": normalized_hist.head(5).reset_index().astype(str).to_dict(orient="records"),
-        "raw_tail_ohlcv": normalized_hist.tail(10).reset_index().astype(str).to_dict(orient="records"),
+        "raw_tail_ohlcv": normalized_hist.tail(5).reset_index().astype(str).to_dict(orient="records"),
         "raw_close_head5": [float(v) for v in raw_close.dropna().head(5)] if raw_close is not None else [],
         "raw_close_tail10": [float(v) for v in raw_close.dropna().tail(10)] if raw_close is not None else [],
         "raw_adj_close_head5": [float(v) for v in raw_adj_close.dropna().head(5)] if raw_adj_close is not None else [],
