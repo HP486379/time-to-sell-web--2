@@ -245,10 +245,12 @@ def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
         return False, "last_good_scoring_disabled"
 
     if index_type == IndexType.TOPIX:
-        return False, "topix_scoring_paused_until_normalization_fixed"
+        price_column_used = debug.get("price_column_used")
+        if price_column_used not in {"adj_close", "close"}:
+            return False, f"topix_price_column_missing:{price_column_used}"
 
     if adopted_provider in {"yfinance", "stooq", "nav_api"}:
-        if quality_result not in {"success", "soft_ng_adopted", "warning_close_fallback"}:
+        if quality_result not in {"success", "warning_close_fallback", "soft_ng_adopted"}:
             return False, f"quality_not_success:{quality_result}"
         return True, "ok_provider"
 
