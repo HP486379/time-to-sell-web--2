@@ -52,7 +52,7 @@ def test_scoring_guard_accepts_success_provider(monkeypatch):
     assert reason == "ok_provider"
 
 
-def test_scoring_guard_allows_topix_close_fallback(monkeypatch):
+def test_scoring_guard_blocks_topix_while_investigating(monkeypatch):
     monkeypatch.setattr(
         main.market_service,
         "get_last_debug",
@@ -66,5 +66,5 @@ def test_scoring_guard_allows_topix_close_fallback(monkeypatch):
         },
     )
     ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.TOPIX)
-    assert ok is True
-    assert reason == "ok_provider"
+    assert ok is False
+    assert reason == "topix_scoring_paused_until_normalization_fixed"

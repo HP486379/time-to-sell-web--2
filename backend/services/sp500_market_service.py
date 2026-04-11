@@ -419,6 +419,12 @@ class SP500MarketService:
                 topix_adj_close_first=adj_first,
                 topix_adj_close_last=adj_last,
                 topix_close_adj_gap_ratio=close_adj_gap_ratio,
+                raw_close_tail=raw_meta.get("raw_close_tail10", []),
+                raw_adj_close_tail=raw_meta.get("raw_adj_close_tail10", []),
+                normalized_series_tail=[round(float(v), 2) for v in sorted_closes.tail(10)],
+                series_sort_order=(
+                    "asc" if bool(sorted_closes.index.is_monotonic_increasing) else "desc" if bool(sorted_closes.index.is_monotonic_decreasing) else "unsorted"
+                ),
             )
             return sorted_closes
         return fetch_history_from_yfinance(symbol, start, end)

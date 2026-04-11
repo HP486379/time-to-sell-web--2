@@ -327,6 +327,44 @@ def test_debug_has_provider_attempt_fields(monkeypatch):
     assert isinstance(debug.get("provider_reject_reasons"), list)
 
 
+def test_topix_debug_includes_required_normalization_fields(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    idx = pd.to_datetime(["2024-01-04", "2024-01-05"])
+    series = pd.Series([390.0, 400.0], index=idx)
+    raw_meta = {
+        "raw_head_ohlcv": [{"Date": "2024-01-04", "Close": "1800", "Adj Close": "390"}],
+        "raw_tail_ohlcv": [{"Date": "2024-01-05", "Close": "400", "Adj Close": "400"}],
+        "column_names": ["Open", "High", "Low", "Close", "Adj Close", "Volume"],
+        "selected_price_column": "Adj Close",
+        "used_adjusted_close": True,
+        "source_path": "direct",
+        "raw_is_ascending": True,
+        "raw_is_descending": False,
+        "split_column_present": False,
+        "auto_adjust": False,
+        "raw_close_head5": [1800.0],
+        "raw_close_tail10": [400.0],
+        "raw_adj_close_head5": [390.0],
+        "raw_adj_close_tail10": [400.0],
+    }
+    monkeypatch.setattr(
+        "backend.services.sp500_market_service.fetch_history_from_yfinance_with_debug",
+        lambda *args, **kwargs: (series, raw_meta),
+    )
+
+    result = service._download_close_series("1306.T", start, end, "TOPIX")
+    debug = service.get_last_debug("TOPIX")
+
+    assert float(result.iloc[-1]) == 400.0
+    assert debug.get("price_column_used") == "adj_close"
+    assert debug.get("raw_close_tail") == [400.0]
+    assert debug.get("raw_adj_close_tail") == [400.0]
+    assert debug.get("normalized_series_tail") == [390.0, 400.0]
+    assert debug.get("series_sort_order") == "asc"
+
+
 def test_provider_reject_reasons_is_reasonable_list(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)

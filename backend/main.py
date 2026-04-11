@@ -245,15 +245,7 @@ def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
         return False, "last_good_scoring_disabled"
 
     if index_type == IndexType.TOPIX:
-        price_column_used = debug.get("price_column_used")
-        is_ascending = bool(debug.get("topix_raw_is_ascending"))
-        close_adj_gap = debug.get("topix_close_adj_gap_ratio")
-        if price_column_used not in {"adj_close", "close"}:
-            return False, f"topix_price_column_missing:{price_column_used}"
-        if not is_ascending:
-            return False, "topix_series_order_invalid"
-        if isinstance(close_adj_gap, (int, float)) and close_adj_gap > 0.5:
-            return False, f"topix_close_adj_gap_too_large:{close_adj_gap:.4f}"
+        return False, "topix_scoring_paused_until_normalization_fixed"
 
     if adopted_provider in {"yfinance", "stooq", "nav_api"}:
         if quality_result not in {"success", "soft_ng_adopted", "warning_close_fallback"}:
@@ -345,6 +337,12 @@ def get_cached_snapshot(
         return snapshot
 
     current_price = price_history[-1][1]
+    market_service._set_debug(
+        index_type.value,
+        scoring_input_series_head=price_history[:5],
+        scoring_input_series_tail=price_history[-10:],
+        scoring_input_series_points=len(price_history),
+    )
     snapshot["source"] = market_service.get_last_source(index_type.value)
     snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
     restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
