@@ -34,7 +34,7 @@ def test_scoring_guard_rejects_last_good_without_freshness(monkeypatch):
     )
     ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500)
     assert ok is False
-    assert "last_good_not_fresh" in reason
+    assert "last_good_scoring_disabled" in reason
 
 
 def test_scoring_guard_accepts_success_provider(monkeypatch):

@@ -242,18 +242,7 @@ def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
         return False, "missing_quality_check"
 
     if adopted_provider == "last_good":
-        freshness_ok = debug.get("last_good_freshness_ok") is True
-        lg_quality = debug.get("last_good_quality_check") if isinstance(debug.get("last_good_quality_check"), dict) else {}
-        lg_tail = debug.get("last_good_tail_check") if isinstance(debug.get("last_good_tail_check"), dict) else {}
-        if not freshness_ok:
-            return False, "last_good_not_fresh"
-        if lg_quality.get("result") != "success":
-            return False, f"last_good_quality_ng:{lg_quality.get('reason')}"
-        if lg_tail.get("result") not in {"passed", "success"}:
-            return False, f"last_good_tail_ng:{lg_tail.get('reason')}"
-        if quality_result not in {"fallback_last_good"}:
-            return False, f"unexpected_last_good_quality_result:{quality_result}"
-        return True, "ok_last_good"
+        return False, "last_good_scoring_disabled"
 
     if adopted_provider in {"yfinance", "stooq", "nav_api"}:
         if quality_result not in {"success", "soft_ng_adopted"}:
@@ -299,11 +288,11 @@ def get_cached_snapshot(
     snapshot = {
         "current_price": 0.0,
         "scores": {
-            "technical": 0.0,
-            "macro": 0.0,
-            "event_adjustment": 0.0,
-            "total": 0.0,
-            "label": get_label(0.0),
+            "technical": None,
+            "macro": None,
+            "event_adjustment": None,
+            "total": None,
+            "label": "N/A",
         },
         "technical_details": {},
         "macro_details": {},
@@ -325,17 +314,23 @@ def get_cached_snapshot(
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["PRICE_HISTORY_UNAVAILABLE"]
         return snapshot
     except Exception:
         logger.exception("[snapshot] price history failed for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["PRICE_HISTORY_UNAVAILABLE"]
         return snapshot
 
     if not price_history:
         logger.warning("[snapshot] empty price history for %s", index_type.value)
         snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["PRICE_HISTORY_EMPTY"]
         return snapshot
 
     current_price = price_history[-1][1]
@@ -353,6 +348,8 @@ def get_cached_snapshot(
         )
         snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["SOURCE_DISALLOWED"]
         return snapshot
 
     eligible, reason = _is_debug_eligible_for_scoring(index_type)
@@ -362,6 +359,8 @@ def get_cached_snapshot(
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         market_service._set_debug(index_type.value, scoring_allowed=False, scoring_block_reason=reason)
         snapshot["debug"] = market_service.get_last_debug(index_type.value)
+        snapshot["status"] = "error"
+        snapshot["reasons"] = [reason]
         return snapshot
     market_service._set_debug(index_type.value, scoring_allowed=True, scoring_block_reason=None)
 

@@ -90,7 +90,7 @@ def _fetch_from_gateway(provider: str, symbol: str, start: date, end: date) -> p
         return None
 
 
-def _fetch_from_yfinance_direct(symbol: str, start: date, end: date, session: requests.Session | None = None) -> pd.Series:
+def _fetch_from_yfinance_direct(symbol: str, start: date, end: date) -> pd.Series:
     import yfinance as yf
 
     hist = yf.download(
@@ -102,7 +102,6 @@ def _fetch_from_yfinance_direct(symbol: str, start: date, end: date, session: re
         auto_adjust=False,
         threads=False,
         timeout=DEFAULT_TIMEOUT,
-        session=session,
     )
     closes = _extract_close_series(hist.dropna())
     if closes.empty:
@@ -145,7 +144,7 @@ def fetch_history_from_yfinance(symbol: str, start: date, end: date, session: re
     gateway_series = _fetch_from_gateway("yfinance", symbol, start, end)
     if gateway_series is not None:
         return gateway_series
-    return _fetch_from_yfinance_direct(symbol, start, end, session=session)
+    return _fetch_from_yfinance_direct(symbol, start, end)
 
 
 def fetch_history_from_nav_api(base_url: str, symbol: str, price_type: str, start: date, end: date) -> List[Tuple[str, float]]:

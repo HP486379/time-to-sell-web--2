@@ -276,6 +276,23 @@ class SP500MarketService:
         index_type = self._normalize_index_type(index_type)
         self._last_debug.setdefault(index_type, {}).update(kwargs)
 
+    def _classify_fetch_error(self, error_text: str) -> str:
+        text = (error_text or "").lower()
+        hard_markers = ["curl_cffi", "requires curl_cffi session", "parsing error", "json decode", "schema"]
+        if any(marker in text for marker in hard_markers):
+            return "HARD_ERROR"
+        return "SOFT_ERROR"
+
+    def _set_provider_health(self, index_type: str, provider: str, status: str, *, reason: Optional[str] = None, error_type: Optional[str] = None) -> None:
+        index_type = self._normalize_index_type(index_type)
+        debug = self._last_debug.setdefault(index_type, {})
+        health = dict(debug.get("provider_health", {})) if isinstance(debug.get("provider_health"), dict) else {}
+        health[provider] = status
+        debug["provider_health"] = health
+        notes = dict(debug.get("provider_health_notes", {})) if isinstance(debug.get("provider_health_notes"), dict) else {}
+        notes[provider] = {"status": status, "reason": reason, "error_type": error_type}
+        debug["provider_health_notes"] = notes
+
     def _record_provider_attempt(
         self,
         index_type: str,
@@ -362,7 +379,7 @@ class SP500MarketService:
         return self.price_type_map.get(index_type)
 
     def _download_close_series(self, symbol: str, start: date, end: date) -> pd.Series:
-        return fetch_history_from_yfinance(symbol, start, end, session=self._yf_session)
+        return fetch_history_from_yfinance(symbol, start, end)
 
     def _validate_history(self, history: List[Tuple[str, float]], index_type: str) -> Optional[str]:
         index_type = self._normalize_index_type(index_type)
@@ -785,6 +802,9 @@ class SP500MarketService:
         for attempt, delay in enumerate(backoffs, start=1):
             for candidate_symbol in symbol_candidates:
                 symbol = candidate_symbol
+                provider_health = self._last_debug.setdefault(index_type, {}).get("provider_health", {})
+                if isinstance(provider_health, dict) and provider_health.get("yfinance") == "excluded":
+                    continue
                 if symbol not in tried_symbols:
                     tried_symbols.append(symbol)
                 try:
@@ -802,6 +822,7 @@ class SP500MarketService:
                                     provider_reason,
                                 )
                                 self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{provider_reason}")
+                                self._set_provider_health(index_type, "yfinance", "degraded", reason=provider_reason)
                                 self._record_provider_attempt(
                                     index_type,
                                     provider="yfinance",
@@ -842,6 +863,7 @@ class SP500MarketService:
                                     symbol=symbol,
                                 )
                                 self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{summary}")
+                                self._set_provider_health(index_type, "yfinance", "degraded", reason=summary)
                                 last_error = ValueError(summary)
                                 continue
                             if quality_status == "soft_ng":
@@ -879,6 +901,7 @@ class SP500MarketService:
                         )
                         self._update_last_good_history(index_type, history, source_hint=source)
                         self._set_last_source(index_type, source)
+                        self._set_provider_health(index_type, "yfinance", "healthy", reason="adopted")
                         self._set_debug(
                             index_type,
                             tried_symbols=tried_symbols,
@@ -914,8 +937,10 @@ class SP500MarketService:
                     )
                     self._set_debug(index_type, validation_reason=reason)
                     self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:{reason}")
+                    self._set_provider_health(index_type, "yfinance", "degraded", reason=reason)
                     last_error = ValueError(reason)
                 except Exception as exc:
+                    error_type = self._classify_fetch_error(str(exc))
                     self._record_provider_attempt(
                         index_type,
                         provider="yfinance",
@@ -928,6 +953,13 @@ class SP500MarketService:
                         symbol=symbol,
                     )
                     self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:fetch_error:{exc}")
+                    self._set_provider_health(
+                        index_type,
+                        "yfinance",
+                        "excluded" if error_type == "HARD_ERROR" else "degraded",
+                        reason=str(exc),
+                        error_type=error_type,
+                    )
                     last_error = exc
                     self._set_debug(index_type, fetch_error=str(exc))
                     logger.warning(
@@ -1173,6 +1205,7 @@ class SP500MarketService:
 
         nav_base = self._resolve_nav_base(index_type)
         if not nav_base:
+            self._set_provider_health(index_type, "nav_api", "unknown", reason="not_configured")
             self._record_provider_attempt(
                 index_type,
                 provider="nav_api",
@@ -1198,6 +1231,7 @@ class SP500MarketService:
                     symbol=symbol,
                 )
                 self._add_provider_reject_reason(index_type, f"nav_api:{symbol}:{nav_reason}")
+                self._set_provider_health(index_type, "nav_api", "degraded", reason=nav_reason)
                 logger.warning("NAV API invalid index=%s symbol=%s reason=%s", index_type, symbol, nav_reason)
                 return []
             self._record_provider_attempt(
@@ -1207,6 +1241,7 @@ class SP500MarketService:
                 history=series,
                 symbol=symbol,
             )
+            self._set_provider_health(index_type, "nav_api", "healthy", reason="adopted")
             logger.info(
                 "[NAV API] index=%s symbol=%s price_type=%s points=%d",
                 index_type,
@@ -1216,6 +1251,7 @@ class SP500MarketService:
             )
             return series
         except Exception as exc:
+            error_type = self._classify_fetch_error(str(exc))
             self._record_provider_attempt(
                 index_type,
                 provider="nav_api",
@@ -1224,6 +1260,13 @@ class SP500MarketService:
                 symbol=symbol,
             )
             self._add_provider_reject_reason(index_type, f"nav_api:{symbol}:fetch_error:{exc}")
+            self._set_provider_health(
+                index_type,
+                "nav_api",
+                "excluded" if error_type == "HARD_ERROR" else "degraded",
+                reason=str(exc),
+                error_type=error_type,
+            )
             logger.warning("NAV API fallback due to error: %s", exc)
         return []
 
@@ -1236,6 +1279,7 @@ class SP500MarketService:
         provider_reason = self._provider_acceptance_reason(history)
         if reason or provider_reason:
             msg = provider_reason or reason
+            self._set_provider_health(index_type, "stooq", "degraded", reason=msg)
             self._record_provider_attempt(
                 index_type,
                 provider="stooq",
@@ -1253,6 +1297,7 @@ class SP500MarketService:
             history=history,
             symbol=symbol,
         )
+        self._set_provider_health(index_type, "stooq", "healthy", reason="adopted")
         self._set_last_source(index_type, "stooq")
         self._update_last_good_history(index_type, history, source_hint="stooq")
         self._set_debug(
