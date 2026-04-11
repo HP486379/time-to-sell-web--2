@@ -4,6 +4,7 @@ import os
 import random
 import statistics
 import time
+import traceback
 import json
 from datetime import date, timedelta
 from pathlib import Path
@@ -45,7 +46,7 @@ class SP500MarketService:
         )
         self.symbol_map = {
             "SP500": symbol or os.getenv("SP500_SYMBOL", "^GSPC"),
-            "TOPIX": os.getenv("TOPIX_SYMBOL", "^TOPX"),
+            "TOPIX": os.getenv("TOPIX_SYMBOL", "1306.T"),
             "NIKKEI225": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIFTY50": os.getenv("NIFTY50_SYMBOL", "^NSEI"),
             # オルカンは MSCI ACWI 連動 ETF（ACWI）をプロキシとして利用する
@@ -1003,7 +1004,12 @@ class SP500MarketService:
                         error_type=error_type,
                     )
                     last_error = exc
-                    self._set_debug(index_type, fetch_error=str(exc))
+                    self._set_debug(
+                        index_type,
+                        fetch_error=str(exc),
+                        fetch_error_repr=repr(exc),
+                        fetch_error_trace=traceback.format_exc(limit=3),
+                    )
                     logger.warning(
                         "Price history attempt failed index=%s symbol=%s price_type=%s attempt=%d error=%s",
                         index_type,
@@ -1433,7 +1439,23 @@ class SP500MarketService:
         index_type = "TOPIX"
         resolved_symbol = self._resolve_symbol(index_type)
         self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="index")
-        tried_providers: List[str] = []
+        try:
+            hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
+            self._set_debug(
+                index_type,
+                tried_providers=["yfinance"],
+                adopted_provider="yfinance",
+                adopted_symbol=resolved_symbol,
+                resolved_symbol=resolved_symbol,
+                index_mode="index",
+                fetch_error=None,
+            )
+            return hist
+        except Exception as yf_exc:
+            yf_err = str(yf_exc)
+            if "403" in yf_err or "blocked" in yf_err.lower():
+                self._add_provider_reject_reason(index_type, f"yfinance:{resolved_symbol}:403_blocked")
+
         stooq_symbol = "TOPIX"
         try:
             closes = fetch_history_from_stooq(stooq_symbol, start, end)
@@ -1456,7 +1478,7 @@ class SP500MarketService:
             self._update_last_good_history(index_type, hist, source_hint="stooq")
             self._set_debug(
                 index_type,
-                tried_providers=["stooq"],
+                tried_providers=["yfinance", "stooq"],
                 adopted_provider="stooq",
                 adopted_symbol=stooq_symbol,
                 resolved_symbol=stooq_symbol,
@@ -1483,13 +1505,12 @@ class SP500MarketService:
             )
             self._set_debug(
                 index_type,
-                tried_providers=["stooq"],
+                tried_providers=["yfinance", "stooq"],
                 adopted_provider=None,
                 fetch_error="empty_dataframe" if "empty" in err_text.lower() else err_text,
                 resolved_symbol=stooq_symbol,
                 index_mode="index",
             )
-            tried_providers.append("stooq")
             raise ValueError("data_unavailable") from exc
 
     def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:

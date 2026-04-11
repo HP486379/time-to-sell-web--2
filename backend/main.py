@@ -528,6 +528,8 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "fx_symbol": service_debug.get("fx_symbol"),
         "price_type": service_debug.get("price_type"),
         "fetch_error": service_debug.get("fetch_error"),
+        "fetch_error_repr": service_debug.get("fetch_error_repr"),
+        "fetch_error_trace": service_debug.get("fetch_error_trace"),
         "validation_reason": service_debug.get("validation_reason"),
         "quality_flags": service_debug.get("quality_flags"),
         "quality_summary": service_debug.get("quality_summary"),

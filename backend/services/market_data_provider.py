@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 import logging
 import os
+import time
 import pandas as pd
 import requests
 
@@ -98,59 +99,88 @@ def _fetch_from_gateway(provider: str, symbol: str, start: date, end: date) -> p
         raise ValueError("MARKET_FETCH_API_BASE is required")
     session = _build_direct_session()
     url = f"{fetch_api_base.rstrip('/')}/fetch"
-    try:
-        resp = session.get(
-            url,
-            params={
-                "provider": provider,
-                "symbol": symbol,
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-            },
-            proxies={},
-            timeout=DEFAULT_TIMEOUT,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        prices = payload.get("prices") if isinstance(payload, dict) else None
-        if not isinstance(prices, list) or not prices:
-            raise ValueError(f"gateway empty prices provider={provider} symbol={symbol}")
-        dates = pd.to_datetime([str(item["date"]) for item in prices])
-        values = [float(item["close"]) for item in prices]
-        series = pd.Series(values, index=dates).dropna()
-        logger.info(
-            "provider=gateway upstream=%s symbol=%s result=success points=%d first=%s last=%s",
-            provider,
-            symbol,
-            len(series),
-            float(series.iloc[0]) if len(series) else None,
-            float(series.iloc[-1]) if len(series) else None,
-        )
-        return series
-    except Exception as exc:
-        logger.warning(
-            "provider=gateway upstream=%s symbol=%s result=failed base=%s error=%s",
-            provider,
-            symbol,
-            fetch_api_base,
-            exc,
-        )
-        return None
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = session.get(
+                url,
+                params={
+                    "provider": provider,
+                    "symbol": symbol,
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                },
+                proxies={},
+                timeout=DEFAULT_TIMEOUT,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            prices = payload.get("prices") if isinstance(payload, dict) else None
+            if not isinstance(prices, list) or not prices:
+                raise ValueError(f"gateway empty prices provider={provider} symbol={symbol}")
+            dates = pd.to_datetime([str(item["date"]) for item in prices])
+            values = [float(item["close"]) for item in prices]
+            series = pd.Series(values, index=dates).dropna()
+            logger.info(
+                "provider=gateway upstream=%s symbol=%s result=success points=%d first=%s last=%s attempts=%d timeout=%s ua=%s",
+                provider,
+                symbol,
+                len(series),
+                float(series.iloc[0]) if len(series) else None,
+                float(series.iloc[-1]) if len(series) else None,
+                attempt,
+                DEFAULT_TIMEOUT,
+                session.headers.get("User-Agent"),
+            )
+            return series
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 3:
+                time.sleep(0.25 * attempt)
+    logger.warning(
+        "provider=gateway upstream=%s symbol=%s result=failed base=%s error=%s timeout=%s ua=%s",
+        provider,
+        symbol,
+        fetch_api_base,
+        last_exc,
+        DEFAULT_TIMEOUT,
+        session.headers.get("User-Agent"),
+    )
+    return None
 
 
 def _fetch_from_yfinance_direct(symbol: str, start: date, end: date, *, prefer_adj_close: bool = False) -> tuple[pd.Series, dict]:
     import yfinance as yf
 
-    hist = yf.download(
-        symbol,
-        start=start,
-        end=end + timedelta(days=1),
-        interval="1d",
-        progress=False,
-        auto_adjust=False,
-        threads=False,
-        timeout=DEFAULT_TIMEOUT,
-    )
+    hist = pd.DataFrame()
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            hist = yf.download(
+                symbol,
+                start=start,
+                end=end + timedelta(days=1),
+                interval="1d",
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+                timeout=DEFAULT_TIMEOUT,
+            )
+            logger.info(
+                "provider=yfinance symbol=%s attempt=%d raw_shape=%s raw_columns=%s",
+                symbol,
+                attempt,
+                tuple(hist.shape),
+                list(hist.columns) if hasattr(hist, "columns") else None,
+            )
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("provider=yfinance symbol=%s attempt=%d error=%r", symbol, attempt, exc)
+            if attempt < 3:
+                time.sleep(0.35 * attempt)
+    if hist is None or (hasattr(hist, "empty") and hist.empty and last_exc is not None):
+        raise YFinanceStructureError(f"yfinance_request_failed:{last_exc!r}", debug_meta={"raw_type": "None", "raw_shape": [0, 0], "column_names": []})
     raw_columns = list(hist.columns) if hasattr(hist, "columns") else []
     normalized_hist = _flatten_ohlcv_frame(hist)
     debug_meta = {

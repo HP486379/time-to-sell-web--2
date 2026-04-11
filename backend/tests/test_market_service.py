@@ -222,7 +222,7 @@ def test_last_good_source_marked_as_last_good(monkeypatch):
 def test_topix_symbol_candidates_include_fallback():
     service = SP500MarketService(symbol="TEST")
     candidates = service._resolve_symbol_candidates("TOPIX")
-    assert "^TOPX" in candidates
+    assert "1306.T" in candidates
     assert len(candidates) == 1
 
 
@@ -241,23 +241,27 @@ def test_topix_tail_outlier_is_relaxed():
     assert "tail_outlier" in sp500_reason
 
 
-def test_topix_uses_stooq_index_provider(monkeypatch):
+def test_topix_uses_yfinance_primary_symbol(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 12, 31)
     points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    dates = pd.to_datetime([d for d, _ in points])
-    values = [v for _, v in points]
-    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: pd.Series(values, index=dates))
+    def fake_download(symbol, s, e, index_type=None):
+        assert symbol == "1306.T"
+        dates = pd.to_datetime([d for d, _ in points])
+        values = [v for _, v in points]
+        return pd.Series(values, index=dates)
+
+    monkeypatch.setattr(service, "_download_close_series", fake_download)
 
     history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
     debug = service.get_last_debug("TOPIX")
 
     assert history == points
-    assert debug.get("adopted_provider") == "stooq"
-    assert debug.get("adopted_symbol") == "TOPIX"
-    assert debug.get("resolved_symbol") == "TOPIX"
+    assert debug.get("adopted_provider") == "yfinance"
+    assert debug.get("adopted_symbol") == "1306.T"
+    assert debug.get("resolved_symbol") == "1306.T"
     assert debug.get("index_mode") == "index"
 
 
@@ -282,6 +286,7 @@ def test_topix_returns_fallback_when_yfinance_fails(monkeypatch):
     end = date(2024, 3, 31)
     fallback = _history_from_values("2024-01-01", [1500.0 + i for i in range(40)])
 
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("403 blocked")))
     monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("403 blocked")))
     monkeypatch.setattr(service, "_build_valid_fallback_history", lambda s, e, index_type: fallback)
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
@@ -314,12 +319,13 @@ def test_debug_has_provider_attempt_fields(monkeypatch):
     end = date(2024, 3, 31)
     ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_stooq(*args, **kwargs):
+    def fake_download(symbol, s, e, index_type=None):
+        assert symbol == "1306.T"
         dates = pd.to_datetime([d for d, _ in ok])
         values = [v for _, v in ok]
         return pd.Series(values, index=dates)
 
-    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", fake_stooq)
+    monkeypatch.setattr(service, "_download_close_series", fake_download)
     history = service.get_price_history_range(start, end, allow_fallback=False, index_type="TOPIX")
 
     debug = service.get_last_debug("TOPIX")
@@ -365,7 +371,7 @@ def test_topix_debug_includes_required_normalization_fields(monkeypatch):
         lambda *args, **kwargs: (series, raw_meta),
     )
 
-    result = service._download_close_series("^TOPX", start, end, "TOPIX")
+    result = service._download_close_series("1306.T", start, end, "TOPIX")
     debug = service.get_last_debug("TOPIX")
 
     assert float(result.iloc[-1]) == 400.0
