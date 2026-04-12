@@ -171,11 +171,11 @@ const normalizeEvaluateResponse = (res: EvaluateResponse, series: PricePoint[]):
     status: 'degraded',
     scores: {
       ...normalized.scores,
-      technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : 0,
-      macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : 0,
+      technical: isFiniteNumber(withFallback.scores?.technical) ? withFallback.scores.technical : null,
+      macro: isFiniteNumber(withFallback.scores?.macro) ? withFallback.scores.macro : null,
       event_adjustment: eventAdjustmentPt,
-      total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : 0,
-      label: withFallback.scores?.label ?? '計算中',
+      total: isFiniteNumber(withFallback.scores?.total) ? withFallback.scores.total : null,
+      label: withFallback.scores?.label ?? 'データ取得失敗',
     },
     reasons: [...(withFallback.reasons ?? []), 'TECHNICAL_UNAVAILABLE'],
   }
@@ -334,7 +334,9 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       }
     }
 
-    const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body)
+    const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body, {
+      params: { debug: true },
+    })
 
     if (reqSeq !== evalReqSeqRef.current) return
 
@@ -979,7 +981,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
               為替インサイト
             </Typography>
             <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-              <Chip label={`スコア差: ${forexInsight.diff.toFixed(1)}pt`} color="info" size="small" />
+              <Chip label={`1か月差: ${forexInsight.diff.toFixed(1)}%`} color="info" size="small" />
               <Typography variant="body2" color="text.secondary">
                 {forexInsight.message}
               </Typography>
@@ -1292,6 +1294,14 @@ function calculatePeriodReturn(series: PricePoint[]): number | null {
   return (last / first - 1) * 100
 }
 
+function calculateTrailingReturn(series: PricePoint[], days = 30): number | null {
+  if (!series.length) return null
+  const end = dayjs(series[series.length - 1].date)
+  const start = end.subtract(days, 'day')
+  const filtered = filterSeriesFromStart(series, start)
+  return calculatePeriodReturn(filtered)
+}
+
 function formatPercentage(value: number): string {
   const sign = value > 0 ? '+' : ''
   return `${sign}${value.toFixed(1)}%`
@@ -1364,25 +1374,28 @@ function buildForexInsight(
   const jpy = responses[pair[1]]
   if (!usd || !jpy) return null
 
-  const usdScore = usd.scores?.total ?? 0
-  const jpyScore = jpy.scores?.total ?? 0
-  const diff = jpyScore - usdScore
+  const usdReturn1m = calculateTrailingReturn(usd.price_series ?? [])
+  const jpyReturn1m = calculateTrailingReturn(jpy.price_series ?? [])
+  if (usdReturn1m === null || jpyReturn1m === null) return null
 
-  if (diff > 5) {
+  const diff = jpyReturn1m - usdReturn1m
+  const threshold = 0.3
+
+  if (diff > threshold) {
     return {
       diff,
-      message: '為替の影響で上振れしています。円安が進んだため、円建て評価額が押し上げられています。',
+      message: `直近1か月で円建てがドル建てを${diff.toFixed(1)}pt上回っています。円安（USD/JPY上昇）方向の影響で、円建てリターンが押し上げられています。`,
     }
   }
-  if (diff < -5) {
+  if (diff < -threshold) {
     return {
       diff,
-      message: '株価は上昇していますが、円高により円建てでは利益が削られています。為替による下押しが発生しています。',
+      message: `直近1か月で円建てがドル建てを${Math.abs(diff).toFixed(1)}pt下回っています。円高（USD/JPY低下）方向の影響で、円建てリターンが抑えられています。`,
     }
   }
   return {
     diff,
-    message: 'ドル建てと円建ての動きはほぼ一致しています。為替の影響は小さく、中立的です。',
+    message: '直近1か月のドル建て・円建てリターン差は小さく、為替影響は中立に近い状態です。',
   }
 }
 
