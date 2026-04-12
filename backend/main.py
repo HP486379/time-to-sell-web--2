@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 import math
+import statistics
 import logging
 from enum import Enum
 
@@ -229,6 +230,16 @@ def _get_price_series_or_503(index_type: IndexType):
 
 
 def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tuple[str, float]]) -> tuple[bool, str]:
+    debug = market_service.get_last_debug(index_type.value)
+    source = str(debug.get("source") or market_service.get_last_source(index_type.value) or "")
+    adopted_provider = str(debug.get("adopted_provider") or "")
+    disallowed_sources = {"synthetic", "synthetic_fallback", "bootstrap", "fallback_degraded", "real_fallback", "last_good"}
+    if adopted_provider == "synthetic_fallback":
+        return False, "synthetic_fallback_scoring_disabled"
+    if source in disallowed_sources or "degraded" in source:
+        return False, f"source_scoring_disabled:{source}"
+    if not (source == "real" or adopted_provider == "yfinance"):
+        return False, f"scoring_source_not_allowed:source={source},provider={adopted_provider}"
     if not price_history:
         return False, "series_empty"
     values = [float(v) for _, v in price_history]
@@ -245,6 +256,24 @@ def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tu
         ratios = [tail[i] / tail[i - 1] for i in range(1, len(tail)) if tail[i - 1] > 0]
         if any(r < 0.2 or r > 1.8 for r in ratios):
             return False, "series_tail_broken"
+    if index_type == IndexType.TOPIX and len(cleaned) >= 40:
+        min_v, max_v = min(cleaned), max(cleaned)
+        if min_v <= 0:
+            return False, "topix_non_positive"
+        if (max_v / min_v) > 8.0:
+            return False, "topix_max_min_ratio_abnormal"
+        head = cleaned[:20]
+        tail = cleaned[-20:]
+        head_med = statistics.median(head)
+        tail_med = statistics.median(tail)
+        if head_med > 0 and (tail_med / head_med < 0.2 or tail_med / head_med > 5.0):
+            return False, "topix_head_tail_scale_gap"
+        recent = cleaned[-5:]
+        base_med = statistics.median(cleaned[-25:-5]) if len(cleaned) >= 25 else statistics.median(cleaned[:-5])
+        if base_med > 0:
+            recent_med = statistics.median(recent)
+            if recent_med / base_med < 0.5 or recent_med / base_med > 1.8:
+                return False, "topix_recent_scale_switch"
     return True, "series_ok"
 
 
@@ -357,11 +386,10 @@ def get_cached_snapshot(
     eligible, reason = _is_debug_eligible_for_scoring(index_type, price_history)
     if not eligible:
         logger.warning("[snapshot] scoring blocked index=%s reason=%s", index_type.value, reason)
-        snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         market_service._set_debug(index_type.value, scoring_allowed=False, scoring_executed=False, scoring_block_reason=reason)
         snapshot["debug"] = market_service.get_last_debug(index_type.value)
-        snapshot["status"] = "error"
+        snapshot["status"] = "degraded"
         snapshot["reasons"] = [reason]
         return snapshot
     market_service._set_debug(index_type.value, scoring_allowed=True, scoring_executed=True, scoring_block_reason=None)
@@ -512,7 +540,9 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "raw_head": service_debug.get("raw_head"),
         "raw_tail": service_debug.get("raw_tail"),
         "raw_close_tail": service_debug.get("raw_close_tail"),
+        "raw_close_head": service_debug.get("raw_close_head"),
         "raw_adj_close_tail": service_debug.get("raw_adj_close_tail"),
+        "raw_adj_close_head": service_debug.get("raw_adj_close_head"),
         "normalized_series_head": service_debug.get("normalized_series_head"),
         "normalized_series_tail": service_debug.get("normalized_series_tail"),
         "series_sort_order": service_debug.get("series_sort_order"),

@@ -93,6 +93,25 @@ def _extract_price_series_robust(hist: pd.DataFrame | pd.Series, *, prefer_adj_c
     raise ValueError("close column missing")
 
 
+def _extract_topix_series_strict(hist: pd.DataFrame | pd.Series) -> tuple[pd.Series, str]:
+    frame = _flatten_ohlcv_frame(hist)
+    if frame.empty:
+        raise ValueError("empty_dataframe")
+    if "Adj Close" in frame.columns:
+        selected = "Adj Close"
+    elif "Close" in frame.columns:
+        selected = "Close"
+    else:
+        raise ValueError("close column missing")
+    series = frame[selected]
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+    series = series.dropna()
+    if series.empty:
+        raise ValueError("empty_dataframe")
+    return series, selected
+
+
 def _fetch_from_gateway(provider: str, symbol: str, start: date, end: date) -> pd.Series | None:
     fetch_api_base = _fetch_api_base()
     if not fetch_api_base:
@@ -197,7 +216,10 @@ def _fetch_from_yfinance_direct(symbol: str, start: date, end: date, *, prefer_a
     if normalized_hist.empty:
         raise YFinanceStructureError("empty_dataframe", debug_meta=debug_meta)
     try:
-        closes, selected_column = _extract_price_series_robust(normalized_hist, prefer_adj_close=prefer_adj_close)
+        if symbol.upper() == "1306.T":
+            closes, selected_column = _extract_topix_series_strict(normalized_hist)
+        else:
+            closes, selected_column = _extract_price_series_robust(normalized_hist, prefer_adj_close=prefer_adj_close)
     except Exception as exc:
         raise YFinanceStructureError(f"close column missing:{exc}", debug_meta=debug_meta) from exc
     if closes.empty:

@@ -74,3 +74,19 @@ def test_extract_price_series_robust_raises_on_empty_dataframe():
     df = pd.DataFrame(columns=pd.MultiIndex.from_tuples([("Close", "^TOPX"), ("Adj Close", "^TOPX")]), index=idx)
     with pytest.raises(ValueError):
         mdp._extract_price_series_robust(df)
+
+
+def test_extract_topix_series_strict_prefers_adj_close():
+    idx = pd.to_datetime(["2024-01-04", "2024-01-05"])
+    df = pd.DataFrame({"Close": [1800.0, 400.0], "Adj Close": [390.0, 400.0]}, index=idx)
+    series, used = mdp._extract_topix_series_strict(df)
+    assert used == "Adj Close"
+    assert float(series.iloc[0]) == 390.0
+
+
+def test_extract_topix_series_strict_falls_back_to_close_only_if_needed():
+    idx = pd.to_datetime(["2024-01-04", "2024-01-05"])
+    df = pd.DataFrame({"Close": [1800.0, 1801.0]}, index=idx)
+    series, used = mdp._extract_topix_series_strict(df)
+    assert used == "Close"
+    assert float(series.iloc[-1]) == 1801.0
