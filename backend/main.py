@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
+import math
 import logging
 from enum import Enum
 
@@ -227,34 +228,24 @@ def _get_price_series_or_503(index_type: IndexType):
         raise HTTPException(status_code=503, detail="Price data unavailable.")
 
 
-def _is_debug_eligible_for_scoring(index_type: IndexType) -> tuple[bool, str]:
-    debug = market_service.get_last_debug(index_type.value)
-    adopted_provider = debug.get("adopted_provider")
-    fetch_error = debug.get("fetch_error")
-    quality_check = debug.get("quality_check") if isinstance(debug.get("quality_check"), dict) else {}
-    quality_result = quality_check.get("result")
-
-    if fetch_error:
-        return False, f"fetch_error_present:{fetch_error}"
-    if not adopted_provider:
-        return False, "missing_adopted_provider"
-    if not quality_check:
-        return False, "missing_quality_check"
-
-    if adopted_provider == "last_good":
-        return False, "last_good_scoring_disabled"
-
-    if index_type == IndexType.TOPIX:
-        price_column_used = debug.get("price_column_used")
-        if price_column_used not in {"adj_close", "close"}:
-            return False, f"topix_price_column_missing:{price_column_used}"
-
-    if adopted_provider in {"yfinance", "stooq", "nav_api"}:
-        if quality_result not in {"success", "soft_ng_adopted"}:
-            return False, f"quality_not_success:{quality_result}"
-        return True, "ok_provider"
-
-    return False, f"unsupported_adopted_provider:{adopted_provider}"
+def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tuple[str, float]]) -> tuple[bool, str]:
+    if not price_history:
+        return False, "series_empty"
+    values = [float(v) for _, v in price_history]
+    nan_count = sum(1 for v in values if math.isnan(v))
+    if nan_count >= max(3, len(values) // 2):
+        return False, f"series_nan_heavy:{nan_count}/{len(values)}"
+    cleaned = [v for v in values if not math.isnan(v)]
+    if not cleaned:
+        return False, "series_all_nan"
+    if any(v <= 0 for v in cleaned[-5:]):
+        return False, "series_non_positive_tail"
+    if len(cleaned) >= 3:
+        tail = cleaned[-5:]
+        ratios = [tail[i] / tail[i - 1] for i in range(1, len(tail)) if tail[i - 1] > 0]
+        if any(r < 0.2 or r > 1.8 for r in ratios):
+            return False, "series_tail_broken"
+    return True, "series_ok"
 
 
 def _build_event_adjustment(target: date):
@@ -363,17 +354,17 @@ def get_cached_snapshot(
         snapshot["reasons"] = ["SOURCE_DISALLOWED"]
         return snapshot
 
-    eligible, reason = _is_debug_eligible_for_scoring(index_type)
+    eligible, reason = _is_debug_eligible_for_scoring(index_type, price_history)
     if not eligible:
         logger.warning("[snapshot] scoring blocked index=%s reason=%s", index_type.value, reason)
         snapshot["source"] = "data_unavailable"
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
-        market_service._set_debug(index_type.value, scoring_allowed=False, scoring_block_reason=reason)
+        market_service._set_debug(index_type.value, scoring_allowed=False, scoring_executed=False, scoring_block_reason=reason)
         snapshot["debug"] = market_service.get_last_debug(index_type.value)
         snapshot["status"] = "error"
         snapshot["reasons"] = [reason]
         return snapshot
-    market_service._set_debug(index_type.value, scoring_allowed=True, scoring_block_reason=None)
+    market_service._set_debug(index_type.value, scoring_allowed=True, scoring_executed=True, scoring_block_reason=None)
 
     try:
         technical_score, technical_details = calculate_technical_score(price_history)
@@ -542,14 +533,14 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "first_close": service_debug.get("first_close"),
         "last_close": service_debug.get("last_close"),
         "one_year_return": service_debug.get("one_year_return"),
-        "scores_total": service_debug.get("scores_total"),
+        "scores_total": (snapshot.get("scores") or {}).get("total"),
+        "scoring_executed": service_debug.get("scoring_executed"),
         "technical_score": technical_score,
         "period_scores": {
             "short": period_scores.get("short"),
             "mid": period_scores.get("mid"),
             "long": period_scores.get("long"),
         },
-        "scores_total": (snapshot.get("scores") or {}).get("total"),
         "reasons": (snapshot.get("technical_details") or {}).get("reason"),
     }
 

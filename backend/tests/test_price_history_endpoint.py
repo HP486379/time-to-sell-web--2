@@ -20,51 +20,24 @@ def test_sp500_price_history_builds_response(monkeypatch):
 
 
 def test_scoring_guard_rejects_last_good_without_freshness(monkeypatch):
-    monkeypatch.setattr(
-        main.market_service,
-        "get_last_debug",
-        lambda *_: {
-            "adopted_provider": "last_good",
-            "fetch_error": None,
-            "quality_check": {"result": "fallback_last_good", "reason": "provider_failed"},
-            "last_good_freshness_ok": False,
-            "last_good_quality_check": {"result": "failed", "reason": "stale_or_invalid_date"},
-            "last_good_tail_check": {"result": "unknown", "reason": None},
-        },
-    )
-    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500)
+    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500, [])
     assert ok is False
-    assert "last_good_scoring_disabled" in reason
+    assert "series_empty" in reason
 
 
 def test_scoring_guard_accepts_success_provider(monkeypatch):
-    monkeypatch.setattr(
-        main.market_service,
-        "get_last_debug",
-        lambda *_: {
-            "adopted_provider": "yfinance",
-            "fetch_error": None,
-            "quality_check": {"result": "success", "reason": None},
-        },
+    ok, reason = main._is_debug_eligible_for_scoring(
+        main.IndexType.SP500,
+        [("2024-01-01", 100.0), ("2024-01-02", 101.0)],
     )
-    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.SP500)
     assert ok is True
-    assert reason == "ok_provider"
+    assert reason == "series_ok"
 
 
 def test_scoring_guard_allows_topix_close_fallback_warning(monkeypatch):
-    monkeypatch.setattr(
-        main.market_service,
-        "get_last_debug",
-        lambda *_: {
-            "adopted_provider": "yfinance",
-            "fetch_error": None,
-            "quality_check": {"result": "success", "reason": None},
-            "price_column_used": "close",
-            "topix_raw_is_ascending": True,
-            "topix_close_adj_gap_ratio": 0.2,
-        },
+    ok, reason = main._is_debug_eligible_for_scoring(
+        main.IndexType.TOPIX,
+        [("2024-01-01", 1900.0), ("2024-01-02", 1910.0), ("2024-01-03", 1905.0)],
     )
-    ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.TOPIX)
     assert ok is True
-    assert reason == "ok_provider"
+    assert reason == "series_ok"

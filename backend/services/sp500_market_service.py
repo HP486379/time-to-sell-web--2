@@ -382,8 +382,9 @@ class SP500MarketService:
 
     def _download_close_series(self, symbol: str, start: date, end: date, index_type: Optional[str] = None) -> pd.Series:
         normalized_index_type = self._normalize_index_type(index_type or "SP500")
+        prefer_adj_close = normalized_index_type == "TOPIX"
         try:
-            closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=False)
+            closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=prefer_adj_close)
         except Exception as exc:
             raw_meta = getattr(exc, "debug_meta", {}) if hasattr(exc, "debug_meta") else {}
             self._set_debug(
@@ -1437,79 +1438,62 @@ class SP500MarketService:
 
     def _fetch_topix_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "TOPIX"
-        resolved_symbol = self._resolve_symbol(index_type)
-        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="index")
+        resolved_symbol = "1306.T"
+        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="etf_proxy")
         try:
-            hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
+            closes = self._download_close_series(resolved_symbol, start, end, index_type).dropna().sort_index()
+            sorted_closes = closes.dropna().sort_index()
+            hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in sorted_closes.items()]
+            reason = self._validate_history(hist, index_type)
+            if not reason and hist:
+                tail = [v for _, v in hist[-5:]]
+                if any(v <= 0 for v in tail):
+                    reason = "topix_tail_non_positive"
+                elif len(tail) >= 2:
+                    ratios = [tail[i] / tail[i - 1] for i in range(1, len(tail)) if tail[i - 1] > 0]
+                    if any(r < 0.4 or r > 1.6 for r in ratios):
+                        reason = "topix_tail_broken"
+            self._record_provider_attempt(
+                index_type,
+                provider="yfinance",
+                success=reason is None,
+                history=hist,
+                validation_reason=reason,
+                symbol=resolved_symbol,
+            )
             self._set_debug(
                 index_type,
-                tried_providers=["yfinance"],
+                resolved_symbol=resolved_symbol,
                 adopted_provider="yfinance",
                 adopted_symbol=resolved_symbol,
-                resolved_symbol=resolved_symbol,
-                index_mode="index",
+                source="real",
+                quality_check={"symbol": resolved_symbol, "result": "success", "reason": None},
                 fetch_error=None,
+                validation_reason=reason,
             )
-            return hist
-        except Exception as yf_exc:
-            yf_err = str(yf_exc)
-            if "403" in yf_err or "blocked" in yf_err.lower():
-                self._add_provider_reject_reason(index_type, f"yfinance:{resolved_symbol}:403_blocked")
-
-        stooq_symbol = "TOPIX"
-        try:
-            closes = fetch_history_from_stooq(stooq_symbol, start, end)
-            hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in closes.items()]
-            reason = self._validate_history(hist, index_type)
-            provider_reason = self._provider_acceptance_reason(hist, index_type)
-            if reason or provider_reason:
-                reject = provider_reason or reason or "invalid_history"
-                self._add_provider_reject_reason(index_type, f"stooq:{stooq_symbol}:{reject}")
-                self._set_debug(index_type, fetch_error="empty_dataframe" if "empty" in str(reject) else None)
-                raise ValueError(reject)
-            self._record_provider_attempt(
-                index_type,
-                provider="stooq",
-                success=True,
-                history=hist,
-                symbol=stooq_symbol,
-            )
-            self._set_last_source(index_type, "stooq")
-            self._update_last_good_history(index_type, hist, source_hint="stooq")
-            self._set_debug(
-                index_type,
-                tried_providers=["yfinance", "stooq"],
-                adopted_provider="stooq",
-                adopted_symbol=stooq_symbol,
-                resolved_symbol=stooq_symbol,
-                index_mode="index",
-                fetch_error=None,
-                quality_check={"symbol": stooq_symbol, "result": "success", "reason": None},
-            )
+            if reason:
+                raise ValueError(reason)
+            self._set_last_source(index_type, "real")
+            self._update_last_good_history(index_type, hist, source_hint="real")
             return hist
         except Exception as exc:
-            err_text = str(exc)
-            blocked = "403" in err_text or "blocked" in err_text.lower()
-            if blocked:
-                self._add_provider_reject_reason(index_type, "stooq:TOPIX:403_blocked")
+            self._set_debug(
+                index_type,
+                resolved_symbol=resolved_symbol,
+                adopted_provider=None,
+                fetch_error="empty_dataframe" if "empty" in str(exc).lower() else str(exc),
+                validation_reason=str(exc),
+            )
             self._record_provider_attempt(
                 index_type,
-                provider="stooq",
+                provider="yfinance",
                 success=False,
-                validation_reason=f"fetch_error:{err_text}",
-                fetch_error=err_text,
+                validation_reason=f"fetch_error:{exc}",
+                fetch_error=str(exc),
                 quality_result="fetch_error",
                 validation_result="failed",
                 adopted=False,
-                symbol=stooq_symbol,
-            )
-            self._set_debug(
-                index_type,
-                tried_providers=["yfinance", "stooq"],
-                adopted_provider=None,
-                fetch_error="empty_dataframe" if "empty" in err_text.lower() else err_text,
-                resolved_symbol=stooq_symbol,
-                index_mode="index",
+                symbol=resolved_symbol,
             )
             raise ValueError("data_unavailable") from exc
 
@@ -1764,6 +1748,10 @@ class SP500MarketService:
             combined_points=None,
             quality_flags=[],
             quality_summary="",
+            price_column_used=None,
+            raw_close_tail=[],
+            raw_adj_close_tail=[],
+            normalized_series_tail=[],
             tried_providers=[],
             adopted_provider=None,
             provider_reject_reasons=[],
@@ -1866,10 +1854,21 @@ class SP500MarketService:
                 len(fallback),
             )
             if index_type == "TOPIX":
-                source = "fallback"
+                source = "synthetic_fallback"
             else:
                 source = "synthetic"
             self._set_last_source(index_type, source)
+            if index_type == "TOPIX":
+                self._set_debug(
+                    index_type,
+                    adopted_provider="synthetic_fallback",
+                    source=source,
+                    price_column_used="synthetic_fallback",
+                    raw_close_tail=[],
+                    raw_adj_close_tail=[],
+                    normalized_series_tail=[v for _, v in fallback[-10:]],
+                    quality_check={"symbol": self._resolve_symbol(index_type), "result": "soft_ng_adopted", "reason": "yfinance_failed"},
+                )
             return fallback
         finally:
             history = self._last_good_history.get(index_type)
@@ -1959,10 +1958,21 @@ class SP500MarketService:
                 len(fallback),
             )
             if index_type == "TOPIX":
-                source = "fallback"
+                source = "synthetic_fallback"
             else:
                 source = "synthetic"
             self._set_last_source(index_type, source)
+            if index_type == "TOPIX":
+                self._set_debug(
+                    index_type,
+                    adopted_provider="synthetic_fallback",
+                    source=source,
+                    price_column_used="synthetic_fallback",
+                    raw_close_tail=[],
+                    raw_adj_close_tail=[],
+                    normalized_series_tail=[v for _, v in fallback[-10:]],
+                    quality_check={"symbol": self._resolve_symbol(index_type), "result": "soft_ng_adopted", "reason": "yfinance_failed"},
+                )
             return fallback
 
     def get_usd_jpy(self) -> float:

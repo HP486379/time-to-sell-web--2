@@ -262,7 +262,7 @@ def test_topix_uses_yfinance_primary_symbol(monkeypatch):
     assert debug.get("adopted_provider") == "yfinance"
     assert debug.get("adopted_symbol") == "1306.T"
     assert debug.get("resolved_symbol") == "1306.T"
-    assert debug.get("index_mode") == "index"
+    assert debug.get("index_mode") == "etf_proxy"
 
 
 def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
@@ -278,7 +278,7 @@ def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
     history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
 
     assert history == degraded
-    assert service.get_last_source("TOPIX") == "fallback"
+    assert service.get_last_source("TOPIX") == "synthetic_fallback"
 
 def test_topix_returns_fallback_when_yfinance_fails(monkeypatch):
     service = SP500MarketService(symbol="TEST")
@@ -287,24 +287,23 @@ def test_topix_returns_fallback_when_yfinance_fails(monkeypatch):
     fallback = _history_from_values("2024-01-01", [1500.0 + i for i in range(40)])
 
     monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("403 blocked")))
-    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("403 blocked")))
     monkeypatch.setattr(service, "_build_valid_fallback_history", lambda s, e, index_type: fallback)
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
 
     history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
     debug = service.get_last_debug("TOPIX")
     assert history == fallback
-    assert debug.get("resolved_symbol") == "TOPIX"
-    assert debug.get("index_mode") == "index"
-    assert service.get_last_source("TOPIX") == "fallback"
-    assert "stooq:TOPIX:403_blocked" in (debug.get("provider_reject_reasons") or [])
+    assert debug.get("resolved_symbol") == "1306.T"
+    assert debug.get("index_mode") == "etf_proxy"
+    assert debug.get("adopted_provider") == "synthetic_fallback"
+    assert service.get_last_source("TOPIX") == "synthetic_fallback"
 
 
 def test_topix_sets_empty_dataframe_fetch_error(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 1, 31)
-    monkeypatch.setattr("backend.services.sp500_market_service.fetch_history_from_stooq", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("empty dataframe")))
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("empty dataframe")))
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
 
     with pytest.raises(ValueError, match="data_unavailable"):
