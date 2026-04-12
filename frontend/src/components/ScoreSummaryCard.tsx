@@ -20,7 +20,7 @@ type EvalStatus = 'loading' | 'ready' | 'degraded' | 'error' | 'refreshing'
 
 interface ScoreSummaryCardProps {
   scores?: {
-    total: number
+    total: number | null
     label: string
   }
   zoneText?: string
@@ -57,7 +57,10 @@ function ScoreSummaryCard({
   const gradientEnd = isDark ? '#0c1b34' : alpha(theme.palette.secondary.light, 0.16)
   const showConfirmed = status === 'ready' || status === 'refreshing'
   const totalScore = scores?.total
-  const zoneTextValue = zoneText ?? getScoreZoneText(showConfirmed ? totalScore : undefined)
+  const isTotalScoreFinite = typeof totalScore === 'number' && Number.isFinite(totalScore)
+  const zoneTextValue =
+    zoneText ??
+    (showConfirmed && !isTotalScoreFinite ? 'データ取得失敗' : getScoreZoneText(showConfirmed && isTotalScoreFinite ? totalScore : undefined))
   const showDetailsToggle = Boolean(onShowDetails) && expanded !== undefined
 
   return (
@@ -131,7 +134,7 @@ function ScoreSummaryCard({
                   <Skeleton variant="text" width={120} height={44} />
                 ) : (
                   <Typography variant="h3" color="primary.main" fontWeight={700}>
-                    {showConfirmed && totalScore !== undefined ? totalScore.toFixed(1) : '--'}
+                    {showConfirmed && isTotalScoreFinite ? totalScore.toFixed(1) : 'N/A'}
                   </Typography>
                 )}
                 {status === 'refreshing' && <Chip size="small" color="info" label="更新中…" />}

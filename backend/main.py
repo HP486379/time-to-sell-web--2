@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
+import math
 import logging
 from enum import Enum
 
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 
@@ -21,6 +22,7 @@ from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
 import purchases_store
+from domain.index_type import normalize_index_type
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -67,23 +69,7 @@ class IndexType(str, Enum):
 
 def _normalize_index_type_value(value):
     """Normalize legacy index type names to canonical uppercase values."""
-    if isinstance(value, str):
-        v = value.lower().strip()
-        if v in {"nikkei", "nikkei225", "nikkei_225", "nikkei-225"}:
-            return "NIKKEI225"
-        if v in {"orukan", "allcountry"}:
-            return "ALLCOUNTRY"
-        if v in {"orukan_jpy", "allcountry_jpy"}:
-            return "ALLCOUNTRY_JPY"
-        if v == "sp500_jpy":
-            return "SP500_JPY"
-        if v == "topix":
-            return "TOPIX"
-        if v == "nifty50":
-            return "NIFTY50"
-        if v == "sp500":
-            return "SP500"
-    raise ValueError(f"Invalid index_type: {value}")
+    return normalize_index_type(value)
 
 
 class PositionRequest(BaseModel):
@@ -223,15 +209,43 @@ def _price_history_range():
 
 
 def _get_price_series(index_type: IndexType):
-    price_history = market_service.get_price_history(index_type.value)
+    price_history = market_service.get_price_history(index_type.value, allow_synthetic=False)
+    source = market_service.get_last_source(index_type.value)
+    restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
+    allowed_sources = {"nav_api", "stooq", "yfinance", "last_good", "bootstrap", "real", "real_fallback"}
+    if index_type in restricted and source not in allowed_sources:
+        raise PriceHistoryFetchError(f"price history unavailable for chart source={source}")
     return market_service.build_price_series_with_ma(price_history)
 
 
 def _get_price_series_or_503(index_type: IndexType):
     try:
         return _get_price_series(index_type)
-    except PriceHistoryFetchError:
+    except (PriceHistoryFetchError, ValueError):
         raise HTTPException(status_code=503, detail="Price data unavailable.")
+    except Exception as exc:
+        logger.warning("price-history failed index=%s error=%s", index_type.value, exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="Price data unavailable.")
+
+
+def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tuple[str, float]]) -> tuple[bool, str]:
+    if not price_history:
+        return False, "series_empty"
+    values = [float(v) for _, v in price_history]
+    nan_count = sum(1 for v in values if math.isnan(v))
+    if nan_count >= max(3, len(values) // 2):
+        return False, f"series_nan_heavy:{nan_count}/{len(values)}"
+    cleaned = [v for v in values if not math.isnan(v)]
+    if not cleaned:
+        return False, "series_all_nan"
+    if any(v <= 0 for v in cleaned[-5:]):
+        return False, "series_non_positive_tail"
+    if len(cleaned) >= 3:
+        tail = cleaned[-5:]
+        ratios = [tail[i] / tail[i - 1] for i in range(1, len(tail)) if tail[i - 1] > 0]
+        if any(r < 0.2 or r > 1.8 for r in ratios):
+            return False, "series_tail_broken"
+    return True, "series_ok"
 
 
 def _build_event_adjustment(target: date):
@@ -257,8 +271,12 @@ def _build_event_adjustment(target: date):
     return float(event_adjustment or 0.0), event_details, int(event_count or 0)
 
 
-def get_cached_snapshot(index_type: IndexType) -> dict:
-    key = index_type.value
+def get_cached_snapshot(
+    index_type: IndexType,
+    allow_synthetic: bool = False,
+    allow_low_quality: bool = False,
+) -> dict:
+    key = f"{index_type.value}|synth={int(allow_synthetic)}|lowq={int(allow_low_quality)}"
     now = datetime.now(timezone.utc)
     if key in _cached_at and (now - _cached_at[key]) < _cache_ttl:
         return _cached_snapshot[key]
@@ -266,11 +284,11 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
     snapshot = {
         "current_price": 0.0,
         "scores": {
-            "technical": 0.0,
-            "macro": 0.0,
-            "event_adjustment": 0.0,
-            "total": 0.0,
-            "label": get_label(0.0),
+            "technical": None,
+            "macro": None,
+            "event_adjustment": None,
+            "total": None,
+            "label": "N/A",
         },
         "technical_details": {},
         "macro_details": {},
@@ -278,19 +296,75 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         "event_count": 0,
         "price_history": [],
         "price_series": [],
+        "source": "real",
+        "adopted_provider": None,
     }
 
     try:
-        price_history = market_service.get_price_history(index_type.value)
+        price_history = market_service.get_price_history(
+            index_type.value,
+            allow_synthetic=allow_synthetic,
+            allow_low_quality=allow_low_quality,
+        )
     except PriceHistoryFetchError:
         logger.exception("[snapshot] price history unavailable for %s", index_type.value)
-        raise
+        snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["PRICE_HISTORY_UNAVAILABLE"]
+        return snapshot
+    except Exception:
+        logger.exception("[snapshot] price history failed for %s", index_type.value)
+        snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["PRICE_HISTORY_UNAVAILABLE"]
+        return snapshot
 
     if not price_history:
         logger.warning("[snapshot] empty price history for %s", index_type.value)
+        snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["PRICE_HISTORY_EMPTY"]
         return snapshot
 
     current_price = price_history[-1][1]
+    market_service._set_debug(
+        index_type.value,
+        scoring_input_series_head=price_history[:5],
+        scoring_input_series_tail=price_history[-10:],
+        scoring_input_series_points=len(price_history),
+    )
+    snapshot["source"] = market_service.get_last_source(index_type.value)
+    snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+    restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
+    allowed_sources = {"nav_api", "stooq", "yfinance", "last_good", "bootstrap", "real", "real_fallback"}
+    if allow_low_quality:
+        allowed_sources = set(allowed_sources) | {"fallback_degraded", "synthetic"}
+    if index_type in restricted and snapshot["source"] not in allowed_sources:
+        logger.warning(
+            "[snapshot] disallow non-real source for %s source=%s",
+            index_type.value,
+            snapshot["source"],
+        )
+        snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        snapshot["status"] = "error"
+        snapshot["reasons"] = ["SOURCE_DISALLOWED"]
+        return snapshot
+
+    eligible, reason = _is_debug_eligible_for_scoring(index_type, price_history)
+    if not eligible:
+        logger.warning("[snapshot] scoring blocked index=%s reason=%s", index_type.value, reason)
+        snapshot["source"] = "data_unavailable"
+        snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
+        market_service._set_debug(index_type.value, scoring_allowed=False, scoring_executed=False, scoring_block_reason=reason)
+        snapshot["debug"] = market_service.get_last_debug(index_type.value)
+        snapshot["status"] = "error"
+        snapshot["reasons"] = [reason]
+        return snapshot
+    market_service._set_debug(index_type.value, scoring_allowed=True, scoring_executed=True, scoring_block_reason=None)
 
     try:
         technical_score, technical_details = calculate_technical_score(price_history)
@@ -337,7 +411,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
             calculate_total_score(
                 period_technical_score,
                 macro_score,
-                event_adjustment,
+                0.0,
                 current_price=current_price,
                 ma500=ma500,
                 ma1000=ma1000,
@@ -361,7 +435,29 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
         + period_scores["mid"] * 0.3
         + period_scores["long"] * 0.5
     )
-    total_score = round(max(0.0, min(100.0, base_score + event_adjustment)), 2)
+    if (
+        period_scores["short"] >= 80
+        and period_scores["mid"] >= 80
+        and period_scores["long"] >= 80
+    ):
+        bonus = 10
+    elif (
+        period_scores["short"] >= 70
+        and period_scores["mid"] >= 70
+        and period_scores["long"] >= 70
+    ):
+        bonus = 6
+    elif period_scores["mid"] >= 70 and period_scores["long"] >= 70:
+        bonus = 3
+    elif period_scores["short"] >= 70 and period_scores["mid"] >= 70:
+        bonus = 2
+    else:
+        bonus = 0
+
+    total_score = round(
+        max(0.0, min(100.0, base_score + bonus + event_adjustment)),
+        2,
+    )
     label = get_label(total_score)
 
     snapshot.update(
@@ -374,6 +470,7 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
                 "total": total_score,
                 "label": label,
                 "period_total": period_scores["long"],
+                "bonus": bonus,
             },
             "period_scores": period_scores,
             "period_meta": {
@@ -390,9 +487,86 @@ def get_cached_snapshot(index_type: IndexType) -> dict:
             "price_series": market_service.build_price_series_with_ma(price_history),
         }
     )
+    market_service._set_debug(index_type.value, scores_total=total_score)
     _cached_snapshot[key] = snapshot
     _cached_at[key] = now
     return snapshot
+
+
+def _build_debug_payload(requested_index_type: str, used_index_type: str, snapshot: dict) -> dict:
+    service_debug = market_service.get_last_debug(used_index_type)
+    price_history = snapshot.get("price_history") or []
+    technical_score = float((snapshot.get("scores") or {}).get("technical", 0.0) or 0.0)
+    period_scores = snapshot.get("period_scores") or {}
+    return {
+        "requested_index_type": requested_index_type,
+        "used_index_type": used_index_type,
+        "source": snapshot.get("source"),
+        "source_confidence": service_debug.get("source_confidence"),
+        "symbol": service_debug.get("symbol"),
+        "resolved_symbol": service_debug.get("resolved_symbol"),
+        "price_column_used": service_debug.get("price_column_used"),
+        "raw_columns": service_debug.get("raw_columns"),
+        "raw_shape": service_debug.get("raw_shape"),
+        "raw_is_multiindex": service_debug.get("raw_is_multiindex"),
+        "raw_head": service_debug.get("raw_head"),
+        "raw_tail": service_debug.get("raw_tail"),
+        "raw_close_tail": service_debug.get("raw_close_tail"),
+        "raw_adj_close_tail": service_debug.get("raw_adj_close_tail"),
+        "normalized_series_head": service_debug.get("normalized_series_head"),
+        "normalized_series_tail": service_debug.get("normalized_series_tail"),
+        "series_sort_order": service_debug.get("series_sort_order"),
+        "fx_symbol": service_debug.get("fx_symbol"),
+        "price_type": service_debug.get("price_type"),
+        "fetch_error": service_debug.get("fetch_error"),
+        "fetch_error_repr": service_debug.get("fetch_error_repr"),
+        "fetch_error_trace": service_debug.get("fetch_error_trace"),
+        "validation_reason": service_debug.get("validation_reason"),
+        "quality_flags": service_debug.get("quality_flags"),
+        "quality_summary": service_debug.get("quality_summary"),
+        "tried_providers": service_debug.get("tried_providers"),
+        "adopted_provider": service_debug.get("adopted_provider"),
+        "provider_reject_reasons": service_debug.get("provider_reject_reasons"),
+        "quality_check": service_debug.get("quality_check"),
+        "price_history_points": service_debug.get("points", len(price_history)),
+        "combined_points": service_debug.get("combined_points"),
+        "first_close": service_debug.get("first_close"),
+        "last_close": service_debug.get("last_close"),
+        "one_year_return": service_debug.get("one_year_return"),
+        "scores_total": (snapshot.get("scores") or {}).get("total"),
+        "scoring_executed": service_debug.get("scoring_executed"),
+        "technical_score": technical_score,
+        "period_scores": {
+            "short": period_scores.get("short"),
+            "mid": period_scores.get("mid"),
+            "long": period_scores.get("long"),
+        },
+        "reasons": (snapshot.get("technical_details") or {}).get("reason"),
+    }
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+async def _resolve_debug_flag(request: Request, query_debug: bool) -> bool:
+    query_raw = request.query_params.get("debug")
+    body_raw = None
+    try:
+        payload = await request.json()
+        if isinstance(payload, dict):
+            body_raw = payload.get("debug")
+    except Exception:
+        body_raw = None
+    resolved = _truthy(query_debug) or _truthy(query_raw) or _truthy(body_raw)
+    logger.info("[evaluate] debug_resolved=%s query=%s body=%s", resolved, query_raw, body_raw)
+    return resolved
 
 
 # ======================
@@ -526,18 +700,64 @@ def run_backtest(payload: BacktestRequest):
 # ======================
 
 @app.post("/api/sp500/evaluate")
-def evaluate_sp500(position: PositionRequest):
+async def evaluate_sp500(
+    request: Request,
+    position: PositionRequest,
+    debug: bool = Query(False),
+    allow_low_quality: bool = Query(False),
+):
     try:
-        return get_cached_snapshot(position.index_type)
+        debug_flag = await _resolve_debug_flag(request, debug)
+        requested_index_type = str(position.index_type.value)
+        used_index_type = normalize_index_type(requested_index_type)
+        snapshot = get_cached_snapshot(
+            position.index_type,
+            allow_synthetic=debug_flag,
+            allow_low_quality=allow_low_quality,
+        )
+        debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
+        logger.info("[evaluate] debug=%s", debug_payload)
+        if debug_flag:
+            response = dict(snapshot)
+            response["source"] = debug_payload.get("source", response.get("source"))
+            response["adopted_provider"] = debug_payload.get("adopted_provider", response.get("adopted_provider"))
+            if debug_payload.get("provider_reject_reasons"):
+                response["provider_reject_reasons"] = debug_payload.get("provider_reject_reasons")
+            response["debug"] = debug_payload
+            return response
+        return snapshot
     except Exception:
         logger.exception("Evaluation failed")
         raise HTTPException(status_code=502, detail="Evaluation failed")
 
 
 @app.post("/api/evaluate")
-def evaluate(position: PositionRequest):
+async def evaluate(
+    request: Request,
+    position: PositionRequest,
+    debug: bool = Query(False),
+    allow_low_quality: bool = Query(False),
+):
     try:
-        return get_cached_snapshot(position.index_type)
+        debug_flag = await _resolve_debug_flag(request, debug)
+        requested_index_type = str(position.index_type.value)
+        used_index_type = normalize_index_type(requested_index_type)
+        snapshot = get_cached_snapshot(
+            position.index_type,
+            allow_synthetic=debug_flag,
+            allow_low_quality=allow_low_quality,
+        )
+        debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
+        logger.info("[evaluate] debug=%s", debug_payload)
+        if debug_flag:
+            response = dict(snapshot)
+            response["source"] = debug_payload.get("source", response.get("source"))
+            response["adopted_provider"] = debug_payload.get("adopted_provider", response.get("adopted_provider"))
+            if debug_payload.get("provider_reject_reasons"):
+                response["provider_reject_reasons"] = debug_payload.get("provider_reject_reasons")
+            response["debug"] = debug_payload
+            return response
+        return snapshot
     except Exception:
         logger.exception("Evaluation failed")
         raise HTTPException(status_code=502, detail="Evaluation failed")
