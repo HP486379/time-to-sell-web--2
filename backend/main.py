@@ -249,6 +249,9 @@ def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tu
     cleaned = [v for v in values if not math.isnan(v)]
     if not cleaned:
         return False, "series_all_nan"
+    simple_anomaly_reason = market_service.simple_anomaly_reason(price_history, index_type.value)
+    if simple_anomaly_reason:
+        return False, f"series_simple_anomaly:{simple_anomaly_reason}"
     if any(v <= 0 for v in cleaned[-5:]):
         return False, "series_non_positive_tail"
     if len(cleaned) >= 3:

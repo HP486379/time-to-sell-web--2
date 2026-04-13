@@ -58,7 +58,7 @@ def test_scoring_guard_rejects_topix_scale_switch():
     series += [("2024-03-22", 200.0), ("2024-03-23", 210.0), ("2024-03-24", 220.0), ("2024-03-25", 230.0), ("2024-03-26", 240.0)]
     ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.TOPIX, series)
     assert ok is False
-    assert "topix" in reason
+    assert ("topix" in reason) or reason.startswith("series_simple_anomaly:")
     monkeypatch.undo()
 
 
@@ -107,3 +107,17 @@ def test_build_debug_payload_includes_topix_runtime_fields(monkeypatch):
     assert payload["selected_function"] == "market_data_provider.fetch_history_from_yfinance_with_debug"
     assert payload["price_column_used"] == "adj_close"
     assert payload["adoption_reason"] == "topix_adj_close_only"
+
+
+def test_scoring_guard_rejects_simple_anomaly(monkeypatch):
+    monkeypatch.setattr(main.market_service, "get_last_debug", lambda *_: {"source": "real", "adopted_provider": "yfinance"})
+    monkeypatch.setattr(main.market_service, "get_last_source", lambda *_: "real")
+    monkeypatch.setattr(main.market_service, "simple_anomaly_reason", lambda *_: "daily_change_exceeded")
+
+    ok, reason = main._is_debug_eligible_for_scoring(
+        main.IndexType.TOPIX,
+        [("2024-01-01", 100.0), ("2024-01-02", 130.0)],
+    )
+
+    assert ok is False
+    assert reason.startswith("series_simple_anomaly:")

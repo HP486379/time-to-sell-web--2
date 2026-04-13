@@ -237,9 +237,10 @@ def test_topix_tail_outlier_is_relaxed():
     topix_reason = service._provider_acceptance_reason(topix_history, "TOPIX")
     sp500_reason = service._provider_acceptance_reason(sp500_history, "SP500")
 
-    assert topix_reason is None
+    assert topix_reason is not None
+    assert "simple_anomaly" in topix_reason
     assert sp500_reason is not None
-    assert "tail_outlier" in sp500_reason
+    assert ("tail_outlier" in sp500_reason) or ("simple_anomaly" in sp500_reason)
 
 
 def test_topix_uses_nav_api_when_available(monkeypatch):
@@ -341,6 +342,39 @@ def test_topix_1308_probe_rejected_with_reason(monkeypatch):
     probe = service.get_last_debug("TOPIX").get("topix_alt_probe", {})
     assert probe.get("result") == "rejected"
     assert probe.get("reason")
+
+
+def test_simple_anomaly_detects_daily_change_exceed():
+    service = SP500MarketService(symbol="TEST")
+    history = _history_from_values("2024-01-01", [100.0, 121.0, 122.0, 123.0])
+
+    reason = service.simple_anomaly_reason(history, "SP500")
+
+    assert reason is not None
+    assert "daily_change_exceeded" in reason
+
+
+def test_simple_anomaly_uses_index_specific_daily_threshold():
+    service = SP500MarketService(symbol="TEST")
+    topix_history = _history_from_values("2024-01-01", [100.0, 111.0, 112.0])  # +11%
+    nikkei_history = _history_from_values("2024-01-01", [100.0, 115.0, 116.0])  # +15%
+
+    topix_reason = service.simple_anomaly_reason(topix_history, "TOPIX")
+    nikkei_reason = service.simple_anomaly_reason(nikkei_history, "NIKKEI225")
+
+    assert topix_reason is not None
+    assert "daily_change_exceeded" in topix_reason
+    assert nikkei_reason is None
+
+
+def test_simple_anomaly_detects_recent_mean_deviation():
+    service = SP500MarketService(symbol="TEST")
+    history = _history_from_values("2024-01-01", [100.0, 110.0, 121.0, 133.1, 146.41, 168.37])
+
+    reason = service.simple_anomaly_reason(history, "SP500")
+
+    assert reason is not None
+    assert "recent_mean_deviation_exceeded" in reason
 
 
 def test_topix_does_not_use_fallback_without_quality_rejection(monkeypatch):

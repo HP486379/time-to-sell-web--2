@@ -118,6 +118,16 @@ class SP500MarketService:
             "ALLCOUNTRY_JPY": 2000000.0,
             "SP500_JPY": 600000.0,
         }
+        default_daily_anomaly_threshold = float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_DEFAULT", "0.20"))
+        self.daily_anomaly_threshold_map = {
+            "SP500": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_SP500", "0.15")),
+            "TOPIX": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_TOPIX", "0.10")),
+            "NIKKEI225": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_NIKKEI225", str(default_daily_anomaly_threshold))),
+            "NIFTY50": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_NIFTY50", str(default_daily_anomaly_threshold))),
+            "ALLCOUNTRY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_ALLCOUNTRY", str(default_daily_anomaly_threshold))),
+            "ALLCOUNTRY_JPY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_ALLCOUNTRY_JPY", str(default_daily_anomaly_threshold))),
+            "SP500_JPY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_SP500_JPY", str(default_daily_anomaly_threshold))),
+        }
 
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
         self._last_source: Dict[str, str] = {}
@@ -681,6 +691,9 @@ class SP500MarketService:
         min_points = 35 if index_type == "TOPIX" else 200
         if points < min_points:
             return f"provider_reject_points:points={points}<{min_points}"
+        simple_reason = self._simple_anomaly_reason(history, index_type=index_type)
+        if simple_reason:
+            return f"provider_reject_simple_anomaly:{simple_reason}"
         values = [v for _, v in history]
         nan_count = sum(1 for v in values if v is None or (isinstance(v, float) and math.isnan(v)))
         if nan_count > 0:
@@ -714,6 +727,37 @@ class SP500MarketService:
                     if tail_ratio < tail_min or tail_ratio > tail_max:
                         return f"provider_reject_tail_outlier:tail_ratio={tail_ratio:.4f}"
         return None
+
+    def _simple_anomaly_reason(self, history: List[Tuple[str, float]], *, index_type: str = "SP500") -> Optional[str]:
+        if len(history) < 3:
+            return None
+        normalized_index_type = self._normalize_index_type(index_type)
+        values = [float(v) for _, v in history]
+        daily_threshold = self.daily_anomaly_threshold_map.get(normalized_index_type, 0.20)
+        for i in range(1, len(values)):
+            prev = values[i - 1]
+            cur = values[i]
+            if prev <= 0:
+                continue
+            change = abs((cur - prev) / prev)
+            if change > daily_threshold:
+                return f"daily_change_exceeded:idx={i},change={change:.4f},threshold={daily_threshold:.4f}"
+        recent_window = 5
+        if len(values) >= recent_window + 1:
+            baseline = values[-(recent_window + 1) : -1]
+            baseline_mean = statistics.mean(baseline)
+            if baseline_mean > 0:
+                deviation = abs((values[-1] - baseline_mean) / baseline_mean)
+                deviation_threshold = 0.35 if normalized_index_type == "TOPIX" else 0.25
+                if deviation > deviation_threshold:
+                    return (
+                        f"recent_mean_deviation_exceeded:deviation={deviation:.4f},"
+                        f"threshold={deviation_threshold:.4f},window={recent_window}"
+                    )
+        return None
+
+    def simple_anomaly_reason(self, history: List[Tuple[str, float]], index_type: str = "SP500") -> Optional[str]:
+        return self._simple_anomaly_reason(history, index_type=self._normalize_index_type(index_type))
 
     def _log_validation_failure(
         self,

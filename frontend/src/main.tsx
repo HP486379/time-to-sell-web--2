@@ -31,7 +31,7 @@ const themeFactory = (mode: PaletteMode) =>
   })
 
 const Root = () => {
-  const [mode, setMode] = useState<PaletteMode>('dark')
+  const [mode, setMode] = useState<PaletteMode>('light')
   const theme = useMemo(() => themeFactory(mode), [mode])
 
   const handleToggleMode = () => setMode((prev) => (prev === 'dark' ? 'light' : 'dark'))
