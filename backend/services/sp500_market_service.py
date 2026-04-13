@@ -1466,7 +1466,7 @@ class SP500MarketService:
                     return f"one_year_return_out_of_range:{one_year_return:.2f}"
         return None
 
-    def _fetch_topix_with_provider_priority(self, start: date, end: date, *, allow_alt_probe: bool = False) -> List[Tuple[str, float]]:
+    def _fetch_topix_with_provider_priority(self, start: date, end: date, *, allow_alt_probe: bool = True) -> List[Tuple[str, float]]:
         index_type = "TOPIX"
         resolved_symbol = "1306.T"
         self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="etf_proxy", selected_function="topix_nav_only_mode")
@@ -1513,7 +1513,7 @@ class SP500MarketService:
             "symbol": os.getenv("TOPIX_ALT_SYMBOL", "1308.T"),
             "attempted": False,
             "result": "not_attempted",
-            "reason": "probe_disabled",
+            "reason": "nav_success",
             "price_column_used": None,
             "first_close": None,
             "last_close": None,
@@ -1527,24 +1527,26 @@ class SP500MarketService:
             try:
                 alt_series = self._download_close_series(alt_symbol, start, end, index_type).dropna().sort_index()
                 alt_hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in alt_series.items()]
-                validate_reason = self._validate_history(alt_hist, index_type)
-                provider_reason = self._provider_acceptance_reason(alt_hist, index_type)
-                alt_quality_reason = self._topix_alt_1308_quality_reason(alt_hist)
-                reject_reason = validate_reason or provider_reason or alt_quality_reason
                 one_year_return = None
                 if len(alt_hist) >= 252:
                     base_1y = alt_hist[-252][1]
                     if base_1y > 0:
                         one_year_return = round((alt_hist[-1][1] / base_1y - 1.0) * 100.0, 2)
+                probe_price_column_used = self.get_last_debug(index_type).get("price_column_used")
                 topix_alt_probe.update(
                     {
-                        "price_column_used": self.get_last_debug(index_type).get("price_column_used"),
+                        "price_column_used": probe_price_column_used,
                         "first_close": alt_hist[0][1] if alt_hist else None,
                         "last_close": alt_hist[-1][1] if alt_hist else None,
                         "one_year_return": one_year_return,
                         "price_series_len": len(alt_hist),
                     }
                 )
+                validate_reason = self._validate_history(alt_hist, index_type)
+                provider_reason = self._provider_acceptance_reason(alt_hist, index_type)
+                alt_quality_reason = self._topix_alt_1308_quality_reason(alt_hist)
+                price_column_reason = None if probe_price_column_used == "adj_close" else f"price_column_not_adj_close:{probe_price_column_used}"
+                reject_reason = validate_reason or provider_reason or alt_quality_reason or price_column_reason
                 self._record_provider_attempt(
                     index_type,
                     provider="yfinance_alt_1308",
@@ -1555,8 +1557,22 @@ class SP500MarketService:
                 )
                 if reject_reason is None:
                     topix_alt_probe.update({"result": "adopted_candidate", "reason": None})
-                else:
-                    topix_alt_probe.update({"result": "rejected", "reason": reject_reason})
+                    self._set_debug(
+                        index_type,
+                        resolved_symbol=alt_symbol,
+                        adopted_provider="yfinance_alt_1308",
+                        adopted_symbol=alt_symbol,
+                        source="real",
+                        adoption_reason="topix_alt_1308_promoted",
+                        provider_path=self.get_last_debug(index_type).get("provider_path"),
+                        quality_check={"symbol": alt_symbol, "result": "success", "reason": None},
+                        topix_alt_probe=topix_alt_probe,
+                    )
+                    self._set_last_source(index_type, "real")
+                    self._update_last_good_history(index_type, alt_hist, source_hint="real")
+                    return alt_hist
+                topix_alt_probe.update({"result": "rejected", "reason": reject_reason})
+                self._add_provider_reject_reason(index_type, f"yfinance_alt_1308:{alt_symbol}:{reject_reason}")
             except Exception as alt_exc:
                 self._record_provider_attempt(
                     index_type,
@@ -1566,6 +1582,7 @@ class SP500MarketService:
                     symbol=alt_symbol,
                 )
                 topix_alt_probe.update({"result": "error", "reason": str(alt_exc)})
+                self._add_provider_reject_reason(index_type, f"yfinance_alt_1308:{alt_symbol}:fetch_error:{alt_exc}")
 
         self._record_provider_attempt(
             index_type,
@@ -1862,7 +1879,7 @@ class SP500MarketService:
             if index_type == "SP500":
                 return self._fetch_sp500_with_provider_priority(start, today)
             if index_type == "TOPIX":
-                return self._fetch_topix_with_provider_priority(start, today, allow_alt_probe=allow_synthetic)
+                return self._fetch_topix_with_provider_priority(start, today, allow_alt_probe=True)
             if index_type == "SP500_JPY":
                 return self._fetch_sp500_jpy_with_provider_priority(start, today)
 
@@ -2010,7 +2027,7 @@ class SP500MarketService:
         try:
             price_type = self._resolve_price_type(index_type)
             if index_type == "TOPIX":
-                return self._fetch_topix_with_provider_priority(start, end, allow_alt_probe=allow_fallback)
+                return self._fetch_topix_with_provider_priority(start, end, allow_alt_probe=True)
             if price_type == "index_jpy":
                 return self._get_validated_index_jpy_history(start, end, index_type)
 

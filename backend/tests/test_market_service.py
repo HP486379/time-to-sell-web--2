@@ -260,7 +260,7 @@ def test_topix_uses_nav_api_when_available(monkeypatch):
     assert debug.get("index_mode") == "etf_proxy"
 
 
-def test_topix_1308_probe_is_debug_candidate_only(monkeypatch):
+def test_topix_1308_probe_is_adopted_when_nav_fails(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
     dates = pd.to_datetime([d for d, _ in points])
@@ -268,31 +268,63 @@ def test_topix_1308_probe_is_debug_candidate_only(monkeypatch):
 
     monkeypatch.setattr(service, "_fetch_nav_history", lambda *args, **kwargs: None)
 
-    def fake_download(symbol, s, e, index_type=None):
-        assert symbol == "1308.T"
-        return pd.Series(values, index=dates)
+    raw_meta = {
+        "selected_price_column": "Adj Close",
+        "column_names": ["Open", "High", "Low", "Close", "Adj Close", "Volume"],
+        "raw_shape": [260, 6],
+        "raw_is_multiindex": False,
+        "raw_head_ohlcv": [],
+        "raw_tail_ohlcv": [],
+        "raw_close_head5": [2000.0],
+        "raw_close_tail10": [2259.0],
+        "raw_adj_close_head5": [2000.0],
+        "raw_adj_close_tail10": [2259.0],
+        "source_path": "direct",
+    }
+    monkeypatch.setattr(
+        "backend.services.sp500_market_service.fetch_history_from_yfinance_with_debug",
+        lambda symbol, s, e, prefer_adj_close=False: (pd.Series(values, index=dates), raw_meta),
+    )
 
-    monkeypatch.setattr(service, "_download_close_series", fake_download)
-
-    with pytest.raises(ValueError):
-        service.get_price_history(index_type="TOPIX", allow_synthetic=True)
+    history = service.get_price_history(index_type="TOPIX", allow_synthetic=False)
     debug = service.get_last_debug("TOPIX")
 
-    assert service.get_last_source("TOPIX") == "unavailable"
-    assert debug.get("adopted_provider") is None
+    assert history == points
+    assert service.get_last_source("TOPIX") == "real"
+    assert debug.get("adopted_provider") == "yfinance_alt_1308"
+    assert debug.get("adopted_symbol") == "1308.T"
     assert debug.get("topix_alt_probe", {}).get("result") == "adopted_candidate"
     assert debug.get("topix_alt_probe", {}).get("price_series_len") == 260
 
 
-def test_topix_1308_probe_is_not_used_without_debug(monkeypatch):
+def test_topix_1308_probe_is_used_without_debug_when_nav_fails(monkeypatch):
     service = SP500MarketService(symbol="TEST")
+    points = _history_from_values("2024-01-01", [2100.0 + i for i in range(260)])
+    dates = pd.to_datetime([d for d, _ in points])
+    values = [v for _, v in points]
     monkeypatch.setattr(service, "_fetch_nav_history", lambda *args, **kwargs: None)
-    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should_not_call")))
+    raw_meta = {
+        "selected_price_column": "Adj Close",
+        "column_names": ["Open", "High", "Low", "Close", "Adj Close", "Volume"],
+        "raw_shape": [260, 6],
+        "raw_is_multiindex": False,
+        "raw_head_ohlcv": [],
+        "raw_tail_ohlcv": [],
+        "raw_close_head5": [2100.0],
+        "raw_close_tail10": [2359.0],
+        "raw_adj_close_head5": [2100.0],
+        "raw_adj_close_tail10": [2359.0],
+        "source_path": "direct",
+    }
+    monkeypatch.setattr(
+        "backend.services.sp500_market_service.fetch_history_from_yfinance_with_debug",
+        lambda symbol, s, e, prefer_adj_close=False: (pd.Series(values, index=dates), raw_meta),
+    )
 
-    with pytest.raises(ValueError):
-        service.get_price_history(index_type="TOPIX", allow_synthetic=False)
-    assert service.get_last_source("TOPIX") == "unavailable"
-    assert service.get_last_debug("TOPIX").get("topix_alt_probe", {}).get("result") == "not_attempted"
+    history = service.get_price_history(index_type="TOPIX", allow_synthetic=False)
+    assert history == points
+    assert service.get_last_source("TOPIX") == "real"
+    assert service.get_last_debug("TOPIX").get("topix_alt_probe", {}).get("attempted") is True
 
 
 def test_topix_1308_probe_rejected_with_reason(monkeypatch):
