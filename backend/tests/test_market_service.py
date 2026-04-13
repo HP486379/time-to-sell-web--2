@@ -22,7 +22,7 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
     service = SP500MarketService(symbol="TEST")
 
     dates = pd.date_range("2020-01-01", periods=35, freq="B")
-    df = pd.DataFrame({"Close": [1000.0 + i for i in range(35)]}, index=dates)
+    df = pd.DataFrame({"Adj Close": [1000.0 + i for i in range(35)]}, index=dates)
 
     def fake_download(symbol, start, end, interval, **kwargs):  # pragma: no cover - simple stub
         return df
@@ -30,7 +30,7 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
     monkeypatch.setattr(yf, "download", fake_download)
     monkeypatch.setattr(
         "services.market_data_provider._fetch_from_gateway",
-        lambda provider, symbol, start, end: df["Close"],
+        lambda provider, symbol, start, end: df["Adj Close"],
     )
 
     history = service.get_price_history_range(dates[0].date(), dates[-1].date(), allow_fallback=False, index_type="TOPIX")
@@ -265,7 +265,7 @@ def test_topix_uses_yfinance_primary_symbol(monkeypatch):
     assert debug.get("index_mode") == "etf_proxy"
 
 
-def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
+def test_topix_does_not_use_fallback_without_quality_rejection(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
@@ -275,28 +275,25 @@ def test_topix_returns_fallback_without_quality_rejection(monkeypatch):
     monkeypatch.setattr(service, "_fallback_history", lambda s, e, index_type: degraded)
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
 
-    history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
+    with pytest.raises(ValueError):
+        service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
+    assert service.get_last_source("TOPIX") == "unavailable"
 
-    assert history == degraded
-    assert service.get_last_source("TOPIX") == "synthetic_fallback"
-
-def test_topix_returns_fallback_when_yfinance_fails(monkeypatch):
+def test_topix_returns_unavailable_when_yfinance_fails(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 3, 31)
-    fallback = _history_from_values("2024-01-01", [1500.0 + i for i in range(40)])
 
     monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("403 blocked")))
-    monkeypatch.setattr(service, "_build_valid_fallback_history", lambda s, e, index_type: fallback)
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
 
-    history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
+    with pytest.raises(ValueError):
+        service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
     debug = service.get_last_debug("TOPIX")
-    assert history == fallback
     assert debug.get("resolved_symbol") == "1306.T"
     assert debug.get("index_mode") == "etf_proxy"
-    assert debug.get("adopted_provider") == "synthetic_fallback"
-    assert service.get_last_source("TOPIX") == "synthetic_fallback"
+    assert debug.get("adopted_provider") is None
+    assert service.get_last_source("TOPIX") == "unavailable"
 
 
 def test_topix_sets_empty_dataframe_fetch_error(monkeypatch):

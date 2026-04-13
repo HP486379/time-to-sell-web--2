@@ -1820,6 +1820,15 @@ class SP500MarketService:
         except Exception as exc:
             self._set_debug(index_type, fetch_error=str(exc))
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
+            if index_type == "TOPIX":
+                self._set_last_source(index_type, "unavailable")
+                self._set_debug(
+                    index_type,
+                    source="unavailable",
+                    adopted_provider=None,
+                    adoption_reason="topix_adj_close_required",
+                )
+                raise
             last_good = self._get_valid_last_good_history(index_type)
             if last_good:
                 logger.info(
@@ -1941,6 +1950,15 @@ class SP500MarketService:
             return self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
         except Exception as exc:
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
+            if index_type == "TOPIX":
+                self._set_last_source(index_type, "unavailable")
+                self._set_debug(
+                    index_type,
+                    source="unavailable",
+                    adopted_provider=None,
+                    adoption_reason="topix_adj_close_required",
+                )
+                raise
             last_good = self._get_valid_last_good_history(index_type)
             if last_good:
                 logger.info(
