@@ -740,7 +740,12 @@ class SP500MarketService:
         if len(history) < 60:
             return None
         normalized_index_type = self._normalize_index_type(index_type)
-        values = [float(v) for _, v in history]
+        values: List[float] = []
+        for _, v in history:
+            try:
+                values.append(float(v))
+            except (TypeError, ValueError):
+                return "invalid_numeric_value"
         daily_threshold = self.daily_anomaly_threshold_map.get(normalized_index_type, 0.20)
         for i in range(1, len(values)):
             prev = values[i - 1]

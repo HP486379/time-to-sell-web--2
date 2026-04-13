@@ -242,14 +242,26 @@ def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tu
         return False, f"scoring_source_not_allowed:source={source},provider={adopted_provider}"
     if not price_history:
         return False, "series_empty"
-    values = [float(v) for _, v in price_history]
+    values: List[float] = []
+    invalid_value_count = 0
+    for _, v in price_history:
+        try:
+            values.append(float(v))
+        except (TypeError, ValueError):
+            invalid_value_count += 1
+    if invalid_value_count > 0:
+        return False, f"series_invalid_values:{invalid_value_count}"
     nan_count = sum(1 for v in values if math.isnan(v))
     if nan_count >= max(3, len(values) // 2):
         return False, f"series_nan_heavy:{nan_count}/{len(values)}"
     cleaned = [v for v in values if not math.isnan(v)]
     if not cleaned:
         return False, "series_all_nan"
-    simple_anomaly_reason = market_service.simple_anomaly_reason(price_history, index_type.value)
+    try:
+        simple_anomaly_reason = market_service.simple_anomaly_reason(price_history, index_type.value)
+    except Exception as exc:
+        logger.warning("simple_anomaly_reason failed index=%s error=%s", index_type.value, exc, exc_info=True)
+        return False, f"simple_anomaly_eval_error:{exc}"
     if simple_anomaly_reason:
         return False, f"series_simple_anomaly:{simple_anomaly_reason}"
     if any(v <= 0 for v in cleaned[-5:]):
@@ -778,6 +790,7 @@ async def evaluate_sp500(
     debug: bool = Query(False),
     allow_low_quality: bool = Query(False),
 ):
+    debug_flag = False
     try:
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
@@ -815,9 +828,31 @@ async def evaluate_sp500(
             response["debug"] = debug_payload
             return response
         return snapshot
-    except Exception:
-        logger.exception("Evaluation failed")
-        raise HTTPException(status_code=502, detail="Evaluation failed")
+    except Exception as exc:
+        service_debug = market_service.get_last_debug("SP500")
+        logger.exception(
+            "Evaluation failed requested_index_type=%s symbol=%s provider_path=%s rows=%s columns=%s first_date=%s last_date=%s error=%s",
+            "SP500",
+            service_debug.get("resolved_symbol") or service_debug.get("symbol"),
+            service_debug.get("provider_path"),
+            service_debug.get("points"),
+            service_debug.get("raw_columns"),
+            service_debug.get("first_date"),
+            service_debug.get("last_date"),
+            exc,
+        )
+        payload = {
+            "status": "error",
+            "reasons": [f"EVALUATION_EXCEPTION:{type(exc).__name__}"],
+            "source": "data_unavailable",
+            "adopted_provider": service_debug.get("adopted_provider"),
+            "scores": {"technical": None, "macro": None, "event_adjustment": None, "total": None, "label": "N/A"},
+            "price_history": [],
+            "price_series": [],
+        }
+        if debug_flag:
+            payload["debug"] = _build_debug_payload("SP500", "SP500", payload)
+        return payload
 
 
 @app.post("/api/evaluate")
@@ -827,6 +862,7 @@ async def evaluate(
     debug: bool = Query(False),
     allow_low_quality: bool = Query(False),
 ):
+    debug_flag = False
     try:
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
@@ -864,9 +900,37 @@ async def evaluate(
             response["debug"] = debug_payload
             return response
         return snapshot
-    except Exception:
-        logger.exception("Evaluation failed")
-        raise HTTPException(status_code=502, detail="Evaluation failed")
+    except Exception as exc:
+        requested = "SP500"
+        try:
+            requested = str(position.index_type.value)
+        except Exception:
+            requested = "UNKNOWN"
+        used = normalize_index_type(requested)
+        service_debug = market_service.get_last_debug(used)
+        logger.exception(
+            "Evaluation failed requested_index_type=%s symbol=%s provider_path=%s rows=%s columns=%s first_date=%s last_date=%s error=%s",
+            requested,
+            service_debug.get("resolved_symbol") or service_debug.get("symbol"),
+            service_debug.get("provider_path"),
+            service_debug.get("points"),
+            service_debug.get("raw_columns"),
+            service_debug.get("first_date"),
+            service_debug.get("last_date"),
+            exc,
+        )
+        payload = {
+            "status": "error",
+            "reasons": [f"EVALUATION_EXCEPTION:{type(exc).__name__}"],
+            "source": "data_unavailable",
+            "adopted_provider": service_debug.get("adopted_provider"),
+            "scores": {"technical": None, "macro": None, "event_adjustment": None, "total": None, "label": "N/A"},
+            "price_history": [],
+            "price_series": [],
+        }
+        if debug_flag:
+            payload["debug"] = _build_debug_payload(requested, used, payload)
+        return payload
 
 
 # ======================
