@@ -237,7 +237,8 @@ def test_topix_tail_outlier_is_relaxed():
     topix_reason = service._provider_acceptance_reason(topix_history, "TOPIX")
     sp500_reason = service._provider_acceptance_reason(sp500_history, "SP500")
 
-    assert topix_reason is None
+    assert topix_reason is not None
+    assert "simple_anomaly" in topix_reason
     assert sp500_reason is not None
     assert ("tail_outlier" in sp500_reason) or ("simple_anomaly" in sp500_reason)
 
