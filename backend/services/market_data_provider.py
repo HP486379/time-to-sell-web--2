@@ -97,12 +97,9 @@ def _extract_topix_series_strict(hist: pd.DataFrame | pd.Series) -> tuple[pd.Ser
     frame = _flatten_ohlcv_frame(hist)
     if frame.empty:
         raise ValueError("empty_dataframe")
-    if "Adj Close" in frame.columns:
-        selected = "Adj Close"
-    elif "Close" in frame.columns:
-        selected = "Close"
-    else:
-        raise ValueError("close column missing")
+    if "Adj Close" not in frame.columns:
+        raise ValueError("adj_close_missing")
+    selected = "Adj Close"
     series = frame[selected]
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
@@ -299,7 +296,11 @@ def fetch_history_from_yfinance(symbol: str, start: date, end: date, session: re
 def fetch_history_from_yfinance_with_debug(
     symbol: str, start: date, end: date, *, prefer_adj_close: bool = False
 ) -> tuple[pd.Series, dict]:
-    gateway_series = _fetch_from_gateway("yfinance", symbol, start, end)
+    # TOPIX(1306.T) は Adj Close 専用のため、close-only の gateway 経路は使わない。
+    if symbol.upper() == "1306.T":
+        gateway_series = None
+    else:
+        gateway_series = _fetch_from_gateway("yfinance", symbol, start, end)
     if gateway_series is not None:
         meta = {
             "source_path": "gateway",

@@ -118,6 +118,16 @@ class SP500MarketService:
             "ALLCOUNTRY_JPY": 2000000.0,
             "SP500_JPY": 600000.0,
         }
+        default_daily_anomaly_threshold = float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_DEFAULT", "0.20"))
+        self.daily_anomaly_threshold_map = {
+            "SP500": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_SP500", "0.15")),
+            "TOPIX": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_TOPIX", "0.20")),
+            "NIKKEI225": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_NIKKEI225", str(default_daily_anomaly_threshold))),
+            "NIFTY50": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_NIFTY50", str(default_daily_anomaly_threshold))),
+            "ALLCOUNTRY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_ALLCOUNTRY", str(default_daily_anomaly_threshold))),
+            "ALLCOUNTRY_JPY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_ALLCOUNTRY_JPY", str(default_daily_anomaly_threshold))),
+            "SP500_JPY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_SP500_JPY", str(default_daily_anomaly_threshold))),
+        }
 
         self._last_good_history: Dict[str, List[Tuple[str, float]]] = {}
         self._last_source: Dict[str, str] = {}
@@ -383,12 +393,15 @@ class SP500MarketService:
     def _download_close_series(self, symbol: str, start: date, end: date, index_type: Optional[str] = None) -> pd.Series:
         normalized_index_type = self._normalize_index_type(index_type or "SP500")
         prefer_adj_close = normalized_index_type == "TOPIX"
+        selected_function = "market_data_provider.fetch_history_from_yfinance_with_debug"
         try:
             closes, raw_meta = fetch_history_from_yfinance_with_debug(symbol, start, end, prefer_adj_close=prefer_adj_close)
         except Exception as exc:
             raw_meta = getattr(exc, "debug_meta", {}) if hasattr(exc, "debug_meta") else {}
             self._set_debug(
                 normalized_index_type,
+                selected_function=selected_function,
+                provider_path=raw_meta.get("source_path", "direct"),
                 resolved_symbol=symbol,
                 raw_columns=raw_meta.get("column_names"),
                 raw_shape=raw_meta.get("raw_shape"),
@@ -401,6 +414,8 @@ class SP500MarketService:
         price_column_used = str(raw_meta.get("selected_price_column", "")).lower().replace(" ", "_") or "close"
         self._set_debug(
             normalized_index_type,
+            selected_function=selected_function,
+            provider_path=raw_meta.get("source_path", "direct"),
             resolved_symbol=symbol,
             price_column_used=price_column_used,
             raw_columns=raw_meta.get("column_names", []),
@@ -676,6 +691,17 @@ class SP500MarketService:
         min_points = 35 if index_type == "TOPIX" else 200
         if points < min_points:
             return f"provider_reject_points:points={points}<{min_points}"
+        simple_reason = self._simple_anomaly_reason(history, index_type=index_type)
+        if simple_reason:
+            logger.warning(
+                "Simple anomaly reject index=%s reason=%s points=%d first=%s last=%s",
+                index_type,
+                simple_reason,
+                points,
+                history[0][1] if history else None,
+                history[-1][1] if history else None,
+            )
+            return f"provider_reject_simple_anomaly:{simple_reason}"
         values = [v for _, v in history]
         nan_count = sum(1 for v in values if v is None or (isinstance(v, float) and math.isnan(v)))
         if nan_count > 0:
@@ -709,6 +735,37 @@ class SP500MarketService:
                     if tail_ratio < tail_min or tail_ratio > tail_max:
                         return f"provider_reject_tail_outlier:tail_ratio={tail_ratio:.4f}"
         return None
+
+    def _simple_anomaly_reason(self, history: List[Tuple[str, float]], *, index_type: str = "SP500") -> Optional[str]:
+        if len(history) < 60:
+            return None
+        normalized_index_type = self._normalize_index_type(index_type)
+        values = [float(v) for _, v in history]
+        daily_threshold = self.daily_anomaly_threshold_map.get(normalized_index_type, 0.20)
+        for i in range(1, len(values)):
+            prev = values[i - 1]
+            cur = values[i]
+            if prev <= 0:
+                continue
+            change = abs((cur - prev) / prev)
+            if change > daily_threshold:
+                return f"daily_change_exceeded:idx={i},change={change:.4f},threshold={daily_threshold:.4f}"
+        recent_window = 5
+        if len(values) >= recent_window + 1:
+            baseline = values[-(recent_window + 1) : -1]
+            baseline_mean = statistics.mean(baseline)
+            if baseline_mean > 0:
+                deviation = abs((values[-1] - baseline_mean) / baseline_mean)
+                deviation_threshold = 0.35 if normalized_index_type == "TOPIX" else 0.25
+                if deviation > deviation_threshold:
+                    return (
+                        f"recent_mean_deviation_exceeded:deviation={deviation:.4f},"
+                        f"threshold={deviation_threshold:.4f},window={recent_window}"
+                    )
+        return None
+
+    def simple_anomaly_reason(self, history: List[Tuple[str, float]], index_type: str = "SP500") -> Optional[str]:
+        return self._simple_anomaly_reason(history, index_type=self._normalize_index_type(index_type))
 
     def _log_validation_failure(
         self,
@@ -1438,66 +1495,194 @@ class SP500MarketService:
         self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"])
         return hist
 
-    def _fetch_topix_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
+    def _topix_alt_1308_quality_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
+        if not history:
+            return "empty_history"
+        if len(history) < 200:
+            return f"insufficient_points:{len(history)}"
+        quality_status, quality_reason = self._quality_check_history(history)
+        if quality_status != "ok":
+            return f"{quality_status}:{self._quality_summary(quality_reason)}"
+        values = [float(v) for _, v in history]
+        min_v = min(values)
+        max_v = max(values)
+        if min_v <= 0:
+            return "non_positive_value"
+        if (max_v / min_v) > 8.0:
+            return "scale_collapse"
+        if len(values) >= 252:
+            base = values[-252]
+            if base > 0:
+                one_year_return = (values[-1] / base - 1.0) * 100.0
+                if one_year_return < -50.0 or one_year_return > 150.0:
+                    return f"one_year_return_out_of_range:{one_year_return:.2f}"
+        return None
+
+    def _fetch_topix_with_provider_priority(self, start: date, end: date, *, allow_alt_probe: bool = True) -> List[Tuple[str, float]]:
         index_type = "TOPIX"
         resolved_symbol = "1306.T"
-        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="etf_proxy")
-        try:
-            closes = self._download_close_series(resolved_symbol, start, end, index_type).dropna().sort_index()
-            sorted_closes = closes.dropna().sort_index()
-            hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in sorted_closes.items()]
-            reason = self._validate_history(hist, index_type)
-            if not reason and hist:
-                tail = [v for _, v in hist[-5:]]
-                if any(v <= 0 for v in tail):
-                    reason = "topix_tail_non_positive"
-                elif len(tail) >= 2:
-                    ratios = [tail[i] / tail[i - 1] for i in range(1, len(tail)) if tail[i - 1] > 0]
-                    if any(r < 0.4 or r > 1.6 for r in ratios):
-                        reason = "topix_tail_broken"
+        self._set_debug(index_type, resolved_symbol=resolved_symbol, index_mode="etf_proxy", selected_function="topix_nav_only_mode")
+        nav_hist = self._fetch_nav_history(start, end, index_type)
+        if nav_hist:
+            nav_hist = [(d, round(v, 2)) for d, v in nav_hist]
+            reason = self._validate_history(nav_hist, index_type)
             self._record_provider_attempt(
                 index_type,
-                provider="yfinance",
+                provider="nav_api",
                 success=reason is None,
-                history=hist,
+                history=nav_hist,
                 validation_reason=reason,
                 symbol=resolved_symbol,
             )
+            if reason is None:
+                self._set_debug(
+                    index_type,
+                    resolved_symbol=resolved_symbol,
+                    provider_path="nav_api",
+                    adopted_provider="nav_api",
+                    adopted_symbol=resolved_symbol,
+                    source="real",
+                    adoption_reason="topix_nav_api_only",
+                    quality_check={"symbol": resolved_symbol, "result": "success", "reason": None},
+                    fetch_error=None,
+                    validation_reason=None,
+                )
+                self._set_last_source(index_type, "real")
+                self._update_last_good_history(index_type, nav_hist, source_hint="real")
+                return nav_hist
             self._set_debug(
                 index_type,
                 resolved_symbol=resolved_symbol,
-                adopted_provider="yfinance",
-                adopted_symbol=resolved_symbol,
-                source="real",
-                quality_check={"symbol": resolved_symbol, "result": "success", "reason": None},
-                fetch_error=None,
-                validation_reason=reason,
-            )
-            if reason:
-                raise ValueError(reason)
-            self._set_last_source(index_type, "real")
-            self._update_last_good_history(index_type, hist, source_hint="real")
-            return hist
-        except Exception as exc:
-            self._set_debug(
-                index_type,
-                resolved_symbol=resolved_symbol,
+                provider_path="nav_api",
                 adopted_provider=None,
-                fetch_error="empty_dataframe" if "empty" in str(exc).lower() else str(exc),
-                validation_reason=str(exc),
+                fetch_error=reason,
+                validation_reason=reason,
+                adoption_reason="topix_nav_api_rejected",
             )
-            self._record_provider_attempt(
-                index_type,
-                provider="yfinance",
-                success=False,
-                validation_reason=f"fetch_error:{exc}",
-                fetch_error=str(exc),
-                quality_result="fetch_error",
-                validation_result="failed",
-                adopted=False,
-                symbol=resolved_symbol,
-            )
-            raise ValueError("data_unavailable") from exc
+            raise ValueError("data_unavailable")
+
+        topix_alt_probe = {
+            "symbol": os.getenv("TOPIX_ALT_SYMBOL", "1308.T"),
+            "attempted": False,
+            "result": "not_attempted",
+            "reason": "nav_success",
+            "price_column_used": None,
+            "first_close": None,
+            "last_close": None,
+            "one_year_return": None,
+            "price_series_len": 0,
+        }
+        if allow_alt_probe:
+            alt_symbol = os.getenv("TOPIX_ALT_SYMBOL", "1308.T")
+            topix_alt_probe["symbol"] = alt_symbol
+            topix_alt_probe["attempted"] = True
+            try:
+                alt_series = self._download_close_series(alt_symbol, start, end, index_type).dropna().sort_index()
+                alt_hist = [(self._to_iso_date(idx), round(float(v), 2)) for idx, v in alt_series.items()]
+                one_year_return = None
+                if len(alt_hist) >= 252:
+                    base_1y = alt_hist[-252][1]
+                    if base_1y > 0:
+                        one_year_return = round((alt_hist[-1][1] / base_1y - 1.0) * 100.0, 2)
+                probe_price_column_used = self.get_last_debug(index_type).get("price_column_used")
+                topix_alt_probe.update(
+                    {
+                        "price_column_used": probe_price_column_used,
+                        "first_close": alt_hist[0][1] if alt_hist else None,
+                        "last_close": alt_hist[-1][1] if alt_hist else None,
+                        "one_year_return": one_year_return,
+                        "price_series_len": len(alt_hist),
+                    }
+                )
+                validate_reason = self._validate_history(alt_hist, index_type)
+                provider_reason = self._provider_acceptance_reason(alt_hist, index_type)
+                alt_quality_reason = self._topix_alt_1308_quality_reason(alt_hist)
+                price_column_reason = None if probe_price_column_used == "adj_close" else f"price_column_not_adj_close:{probe_price_column_used}"
+                reject_reason = validate_reason or provider_reason or alt_quality_reason or price_column_reason
+                self._record_provider_attempt(
+                    index_type,
+                    provider="yfinance_alt_1308",
+                    success=reject_reason is None,
+                    history=alt_hist,
+                    validation_reason=reject_reason,
+                    symbol=alt_symbol,
+                )
+                if reject_reason is None:
+                    topix_alt_probe.update({"result": "adopted_candidate", "reason": None})
+                    self._set_debug(
+                        index_type,
+                        resolved_symbol=alt_symbol,
+                        adopted_provider="yfinance_alt_1308",
+                        adopted_symbol=alt_symbol,
+                        source="real",
+                        adoption_reason="topix_alt_1308_promoted",
+                        provider_path=self.get_last_debug(index_type).get("provider_path"),
+                        quality_check={"symbol": alt_symbol, "result": "success", "reason": None},
+                        topix_alt_probe=topix_alt_probe,
+                    )
+                    self._set_last_source(index_type, "real")
+                    self._update_last_good_history(index_type, alt_hist, source_hint="real")
+                    return alt_hist
+                logger.warning(
+                    "TOPIX alt fallback anomaly/quality reject reason=%s symbol=%s -> allowing as last resort",
+                    reject_reason,
+                    alt_symbol,
+                )
+                topix_alt_probe.update({"result": "adopted_last_resort", "reason": reject_reason})
+                self._add_provider_reject_reason(index_type, f"yfinance_alt_1308:{alt_symbol}:{reject_reason}")
+                self._set_debug(
+                    index_type,
+                    resolved_symbol=alt_symbol,
+                    adopted_provider="yfinance_alt_1308",
+                    adopted_symbol=alt_symbol,
+                    source="real_fallback",
+                    adoption_reason="topix_alt_1308_last_resort",
+                    provider_path=self.get_last_debug(index_type).get("provider_path"),
+                    quality_check={"symbol": alt_symbol, "result": "soft_ng_adopted", "reason": reject_reason},
+                    topix_alt_probe=topix_alt_probe,
+                )
+                self._set_last_source(index_type, "real_fallback")
+                self._update_last_good_history(index_type, alt_hist, source_hint="real_fallback")
+                return alt_hist
+            except Exception as alt_exc:
+                self._record_provider_attempt(
+                    index_type,
+                    provider="yfinance_alt_1308",
+                    success=False,
+                    validation_reason=f"fetch_error:{alt_exc}",
+                    symbol=alt_symbol,
+                )
+                topix_alt_probe.update({"result": "error", "reason": str(alt_exc)})
+                self._add_provider_reject_reason(index_type, f"yfinance_alt_1308:{alt_symbol}:fetch_error:{alt_exc}")
+
+        self._record_provider_attempt(
+            index_type,
+            provider="yfinance",
+            success=False,
+            validation_reason="disabled:topix_yfinance_direct_disabled",
+            fetch_error="topix_yfinance_direct_disabled",
+            quality_result="fetch_error",
+            validation_result="failed",
+            adopted=False,
+            symbol=resolved_symbol,
+        )
+        self._set_debug(
+            index_type,
+            resolved_symbol=resolved_symbol,
+            provider_path="disabled",
+            selected_function="topix_nav_only_mode",
+            adopted_provider=None,
+            fetch_error="topix_yfinance_direct_disabled",
+            validation_reason="topix_yfinance_direct_disabled",
+            adoption_reason="topix_yfinance_disabled_no_trusted_source",
+            price_column_used=None,
+            raw_adj_close_head=[],
+            raw_adj_close_tail=[],
+            normalized_series_head=[],
+            normalized_series_tail=[],
+            topix_alt_probe=topix_alt_probe,
+        )
+        raise ValueError("data_unavailable")
 
     def _fetch_sp500_jpy_with_provider_priority(self, start: date, end: date) -> List[Tuple[str, float]]:
         index_type = "SP500_JPY"
@@ -1765,7 +1950,7 @@ class SP500MarketService:
             if index_type == "SP500":
                 return self._fetch_sp500_with_provider_priority(start, today)
             if index_type == "TOPIX":
-                return self._fetch_topix_with_provider_priority(start, today)
+                return self._fetch_topix_with_provider_priority(start, today, allow_alt_probe=True)
             if index_type == "SP500_JPY":
                 return self._fetch_sp500_jpy_with_provider_priority(start, today)
 
@@ -1820,6 +2005,15 @@ class SP500MarketService:
         except Exception as exc:
             self._set_debug(index_type, fetch_error=str(exc))
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
+            if index_type == "TOPIX":
+                self._set_last_source(index_type, "unavailable")
+                self._set_debug(
+                    index_type,
+                    source="unavailable",
+                    adopted_provider=None,
+                    adoption_reason="topix_adj_close_required",
+                )
+                raise
             last_good = self._get_valid_last_good_history(index_type)
             if last_good:
                 logger.info(
@@ -1892,6 +2086,7 @@ class SP500MarketService:
                     first_close=first,
                     last_close=last,
                     one_year_return=one_year_return,
+                    price_stats_source="last_good_history",
                 )
 
     def get_price_history_range(
@@ -1903,7 +2098,7 @@ class SP500MarketService:
         try:
             price_type = self._resolve_price_type(index_type)
             if index_type == "TOPIX":
-                return self._fetch_topix_with_provider_priority(start, end)
+                return self._fetch_topix_with_provider_priority(start, end, allow_alt_probe=True)
             if price_type == "index_jpy":
                 return self._get_validated_index_jpy_history(start, end, index_type)
 
@@ -1941,6 +2136,15 @@ class SP500MarketService:
             return self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
         except Exception as exc:
             logger.warning("Price history fetch failed (%s)", exc, exc_info=True)
+            if index_type == "TOPIX":
+                self._set_last_source(index_type, "unavailable")
+                self._set_debug(
+                    index_type,
+                    source="unavailable",
+                    adopted_provider=None,
+                    adoption_reason="topix_adj_close_required",
+                )
+                raise
             last_good = self._get_valid_last_good_history(index_type)
             if last_good:
                 logger.info(
