@@ -33,8 +33,9 @@ def test_get_price_history_range_handles_dataframe(monkeypatch):
         lambda provider, symbol, start, end: df["Adj Close"],
     )
 
-    history = service.get_price_history_range(dates[0].date(), dates[-1].date(), allow_fallback=False, index_type="TOPIX")
-    assert history == [(d.date().isoformat(), float(1000.0 + i)) for i, d in enumerate(dates)]
+    with pytest.raises(ValueError):
+        service.get_price_history_range(dates[0].date(), dates[-1].date(), allow_fallback=False, index_type="TOPIX")
+    assert service.get_last_source("TOPIX") == "unavailable"
 
 
 def test_validate_history_rejects_abnormal_relative_scale():
@@ -241,25 +242,19 @@ def test_topix_tail_outlier_is_relaxed():
     assert "tail_outlier" in sp500_reason
 
 
-def test_topix_uses_yfinance_primary_symbol(monkeypatch):
+def test_topix_uses_nav_api_when_available(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 12, 31)
     points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_download(symbol, s, e, index_type=None):
-        assert symbol == "1306.T"
-        dates = pd.to_datetime([d for d, _ in points])
-        values = [v for _, v in points]
-        return pd.Series(values, index=dates)
-
-    monkeypatch.setattr(service, "_download_close_series", fake_download)
+    monkeypatch.setattr(service, "_fetch_nav_history", lambda s, e, index_type: points)
 
     history = service.get_price_history_range(start, end, allow_fallback=True, index_type="TOPIX")
     debug = service.get_last_debug("TOPIX")
 
     assert history == points
-    assert debug.get("adopted_provider") == "yfinance"
+    assert debug.get("adopted_provider") == "nav_api"
     assert debug.get("adopted_symbol") == "1306.T"
     assert debug.get("resolved_symbol") == "1306.T"
     assert debug.get("index_mode") == "etf_proxy"
@@ -300,13 +295,13 @@ def test_topix_sets_empty_dataframe_fetch_error(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
     end = date(2024, 1, 31)
-    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("empty dataframe")))
+    monkeypatch.setattr(service, "_fetch_nav_history", lambda *args, **kwargs: None)
     monkeypatch.setattr("backend.services.sp500_market_service.time.sleep", lambda *_: None)
 
     with pytest.raises(ValueError, match="data_unavailable"):
         service._fetch_topix_with_provider_priority(start, end)
     debug = service.get_last_debug("TOPIX")
-    assert debug.get("fetch_error") == "empty_dataframe"
+    assert debug.get("fetch_error") == "topix_yfinance_direct_disabled"
 
 
 def test_debug_has_provider_attempt_fields(monkeypatch):
@@ -315,13 +310,7 @@ def test_debug_has_provider_attempt_fields(monkeypatch):
     end = date(2024, 3, 31)
     ok = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
 
-    def fake_download(symbol, s, e, index_type=None):
-        assert symbol == "1306.T"
-        dates = pd.to_datetime([d for d, _ in ok])
-        values = [v for _, v in ok]
-        return pd.Series(values, index=dates)
-
-    monkeypatch.setattr(service, "_download_close_series", fake_download)
+    monkeypatch.setattr(service, "_fetch_nav_history", lambda s, e, index_type: ok)
     history = service.get_price_history_range(start, end, allow_fallback=False, index_type="TOPIX")
 
     debug = service.get_last_debug("TOPIX")

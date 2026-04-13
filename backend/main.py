@@ -530,9 +530,12 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "requested_index_type": requested_index_type,
         "used_index_type": used_index_type,
         "source": snapshot.get("source"),
+        "status": snapshot.get("status"),
         "source_confidence": service_debug.get("source_confidence"),
         "symbol": service_debug.get("symbol"),
         "resolved_symbol": service_debug.get("resolved_symbol"),
+        "provider_path": service_debug.get("provider_path"),
+        "selected_function": service_debug.get("selected_function"),
         "price_column_used": service_debug.get("price_column_used"),
         "raw_columns": service_debug.get("raw_columns"),
         "raw_shape": service_debug.get("raw_shape"),
@@ -563,6 +566,8 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "first_close": service_debug.get("first_close"),
         "last_close": service_debug.get("last_close"),
         "one_year_return": service_debug.get("one_year_return"),
+        "price_stats_source": service_debug.get("price_stats_source"),
+        "adoption_reason": service_debug.get("adoption_reason"),
         "scores_total": (snapshot.get("scores") or {}).get("total"),
         "scoring_executed": service_debug.get("scoring_executed"),
         "technical_score": technical_score,
@@ -572,6 +577,7 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
             "long": period_scores.get("long"),
         },
         "reasons": (snapshot.get("technical_details") or {}).get("reason"),
+        "snapshot_reasons": snapshot.get("reasons"),
     }
 
 
@@ -747,6 +753,23 @@ async def evaluate_sp500(
         )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
+        if used_index_type == "TOPIX":
+            logger.info(
+                "[topix-runtime] requested_index_type=%s resolved_symbol=%s provider_path=%s selected_function=%s "
+                "price_column_used=%s first_close=%s last_close=%s one_year_return=%s scoring_executed=%s "
+                "adopted_provider=%s adoption_reason=%s",
+                debug_payload.get("requested_index_type"),
+                debug_payload.get("resolved_symbol"),
+                debug_payload.get("provider_path"),
+                debug_payload.get("selected_function"),
+                debug_payload.get("price_column_used"),
+                debug_payload.get("first_close"),
+                debug_payload.get("last_close"),
+                debug_payload.get("one_year_return"),
+                debug_payload.get("scoring_executed"),
+                debug_payload.get("adopted_provider"),
+                debug_payload.get("adoption_reason"),
+            )
         if debug_flag:
             response = dict(snapshot)
             response["source"] = debug_payload.get("source", response.get("source"))
@@ -779,6 +802,23 @@ async def evaluate(
         )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
+        if used_index_type == "TOPIX":
+            logger.info(
+                "[topix-runtime] requested_index_type=%s resolved_symbol=%s provider_path=%s selected_function=%s "
+                "price_column_used=%s first_close=%s last_close=%s one_year_return=%s scoring_executed=%s "
+                "adopted_provider=%s adoption_reason=%s",
+                debug_payload.get("requested_index_type"),
+                debug_payload.get("resolved_symbol"),
+                debug_payload.get("provider_path"),
+                debug_payload.get("selected_function"),
+                debug_payload.get("price_column_used"),
+                debug_payload.get("first_close"),
+                debug_payload.get("last_close"),
+                debug_payload.get("one_year_return"),
+                debug_payload.get("scoring_executed"),
+                debug_payload.get("adopted_provider"),
+                debug_payload.get("adoption_reason"),
+            )
         if debug_flag:
             response = dict(snapshot)
             response["source"] = debug_payload.get("source", response.get("source"))
