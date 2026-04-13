@@ -242,13 +242,28 @@ def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tu
         return False, f"scoring_source_not_allowed:source={source},provider={adopted_provider}"
     if not price_history:
         return False, "series_empty"
-    values = [float(v) for _, v in price_history]
+    values: List[float] = []
+    invalid_value_count = 0
+    for _, v in price_history:
+        try:
+            values.append(float(v))
+        except (TypeError, ValueError):
+            invalid_value_count += 1
+    if invalid_value_count > 0:
+        return False, f"series_invalid_values:{invalid_value_count}"
     nan_count = sum(1 for v in values if math.isnan(v))
     if nan_count >= max(3, len(values) // 2):
         return False, f"series_nan_heavy:{nan_count}/{len(values)}"
     cleaned = [v for v in values if not math.isnan(v)]
     if not cleaned:
         return False, "series_all_nan"
+    try:
+        simple_anomaly_reason = market_service.simple_anomaly_reason(price_history, index_type.value)
+    except Exception as exc:
+        logger.warning("simple_anomaly_reason failed index=%s error=%s", index_type.value, exc, exc_info=True)
+        return False, f"simple_anomaly_eval_error:{exc}"
+    if simple_anomaly_reason:
+        return False, f"series_simple_anomaly:{simple_anomaly_reason}"
     if any(v <= 0 for v in cleaned[-5:]):
         return False, "series_non_positive_tail"
     if len(cleaned) >= 3:
@@ -279,6 +294,15 @@ def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tu
 
 def _build_event_adjustment(target: date):
     events = event_service.get_events_for_date(target)
+    diag = event_service.get_diagnostics()
+    logger.info(
+        "[events-pipeline] target=%s returned_events=%d before_filter=%s after_filter=%s file=%s",
+        target,
+        len(events) if isinstance(events, list) else -1,
+        diag.get("events_before_filter"),
+        diag.get("events_after_filter"),
+        diag.get("events_file_path"),
+    )
     try:
         result = calculate_event_adjustment(target, events)
     except TypeError:
@@ -297,6 +321,13 @@ def _build_event_adjustment(target: date):
         event_adjustment, event_details, event_count = 0.0, {}, 0
 
     event_details = _serialize_event_details(event_details if isinstance(event_details, dict) else {})
+    logger.info(
+        "[events-adjustment] input_events=%d event_count=%d adjustment=%s details=%s",
+        len(events) if isinstance(events, list) else -1,
+        int(event_count or 0),
+        float(event_adjustment or 0.0),
+        event_details,
+    )
     return float(event_adjustment or 0.0), event_details, int(event_count or 0)
 
 
@@ -530,9 +561,12 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "requested_index_type": requested_index_type,
         "used_index_type": used_index_type,
         "source": snapshot.get("source"),
+        "status": snapshot.get("status"),
         "source_confidence": service_debug.get("source_confidence"),
         "symbol": service_debug.get("symbol"),
         "resolved_symbol": service_debug.get("resolved_symbol"),
+        "provider_path": service_debug.get("provider_path"),
+        "selected_function": service_debug.get("selected_function"),
         "price_column_used": service_debug.get("price_column_used"),
         "raw_columns": service_debug.get("raw_columns"),
         "raw_shape": service_debug.get("raw_shape"),
@@ -563,6 +597,25 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "first_close": service_debug.get("first_close"),
         "last_close": service_debug.get("last_close"),
         "one_year_return": service_debug.get("one_year_return"),
+        "price_stats_source": service_debug.get("price_stats_source"),
+        "adoption_reason": service_debug.get("adoption_reason"),
+        "topix_alt_probe": service_debug.get("topix_alt_probe"),
+        "event_count": snapshot.get("event_count"),
+        "event_adjustment": (snapshot.get("scores") or {}).get("event_adjustment"),
+        "events_file_path": event_service.get_diagnostics().get("events_file_path"),
+        "raw_events_count": event_service.get_diagnostics().get("raw_events_count"),
+        "parsed_events_count": event_service.get_diagnostics().get("parsed_events_count"),
+        "parse_failed_count": event_service.get_diagnostics().get("parse_failed_count"),
+        "event_filter_range": {
+            "today": event_service.get_diagnostics().get("today"),
+            "window_start": event_service.get_diagnostics().get("window_start"),
+            "window_end": event_service.get_diagnostics().get("window_end"),
+            "timezone": event_service.get_diagnostics().get("timezone"),
+            "events_before_filter": event_service.get_diagnostics().get("events_before_filter"),
+            "events_after_filter": event_service.get_diagnostics().get("events_after_filter"),
+        },
+        "filtered_events_count": event_service.get_diagnostics().get("events_after_filter"),
+        "sample_events": event_service.get_diagnostics().get("sample_events"),
         "scores_total": (snapshot.get("scores") or {}).get("total"),
         "scoring_executed": service_debug.get("scoring_executed"),
         "technical_score": technical_score,
@@ -572,6 +625,7 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
             "long": period_scores.get("long"),
         },
         "reasons": (snapshot.get("technical_details") or {}).get("reason"),
+        "snapshot_reasons": snapshot.get("reasons"),
     }
 
 
@@ -736,6 +790,7 @@ async def evaluate_sp500(
     debug: bool = Query(False),
     allow_low_quality: bool = Query(False),
 ):
+    debug_flag = False
     try:
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
@@ -747,6 +802,23 @@ async def evaluate_sp500(
         )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
+        if used_index_type == "TOPIX":
+            logger.info(
+                "[topix-runtime] requested_index_type=%s resolved_symbol=%s provider_path=%s selected_function=%s "
+                "price_column_used=%s first_close=%s last_close=%s one_year_return=%s scoring_executed=%s "
+                "adopted_provider=%s adoption_reason=%s",
+                debug_payload.get("requested_index_type"),
+                debug_payload.get("resolved_symbol"),
+                debug_payload.get("provider_path"),
+                debug_payload.get("selected_function"),
+                debug_payload.get("price_column_used"),
+                debug_payload.get("first_close"),
+                debug_payload.get("last_close"),
+                debug_payload.get("one_year_return"),
+                debug_payload.get("scoring_executed"),
+                debug_payload.get("adopted_provider"),
+                debug_payload.get("adoption_reason"),
+            )
         if debug_flag:
             response = dict(snapshot)
             response["source"] = debug_payload.get("source", response.get("source"))
@@ -756,9 +828,31 @@ async def evaluate_sp500(
             response["debug"] = debug_payload
             return response
         return snapshot
-    except Exception:
-        logger.exception("Evaluation failed")
-        raise HTTPException(status_code=502, detail="Evaluation failed")
+    except Exception as exc:
+        service_debug = market_service.get_last_debug("SP500")
+        logger.exception(
+            "Evaluation failed requested_index_type=%s symbol=%s provider_path=%s rows=%s columns=%s first_date=%s last_date=%s error=%s",
+            "SP500",
+            service_debug.get("resolved_symbol") or service_debug.get("symbol"),
+            service_debug.get("provider_path"),
+            service_debug.get("points"),
+            service_debug.get("raw_columns"),
+            service_debug.get("first_date"),
+            service_debug.get("last_date"),
+            exc,
+        )
+        payload = {
+            "status": "error",
+            "reasons": [f"EVALUATION_EXCEPTION:{type(exc).__name__}"],
+            "source": "data_unavailable",
+            "adopted_provider": service_debug.get("adopted_provider"),
+            "scores": {"technical": None, "macro": None, "event_adjustment": None, "total": None, "label": "N/A"},
+            "price_history": [],
+            "price_series": [],
+        }
+        if debug_flag:
+            payload["debug"] = _build_debug_payload("SP500", "SP500", payload)
+        return payload
 
 
 @app.post("/api/evaluate")
@@ -768,6 +862,7 @@ async def evaluate(
     debug: bool = Query(False),
     allow_low_quality: bool = Query(False),
 ):
+    debug_flag = False
     try:
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
@@ -779,6 +874,23 @@ async def evaluate(
         )
         debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
+        if used_index_type == "TOPIX":
+            logger.info(
+                "[topix-runtime] requested_index_type=%s resolved_symbol=%s provider_path=%s selected_function=%s "
+                "price_column_used=%s first_close=%s last_close=%s one_year_return=%s scoring_executed=%s "
+                "adopted_provider=%s adoption_reason=%s",
+                debug_payload.get("requested_index_type"),
+                debug_payload.get("resolved_symbol"),
+                debug_payload.get("provider_path"),
+                debug_payload.get("selected_function"),
+                debug_payload.get("price_column_used"),
+                debug_payload.get("first_close"),
+                debug_payload.get("last_close"),
+                debug_payload.get("one_year_return"),
+                debug_payload.get("scoring_executed"),
+                debug_payload.get("adopted_provider"),
+                debug_payload.get("adoption_reason"),
+            )
         if debug_flag:
             response = dict(snapshot)
             response["source"] = debug_payload.get("source", response.get("source"))
@@ -788,9 +900,37 @@ async def evaluate(
             response["debug"] = debug_payload
             return response
         return snapshot
-    except Exception:
-        logger.exception("Evaluation failed")
-        raise HTTPException(status_code=502, detail="Evaluation failed")
+    except Exception as exc:
+        requested = "SP500"
+        try:
+            requested = str(position.index_type.value)
+        except Exception:
+            requested = "UNKNOWN"
+        used = normalize_index_type(requested)
+        service_debug = market_service.get_last_debug(used)
+        logger.exception(
+            "Evaluation failed requested_index_type=%s symbol=%s provider_path=%s rows=%s columns=%s first_date=%s last_date=%s error=%s",
+            requested,
+            service_debug.get("resolved_symbol") or service_debug.get("symbol"),
+            service_debug.get("provider_path"),
+            service_debug.get("points"),
+            service_debug.get("raw_columns"),
+            service_debug.get("first_date"),
+            service_debug.get("last_date"),
+            exc,
+        )
+        payload = {
+            "status": "error",
+            "reasons": [f"EVALUATION_EXCEPTION:{type(exc).__name__}"],
+            "source": "data_unavailable",
+            "adopted_provider": service_debug.get("adopted_provider"),
+            "scores": {"technical": None, "macro": None, "event_adjustment": None, "total": None, "label": "N/A"},
+            "price_history": [],
+            "price_series": [],
+        }
+        if debug_flag:
+            payload["debug"] = _build_debug_payload(requested, used, payload)
+        return payload
 
 
 # ======================
