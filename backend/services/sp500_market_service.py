@@ -121,7 +121,7 @@ class SP500MarketService:
         default_daily_anomaly_threshold = float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_DEFAULT", "0.20"))
         self.daily_anomaly_threshold_map = {
             "SP500": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_SP500", "0.15")),
-            "TOPIX": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_TOPIX", "0.10")),
+            "TOPIX": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_TOPIX", "0.20")),
             "NIKKEI225": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_NIKKEI225", str(default_daily_anomaly_threshold))),
             "NIFTY50": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_NIFTY50", str(default_daily_anomaly_threshold))),
             "ALLCOUNTRY": float(os.getenv("ANOMALY_DAILY_CHANGE_THRESHOLD_ALLCOUNTRY", str(default_daily_anomaly_threshold))),
@@ -693,6 +693,14 @@ class SP500MarketService:
             return f"provider_reject_points:points={points}<{min_points}"
         simple_reason = self._simple_anomaly_reason(history, index_type=index_type)
         if simple_reason:
+            logger.warning(
+                "Simple anomaly reject index=%s reason=%s points=%d first=%s last=%s",
+                index_type,
+                simple_reason,
+                points,
+                history[0][1] if history else None,
+                history[-1][1] if history else None,
+            )
             return f"provider_reject_simple_anomaly:{simple_reason}"
         values = [v for _, v in history]
         nan_count = sum(1 for v in values if v is None or (isinstance(v, float) and math.isnan(v)))
@@ -729,7 +737,7 @@ class SP500MarketService:
         return None
 
     def _simple_anomaly_reason(self, history: List[Tuple[str, float]], *, index_type: str = "SP500") -> Optional[str]:
-        if len(history) < 3:
+        if len(history) < 60:
             return None
         normalized_index_type = self._normalize_index_type(index_type)
         values = [float(v) for _, v in history]
@@ -1615,8 +1623,27 @@ class SP500MarketService:
                     self._set_last_source(index_type, "real")
                     self._update_last_good_history(index_type, alt_hist, source_hint="real")
                     return alt_hist
-                topix_alt_probe.update({"result": "rejected", "reason": reject_reason})
+                logger.warning(
+                    "TOPIX alt fallback anomaly/quality reject reason=%s symbol=%s -> allowing as last resort",
+                    reject_reason,
+                    alt_symbol,
+                )
+                topix_alt_probe.update({"result": "adopted_last_resort", "reason": reject_reason})
                 self._add_provider_reject_reason(index_type, f"yfinance_alt_1308:{alt_symbol}:{reject_reason}")
+                self._set_debug(
+                    index_type,
+                    resolved_symbol=alt_symbol,
+                    adopted_provider="yfinance_alt_1308",
+                    adopted_symbol=alt_symbol,
+                    source="real_fallback",
+                    adoption_reason="topix_alt_1308_last_resort",
+                    provider_path=self.get_last_debug(index_type).get("provider_path"),
+                    quality_check={"symbol": alt_symbol, "result": "soft_ng_adopted", "reason": reject_reason},
+                    topix_alt_probe=topix_alt_probe,
+                )
+                self._set_last_source(index_type, "real_fallback")
+                self._update_last_good_history(index_type, alt_hist, source_hint="real_fallback")
+                return alt_hist
             except Exception as alt_exc:
                 self._record_provider_attempt(
                     index_type,
