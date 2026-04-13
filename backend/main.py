@@ -279,6 +279,15 @@ def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tu
 
 def _build_event_adjustment(target: date):
     events = event_service.get_events_for_date(target)
+    diag = event_service.get_diagnostics()
+    logger.info(
+        "[events-pipeline] target=%s returned_events=%d before_filter=%s after_filter=%s file=%s",
+        target,
+        len(events) if isinstance(events, list) else -1,
+        diag.get("events_before_filter"),
+        diag.get("events_after_filter"),
+        diag.get("events_file_path"),
+    )
     try:
         result = calculate_event_adjustment(target, events)
     except TypeError:
@@ -297,6 +306,13 @@ def _build_event_adjustment(target: date):
         event_adjustment, event_details, event_count = 0.0, {}, 0
 
     event_details = _serialize_event_details(event_details if isinstance(event_details, dict) else {})
+    logger.info(
+        "[events-adjustment] input_events=%d event_count=%d adjustment=%s details=%s",
+        len(events) if isinstance(events, list) else -1,
+        int(event_count or 0),
+        float(event_adjustment or 0.0),
+        event_details,
+    )
     return float(event_adjustment or 0.0), event_details, int(event_count or 0)
 
 
@@ -569,6 +585,22 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "price_stats_source": service_debug.get("price_stats_source"),
         "adoption_reason": service_debug.get("adoption_reason"),
         "topix_alt_probe": service_debug.get("topix_alt_probe"),
+        "event_count": snapshot.get("event_count"),
+        "event_adjustment": (snapshot.get("scores") or {}).get("event_adjustment"),
+        "events_file_path": event_service.get_diagnostics().get("events_file_path"),
+        "raw_events_count": event_service.get_diagnostics().get("raw_events_count"),
+        "parsed_events_count": event_service.get_diagnostics().get("parsed_events_count"),
+        "parse_failed_count": event_service.get_diagnostics().get("parse_failed_count"),
+        "event_filter_range": {
+            "today": event_service.get_diagnostics().get("today"),
+            "window_start": event_service.get_diagnostics().get("window_start"),
+            "window_end": event_service.get_diagnostics().get("window_end"),
+            "timezone": event_service.get_diagnostics().get("timezone"),
+            "events_before_filter": event_service.get_diagnostics().get("events_before_filter"),
+            "events_after_filter": event_service.get_diagnostics().get("events_after_filter"),
+        },
+        "filtered_events_count": event_service.get_diagnostics().get("events_after_filter"),
+        "sample_events": event_service.get_diagnostics().get("sample_events"),
         "scores_total": (snapshot.get("scores") or {}).get("total"),
         "scoring_executed": service_debug.get("scoring_executed"),
         "technical_score": technical_score,
