@@ -68,3 +68,42 @@ def test_scoring_guard_rejects_synthetic_fallback_source(monkeypatch):
     ok, reason = main._is_debug_eligible_for_scoring(main.IndexType.TOPIX, [("2024-01-01", 1500.0), ("2024-01-02", 1501.0)])
     assert ok is False
     assert "synthetic_fallback_scoring_disabled" == reason
+
+
+def test_build_debug_payload_includes_topix_runtime_fields(monkeypatch):
+    monkeypatch.setattr(
+        main.market_service,
+        "get_last_debug",
+        lambda *_: {
+            "source": "real",
+            "resolved_symbol": "1306.T",
+            "provider_path": "direct",
+            "selected_function": "market_data_provider.fetch_history_from_yfinance_with_debug",
+            "price_column_used": "adj_close",
+            "first_close": 1800.0,
+            "last_close": 2200.0,
+            "one_year_return": 12.5,
+            "scoring_executed": True,
+            "adopted_provider": "yfinance",
+            "adoption_reason": "topix_adj_close_only",
+            "price_stats_source": "last_good_history",
+        },
+    )
+
+    payload = main._build_debug_payload(
+        requested_index_type="TOPIX",
+        used_index_type="TOPIX",
+        snapshot={
+            "status": None,
+            "source": "real",
+            "scores": {"total": 55.0},
+            "reasons": None,
+            "technical_details": {},
+            "period_scores": {},
+        },
+    )
+
+    assert payload["provider_path"] == "direct"
+    assert payload["selected_function"] == "market_data_provider.fetch_history_from_yfinance_with_debug"
+    assert payload["price_column_used"] == "adj_close"
+    assert payload["adoption_reason"] == "topix_adj_close_only"
