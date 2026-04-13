@@ -568,6 +568,7 @@ def _build_debug_payload(requested_index_type: str, used_index_type: str, snapsh
         "one_year_return": service_debug.get("one_year_return"),
         "price_stats_source": service_debug.get("price_stats_source"),
         "adoption_reason": service_debug.get("adoption_reason"),
+        "topix_alt_probe": service_debug.get("topix_alt_probe"),
         "scores_total": (snapshot.get("scores") or {}).get("total"),
         "scoring_executed": service_debug.get("scoring_executed"),
         "technical_score": technical_score,

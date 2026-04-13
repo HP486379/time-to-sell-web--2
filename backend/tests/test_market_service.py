@@ -260,6 +260,57 @@ def test_topix_uses_nav_api_when_available(monkeypatch):
     assert debug.get("index_mode") == "etf_proxy"
 
 
+def test_topix_1308_probe_is_debug_candidate_only(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    points = _history_from_values("2024-01-01", [2000.0 + i for i in range(260)])
+    dates = pd.to_datetime([d for d, _ in points])
+    values = [v for _, v in points]
+
+    monkeypatch.setattr(service, "_fetch_nav_history", lambda *args, **kwargs: None)
+
+    def fake_download(symbol, s, e, index_type=None):
+        assert symbol == "1308.T"
+        return pd.Series(values, index=dates)
+
+    monkeypatch.setattr(service, "_download_close_series", fake_download)
+
+    with pytest.raises(ValueError):
+        service.get_price_history(index_type="TOPIX", allow_synthetic=True)
+    debug = service.get_last_debug("TOPIX")
+
+    assert service.get_last_source("TOPIX") == "unavailable"
+    assert debug.get("adopted_provider") is None
+    assert debug.get("topix_alt_probe", {}).get("result") == "adopted_candidate"
+    assert debug.get("topix_alt_probe", {}).get("price_series_len") == 260
+
+
+def test_topix_1308_probe_is_not_used_without_debug(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    monkeypatch.setattr(service, "_fetch_nav_history", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should_not_call")))
+
+    with pytest.raises(ValueError):
+        service.get_price_history(index_type="TOPIX", allow_synthetic=False)
+    assert service.get_last_source("TOPIX") == "unavailable"
+    assert service.get_last_debug("TOPIX").get("topix_alt_probe", {}).get("result") == "not_attempted"
+
+
+def test_topix_1308_probe_rejected_with_reason(monkeypatch):
+    service = SP500MarketService(symbol="TEST")
+    bad = _history_from_values("2024-01-01", [2000.0, 100.0, 90.0, 80.0, 70.0])
+    dates = pd.to_datetime([d for d, _ in bad])
+    values = [v for _, v in bad]
+    monkeypatch.setattr(service, "_fetch_nav_history", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_download_close_series", lambda *args, **kwargs: pd.Series(values, index=dates))
+
+    with pytest.raises(ValueError):
+        service.get_price_history(index_type="TOPIX", allow_synthetic=True)
+
+    probe = service.get_last_debug("TOPIX").get("topix_alt_probe", {})
+    assert probe.get("result") == "rejected"
+    assert probe.get("reason")
+
+
 def test_topix_does_not_use_fallback_without_quality_rejection(monkeypatch):
     service = SP500MarketService(symbol="TEST")
     start = date(2024, 1, 1)
