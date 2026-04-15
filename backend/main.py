@@ -10,7 +10,7 @@ from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, validator
 
 from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
 from scoring.macro import calculate_macro_score
@@ -120,18 +120,21 @@ class BacktestRequest(BaseModel):
     sell_threshold: float = 80.0
     score_ma: int = Field(200)
 
-    @validator("index_type", pre=True)
+    @field_validator("index_type", mode="before")
+    @classmethod
     def normalize_index_type(cls, value):
         return _normalize_index_type_value(value)
 
-    @validator("initial_cash", "buy_threshold", "sell_threshold", pre=True)
-    def validate_finite_numbers(cls, value, field):
+    @field_validator("initial_cash", "buy_threshold", "sell_threshold", mode="before")
+    @classmethod
+    def validate_finite_numbers(cls, value, info: ValidationInfo):
+        field_name = str(info.field_name or "value")
         try:
             parsed = float(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field.name} must be numeric") from exc
+            raise ValueError(f"{field_name} must be numeric") from exc
         if not math.isfinite(parsed):
-            raise ValueError(f"{field.name} must be finite")
+            raise ValueError(f"{field_name} must be finite")
         return parsed
 
 
