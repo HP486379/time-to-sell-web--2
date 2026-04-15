@@ -1,7 +1,8 @@
 from datetime import date, timedelta
 import os
 import sys
-from datetime import date, timedelta
+import math
+import pytest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -49,3 +50,46 @@ def test_backtest_generates_buy_and_sell_cycle():
     # 10株を100で買い200で売る想定 → 2000円前後の評価
     assert result["final_value"] >= 2000.0
     assert result["buy_and_hold_final"] >= 2000.0
+
+
+class FakeMarketServiceWithInvalidRows:
+    def get_price_history_range(
+        self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
+    ):
+        history = []
+        for i in range(260):
+            dt = start + timedelta(days=i)
+            price = 100.0 + i
+            history.append((dt.isoformat(), price))
+        history[10] = (history[10][0], float("nan"))
+        history[20] = (history[20][0], "123.45")
+        history[30] = ("invalid-date", 150.0)
+        return history
+
+
+def test_backtest_sanitizes_invalid_price_rows():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    service = BacktestService(FakeMarketServiceWithInvalidRows(), FakeMacroService(), FakeEventService())
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+
+    assert math.isfinite(result["final_value"])
+    assert math.isfinite(result["buy_and_hold_final"])
+    assert math.isfinite(result["total_return_pct"])
+    assert math.isfinite(result["max_drawdown_pct"])
+    assert all(math.isfinite(v) for _, v in result["price_history"])
+
+
+class BacktestServiceWithNaNScore(BacktestService):
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        return float("nan")
+
+
+def test_backtest_raises_when_score_becomes_nan():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=249)
+    service = BacktestServiceWithNaNScore(FakeMarketService(), FakeMacroService(), FakeEventService())
+
+    with pytest.raises(ValueError, match="invalid_score:non_finite"):
+        service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
