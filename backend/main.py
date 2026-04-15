@@ -10,7 +10,7 @@ from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, validator
 
 from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
 from scoring.macro import calculate_macro_score
@@ -120,9 +120,22 @@ class BacktestRequest(BaseModel):
     sell_threshold: float = 80.0
     score_ma: int = Field(200)
 
-    @validator("index_type", pre=True)
+    @field_validator("index_type", mode="before")
+    @classmethod
     def normalize_index_type(cls, value):
         return _normalize_index_type_value(value)
+
+    @field_validator("initial_cash", "buy_threshold", "sell_threshold", mode="before")
+    @classmethod
+    def validate_finite_numbers(cls, value, info: ValidationInfo):
+        field_name = str(info.field_name or "value")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be numeric") from exc
+        if not math.isfinite(parsed):
+            raise ValueError(f"{field_name} must be finite")
+        return parsed
 
 
 class BacktestSummary(BaseModel):
@@ -719,7 +732,23 @@ def get_orukan_jpy_history():
 # ======================
 
 def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
-    closes = [close for _, close in price_history]
+    sanitized_history: List[tuple] = []
+    dropped_rows = 0
+    for date_str, close_raw in price_history:
+        try:
+            close = float(close_raw)
+        except (TypeError, ValueError):
+            dropped_rows += 1
+            continue
+        if not math.isfinite(close):
+            dropped_rows += 1
+            continue
+        sanitized_history.append((date_str, close))
+
+    if dropped_rows > 0:
+        logger.warning("[backtest] equity_curve dropped_rows=%d", dropped_rows)
+
+    closes = [close for _, close in sanitized_history]
 
     def moving_average(values: List[float], window: int) -> List[Optional[float]]:
         averaged: List[Optional[float]] = []
@@ -743,7 +772,7 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
             ma60=ma60[idx],
             ma200=ma200[idx],
         )
-        for idx, (date_str, close) in enumerate(price_history)
+        for idx, (date_str, close) in enumerate(sanitized_history)
     ]
 
 
@@ -770,7 +799,15 @@ def run_backtest(payload: BacktestRequest):
         )
         return BacktestResponse(summary=summary, equity_curve=equity_curve)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "BACKTEST_COMPUTATION_ERROR",
+                "reason": str(exc),
+                "index_type": payload.index_type.value,
+            },
+        )
     except Exception:
         logger.exception("Backtest failed", exc_info=True)
         raise HTTPException(
