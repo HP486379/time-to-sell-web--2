@@ -144,6 +144,9 @@ class BacktestSummary(BaseModel):
     total_return: float
     max_drawdown: float
     trade_count: int
+    # iOS旧実装との後方互換（旧キー名）
+    final_asset: Optional[float] = None
+    buy_and_hold_asset: Optional[float] = None
 
 
 class BacktestPoint(BaseModel):
@@ -157,6 +160,12 @@ class BacktestPoint(BaseModel):
 class BacktestResponse(BaseModel):
     summary: BacktestSummary
     equity_curve: List[BacktestPoint]
+    # iOS旧実装との後方互換（flat形式）
+    final_asset: Optional[float] = None
+    buy_and_hold_asset: Optional[float] = None
+    total_return: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    trade_count: Optional[int] = None
 
 
 # ======================
@@ -796,8 +805,18 @@ def run_backtest(payload: BacktestRequest):
             total_return=result["total_return_pct"],
             max_drawdown=result["max_drawdown_pct"],
             trade_count=result["trade_count"],
+            final_asset=result["final_value"],
+            buy_and_hold_asset=result["buy_and_hold_final"],
         )
-        return BacktestResponse(summary=summary, equity_curve=equity_curve)
+        return BacktestResponse(
+            summary=summary,
+            equity_curve=equity_curve,
+            final_asset=result["final_value"],
+            buy_and_hold_asset=result["buy_and_hold_final"],
+            total_return=result["total_return_pct"],
+            max_drawdown=result["max_drawdown_pct"],
+            trade_count=result["trade_count"],
+        )
     except ValueError as exc:
         logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, str(exc))
         raise HTTPException(
