@@ -199,6 +199,15 @@ class BacktestService:
         shares = 0
         portfolio_history: List[Dict] = []
         trades: List[Dict] = []
+        score_rows = 0
+        valid_score_rows = 0
+        buy_threshold_hit_days = 0
+        sell_threshold_hit_days = 0
+        buy_signal_count = 0
+        sell_signal_count = 0
+        score_min: float | None = None
+        score_max: float | None = None
+        buy_filled_dates: List[str] = []
 
         hold_cash = initial_cash_safe
         hold_shares = 0
@@ -212,11 +221,22 @@ class BacktestService:
 
             if idx >= max(score_ma - 1, 199):
                 sub_history = price_history[: idx + 1]
+                score_rows += 1
                 score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
                 score = self._safe_float(score, field_name="score")
+                valid_score_rows += 1
+                if score_min is None or score < score_min:
+                    score_min = score
+                if score_max is None or score > score_max:
+                    score_max = score
+                if score < buy_threshold_safe:
+                    buy_threshold_hit_days += 1
+                if score >= sell_threshold_safe:
+                    sell_threshold_hit_days += 1
 
                 if shares > 0 and score >= sell_threshold_safe:
                     cash += shares * close
+                    sell_signal_count += 1
                     trades.append(
                         {"action": "SELL", "date": date_str, "quantity": shares, "price": close}
                     )
@@ -226,6 +246,8 @@ class BacktestService:
                     if qty > 0:
                         cash -= qty * close
                         shares += qty
+                        buy_signal_count += 1
+                        buy_filled_dates.append(date_str)
                         trades.append(
                             {"action": "BUY", "date": date_str, "quantity": qty, "price": close}
                         )
@@ -258,6 +280,50 @@ class BacktestService:
 
         max_dd = self._compute_max_drawdown([p["value"] for p in portfolio_history])
         max_dd = self._safe_float(max_dd, field_name="max_drawdown_pct")
+        entered_market_once = buy_signal_count > 0
+        in_position = shares > 0
+        final_trade_count = len(trades)
+        diagnosis = "normal"
+        if valid_score_rows == 0:
+            diagnosis = "score_generation_broken_or_missing"
+        elif buy_signal_count > 0 and final_trade_count == 0:
+            diagnosis = "signal_execution_divergence"
+        elif buy_signal_count == 0 and sell_signal_count == 0:
+            if buy_threshold_hit_days == 0 and sell_threshold_hit_days == 0:
+                diagnosis = "score_outside_threshold_band_or_stuck"
+            elif buy_threshold_hit_days > 0:
+                diagnosis = "buy_threshold_hit_but_no_executable_qty_or_data_issue"
+            else:
+                diagnosis = "threshold_setting_or_signal_transition_issue"
+        if buy_signal_count > 0 and final_trade_count == 0:
+            logger.warning(
+                "[backtest-signals-divergence] index_type=%s buy_signal_count=%d final_trade_count=%d in_position=%s buy_filled_dates=%s",
+                index_type,
+                buy_signal_count,
+                final_trade_count,
+                in_position,
+                buy_filled_dates,
+            )
+        logger.info(
+            "[backtest-signals] index_type=%s total_price_rows=%d total_score_rows=%d valid_score_rows=%d "
+            "buy_threshold_hit_days=%d sell_threshold_hit_days=%d buy_signal_count=%d sell_signal_count=%d "
+            "final_trade_count=%d entered_market_once=%s in_position=%s buy_filled_dates=%s score_min=%s score_max=%s diagnosis=%s",
+            index_type,
+            len(price_history),
+            score_rows,
+            valid_score_rows,
+            buy_threshold_hit_days,
+            sell_threshold_hit_days,
+            buy_signal_count,
+            sell_signal_count,
+            final_trade_count,
+            entered_market_once,
+            in_position,
+            buy_filled_dates,
+            score_min,
+            score_max,
+            diagnosis,
+        )
 
         return {
             "final_value": round(final_value, 2),
@@ -270,4 +336,21 @@ class BacktestService:
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
             "price_history": price_history,
+            "diagnostics": {
+                "index_type": index_type,
+                "total_price_rows": len(price_history),
+                "total_score_rows": score_rows,
+                "valid_score_rows": valid_score_rows,
+                "buy_threshold_hit_days": buy_threshold_hit_days,
+                "sell_threshold_hit_days": sell_threshold_hit_days,
+                "buy_signal_count": buy_signal_count,
+                "sell_signal_count": sell_signal_count,
+                "final_trade_count": final_trade_count,
+                "entered_market_once": entered_market_once,
+                "in_position": in_position,
+                "buy_filled_dates": buy_filled_dates,
+                "score_min": score_min,
+                "score_max": score_max,
+                "diagnosis": diagnosis,
+            },
         }
