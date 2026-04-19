@@ -222,17 +222,18 @@ def _detect_ath_signal(closes: List[float]) -> Dict[str, Any]:
         }
 
     latest_close = closes[-1]
-    high_20 = max(closes[-20:]) if len(closes) >= 20 else None
-    high_60 = max(closes[-60:]) if len(closes) >= 60 else None
+    # 「更新」を見るため当日を除く
+    prev_high_20 = max(closes[-21:-1]) if len(closes) >= 21 else None
+    prev_high_60 = max(closes[-61:-1]) if len(closes) >= 61 else None
 
-    is_20d_high = (high_20 is not None) and (latest_close >= high_20)
-    is_60d_high = (high_60 is not None) and (latest_close >= high_60)
+    is_20d_high = (prev_high_20 is not None) and (latest_close > prev_high_20)
+    is_60d_high = (prev_high_60 is not None) and (latest_close > prev_high_60)
 
     return {
         "is_20d_high": bool(is_20d_high),
         "is_60d_high": bool(is_60d_high),
-        "high_20": None if high_20 is None else round(high_20, 2),
-        "high_60": None if high_60 is None else round(high_60, 2),
+        "high_20": None if prev_high_20 is None else round(prev_high_20, 2),
+        "high_60": None if prev_high_60 is None else round(prev_high_60, 2),
     }
 
 
@@ -372,9 +373,7 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     ath_signal = _detect_ath_signal(closes)
 
     if ath_signal.get("is_60d_high"):
-        t_ath_adj = 8.0
-    elif ath_signal.get("is_20d_high"):
-        t_ath_adj = 4.0
+        t_ath_adj = -8.0
     else:
         t_ath_adj = 0.0
 
