@@ -1,6 +1,9 @@
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
+EVENT_ADJUSTMENT_MAX_PENALTY = 7.0
+EVENT_ADJUSTMENT_RISK_EXPONENT = 0.85
+
 
 def _normalize_event_date(raw_date) -> Optional[date]:
     if isinstance(raw_date, date):
@@ -53,11 +56,16 @@ def calculate_event_adjustment(today: date, events: List[Dict]) -> Tuple[float, 
 
     max_risk_entry = max(risks, key=lambda x: x["risk"])
     r_max = max_risk_entry["risk"]
-    e_adj = -10 * r_max
+    # 固定の線形減点だと強い地合いを過度に打ち消しやすいため、
+    # 緩やかな非線形減点へ変更（高リスク時は残しつつ、中程度リスクは圧縮）。
+    base_penalty = EVENT_ADJUSTMENT_MAX_PENALTY * (r_max ** EVENT_ADJUSTMENT_RISK_EXPONENT)
+    e_adj = -base_penalty
 
     return round(e_adj, 2), {
         "E_adj": round(e_adj, 2),
         "R_max": round(r_max, 3),
         "effective_event": max_risk_entry["event"],
+        "event_penalty_max": EVENT_ADJUSTMENT_MAX_PENALTY,
+        "event_penalty_exponent": EVENT_ADJUSTMENT_RISK_EXPONENT,
         "events": normalized_events,
     }
