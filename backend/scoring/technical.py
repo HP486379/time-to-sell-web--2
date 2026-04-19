@@ -212,6 +212,30 @@ def _calc_convergence_adjustment(convergence: Dict[str, Any], amp: float = CONVE
     return 0.0
 
 
+def _detect_ath_signal(closes: List[float]) -> Dict[str, Any]:
+    if not closes:
+        return {
+            "is_20d_high": False,
+            "is_60d_high": False,
+            "high_20": None,
+            "high_60": None,
+        }
+
+    latest_close = closes[-1]
+    high_20 = max(closes[-20:]) if len(closes) >= 20 else None
+    high_60 = max(closes[-60:]) if len(closes) >= 60 else None
+
+    is_20d_high = (high_20 is not None) and (latest_close >= high_20)
+    is_60d_high = (high_60 is not None) and (latest_close >= high_60)
+
+    return {
+        "is_20d_high": bool(is_20d_high),
+        "is_60d_high": bool(is_60d_high),
+        "high_20": None if high_20 is None else round(high_20, 2),
+        "high_60": None if high_60 is None else round(high_60, 2),
+    }
+
+
 def _build_multi_ma_status(price: float, closes: List[float]) -> Dict[str, Any]:
     if len(closes) < 200:
         return {
@@ -345,8 +369,16 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     # --- NEW: convergence detection + small adjustment ---
     convergence = detect_ma200_convergence(closes)
     t_conv_adj = _calc_convergence_adjustment(convergence, amp=CONVERGENCE_ADJ_MAX)
+    ath_signal = _detect_ath_signal(closes)
 
-    technical_score = clip(technical_score_raw + t_conv_adj)
+    if ath_signal.get("is_60d_high"):
+        t_ath_adj = 8.0
+    elif ath_signal.get("is_20d_high"):
+        t_ath_adj = 4.0
+    else:
+        t_ath_adj = 0.0
+
+    technical_score = clip(technical_score_raw + t_conv_adj + t_ath_adj)
 
     multi_ma = _build_multi_ma_status(current_price, closes)
 
@@ -355,11 +387,13 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "T_base": round(t_base, 2),
         "T_trend": round(t_trend, 2),
         "T_conv_adj": round(t_conv_adj, 2),
+        "T_ath_adj": round(t_ath_adj, 2),
         "technical_score_raw": round(technical_score_raw, 2),
         "technical_score_adj": round(technical_score, 2),
         "base_window": base_window,
         "ma_base": round(ma_base, 2),
         "convergence": convergence,
         "convergence_adj_max": CONVERGENCE_ADJ_MAX,
+        "ath_signal": ath_signal,
         "multi_ma": multi_ma,
     }
