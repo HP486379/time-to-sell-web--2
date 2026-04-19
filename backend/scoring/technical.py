@@ -291,29 +291,52 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     if d <= -20:
         t_base = 0
     elif -20 < d < 0:
-        t_base = 30 * (d + 20) / 20
-    elif 0 <= d < 10:
-        t_base = 30 + 20 * d / 10
-    elif 10 <= d < 25:
-        t_base = 50 + 30 * (d - 10) / 15
+        t_base = 35 * (d + 20) / 20
+    elif 0 <= d < 5:
+        t_base = 40 + 15 * d / 5
+    elif 5 <= d < 10:
+        t_base = 55 + 15 * (d - 5) / 5
+    elif 10 <= d < 20:
+        t_base = 70 + 20 * (d - 10) / 10
+    elif 20 <= d < 30:
+        t_base = 90 + 10 * (d - 20) / 10
     else:
         t_base = 100
 
     # trend evaluation
-    def is_increasing(series: List[float]) -> bool:
-        if len(series) < 20:
+    def is_increasing(series: List[float], lookback: int = 10) -> bool:
+        if len(series) < lookback + 1:
             return False
-        return series[-1] > series[-20]
+        return series[-1] > series[-(lookback + 1)]
 
-    def is_decreasing(series: List[float]) -> bool:
-        if len(series) < 20:
+    def is_decreasing(series: List[float], lookback: int = 10) -> bool:
+        if len(series) < lookback + 1:
             return False
-        return series[-1] < series[-20]
+        return series[-1] < series[-(lookback + 1)]
 
-    if ma_short > ma_mid > ma_long and is_increasing(ma_short_series[-20:]):
-        t_trend = 10
-    elif ma_short < ma_mid < ma_long and is_decreasing(ma_short_series[-20:]):
-        t_trend = -10
+    price_above_mid = current_price > ma_mid
+    price_below_mid = current_price < ma_mid
+    short_up = is_increasing(ma_short_series, lookback=5)
+    short_down = is_decreasing(ma_short_series, lookback=5)
+    mid_up = is_increasing(ma_mid_series, lookback=10)
+    mid_down = is_decreasing(ma_mid_series, lookback=10)
+
+    if ma_short > ma_mid > ma_long and short_up and mid_up:
+        t_trend = 28
+    elif ma_short > ma_mid > ma_long and (short_up or mid_up):
+        t_trend = 20
+    elif ma_short > ma_mid and short_up and price_above_mid:
+        t_trend = 12
+    elif ma_short > ma_long and short_up:
+        t_trend = 6
+    elif ma_short < ma_mid < ma_long and short_down and mid_down:
+        t_trend = -28
+    elif ma_short < ma_mid < ma_long and (short_down or mid_down):
+        t_trend = -20
+    elif ma_short < ma_mid and short_down and price_below_mid:
+        t_trend = -12
+    elif ma_short < ma_long and short_down:
+        t_trend = -6
     else:
         t_trend = 0
 
