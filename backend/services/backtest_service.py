@@ -9,7 +9,11 @@ import math
 import os
 from scoring.events import calculate_event_adjustment
 from scoring.macro import calculate_macro_score
-from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
+from scoring.technical import (
+    calculate_technical_score,
+    calculate_ultra_long_mas,
+    calculate_ultra_long_trend_context,
+)
 from scoring.total_score import calculate_total_score
 
 logger = logging.getLogger(__name__)
@@ -143,6 +147,7 @@ class BacktestService:
         event_adjustment, _ = calculate_event_adjustment(current_date, events)
 
         ma500, ma1000 = calculate_ultra_long_mas(price_history)
+        trend = calculate_ultra_long_trend_context(price_history)
         current_price = price_history[-1][1] if price_history else None
         total = calculate_total_score(
             technical_score,
@@ -151,6 +156,10 @@ class BacktestService:
             current_price=current_price,
             ma500=ma500,
             ma1000=ma1000,
+            ma50=trend.get("ma50"),
+            ma200=trend.get("ma200"),
+            ma50_slope=trend.get("ma50_slope"),
+            ma200_slope=trend.get("ma200_slope"),
         )
         return total
 
