@@ -264,6 +264,16 @@ def _build_multi_ma_status(price: float, closes: List[float]) -> Dict[str, Any]:
     }
 
 
+def _detect_ath_signal(closes: List[float]) -> Dict[str, Any]:
+    if len(closes) < 61:
+        return {"is_60d_high": False, "high_60": None}
+
+    latest_close = closes[-1]
+    prev_high_60 = max(closes[-61:-1])
+    is_60d_high = latest_close > (prev_high_60 * 1.01)
+    return {"is_60d_high": bool(is_60d_high), "high_60": round(prev_high_60, 2)}
+
+
 def calculate_technical_score(price_history: List[Tuple[str, float]], base_window: int = 200):
     closes = [p[1] for p in price_history]
 
@@ -288,16 +298,16 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     d = (current_price - ma_base) / ma_base * 100
 
     # base score
-    if d <= -20:
-        t_base = 0
-    elif -20 < d < 0:
-        t_base = 30 * (d + 20) / 20
+    if d >= 10:
+        t_base = 30
     elif 0 <= d < 10:
-        t_base = 30 + 20 * d / 10
-    elif 10 <= d < 25:
-        t_base = 50 + 30 * (d - 10) / 15
+        t_base = 45 - 1.5 * d
+    elif -5 <= d < 0:
+        t_base = 45 + (-d) * 3
+    elif -10 <= d < -5:
+        t_base = 60 + (-d - 5) * 4
     else:
-        t_base = 100
+        t_base = min(100, 80 + (-d - 10) * 2)
 
     # trend evaluation
     def is_increasing(series: List[float]) -> bool:
@@ -310,10 +320,23 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
             return False
         return series[-1] < series[-20]
 
-    if ma_short > ma_mid > ma_long and is_increasing(ma_short_series[-20:]):
-        t_trend = 10
-    elif ma_short < ma_mid < ma_long and is_decreasing(ma_short_series[-20:]):
-        t_trend = -10
+    short_up = is_increasing(ma_short_series)
+    short_down = is_decreasing(ma_short_series)
+    mid_up = is_increasing(ma_mid_series)
+    mid_down = is_decreasing(ma_mid_series)
+    price_above_mid = current_price > ma_mid
+    price_below_mid = current_price < ma_mid
+
+    if ma_short < ma_mid < ma_long and short_down and mid_down:
+        t_trend = 18
+    elif ma_short < ma_mid < ma_long and (short_down or mid_down):
+        t_trend = 12
+    elif ma_short < ma_mid and (short_down or price_below_mid):
+        t_trend = 8
+    elif ma_short < ma_long and short_down:
+        t_trend = 4
+    elif ma_short > ma_mid > ma_long and short_up and mid_up:
+        t_trend = -2
     else:
         t_trend = 0
 
@@ -322,8 +345,10 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     # --- NEW: convergence detection + small adjustment ---
     convergence = detect_ma200_convergence(closes)
     t_conv_adj = _calc_convergence_adjustment(convergence, amp=CONVERGENCE_ADJ_MAX)
+    ath_signal = _detect_ath_signal(closes)
+    t_ath_adj = -12.0 if ath_signal.get("is_60d_high") else 0.0
 
-    technical_score = clip(technical_score_raw + t_conv_adj)
+    technical_score = clip(technical_score_raw + t_conv_adj + t_ath_adj)
 
     multi_ma = _build_multi_ma_status(current_price, closes)
 
@@ -332,11 +357,13 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "T_base": round(t_base, 2),
         "T_trend": round(t_trend, 2),
         "T_conv_adj": round(t_conv_adj, 2),
+        "T_ath_adj": round(t_ath_adj, 2),
         "technical_score_raw": round(technical_score_raw, 2),
         "technical_score_adj": round(technical_score, 2),
         "base_window": base_window,
         "ma_base": round(ma_base, 2),
         "convergence": convergence,
         "convergence_adj_max": CONVERGENCE_ADJ_MAX,
+        "ath_signal": ath_signal,
         "multi_ma": multi_ma,
     }
