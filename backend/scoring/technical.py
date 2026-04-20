@@ -2,6 +2,9 @@ from typing import List, Optional, Tuple, Dict, Any
 
 ULTRA_LONG_ATTENUATION_FLOOR = 0.6
 ULTRA_LONG_ATTENUATION_SLOPE = 1.5
+ULTRA_LONG_UPSIDE_TRIGGER = 0.28
+ULTRA_LONG_UPSIDE_SLOPE = 0.2
+ULTRA_LONG_UPSIDE_FLOOR = 0.94
 
 # NEW: convergence adjustment amplitude (max +/- points added to technical_score)
 CONVERGENCE_ADJ_MAX = 8.0
@@ -38,18 +41,69 @@ def below_ratio(price: float, ma: Optional[float]) -> Optional[float]:
     return (ma - price) / ma
 
 
+def above_ratio(price: float, ma: Optional[float]) -> Optional[float]:
+    if ma is None or ma == 0:
+        return None
+    if price <= ma:
+        return 0.0
+    return (price - ma) / ma
+
+
+def _calculate_downside_attenuation(dd500: Optional[float], dd1000: Optional[float]) -> Optional[float]:
+    if dd500 is None or dd1000 is None:
+        return None
+    downside_dev = max(dd500, dd1000)
+    attenuation = 1.0 - downside_dev * ULTRA_LONG_ATTENUATION_SLOPE
+    return max(ULTRA_LONG_ATTENUATION_FLOOR, attenuation)
+
+
+def _calculate_upside_attenuation(up500: Optional[float], up1000: Optional[float]) -> Optional[float]:
+    if up500 is None or up1000 is None:
+        return None
+    upside_dev = max(up500, up1000)
+    excess = max(0.0, upside_dev - ULTRA_LONG_UPSIDE_TRIGGER)
+    attenuation = 1.0 - excess * ULTRA_LONG_UPSIDE_SLOPE
+    return max(ULTRA_LONG_UPSIDE_FLOOR, attenuation)
+
+
+def calculate_ultra_long_attenuation_details(
+    price: float,
+    ma500: Optional[float],
+    ma1000: Optional[float],
+) -> Tuple[Optional[float], Dict[str, Any]]:
+    dd500 = below_ratio(price, ma500)
+    dd1000 = below_ratio(price, ma1000)
+    up500 = above_ratio(price, ma500)
+    up1000 = above_ratio(price, ma1000)
+
+    downside_attenuation = _calculate_downside_attenuation(dd500, dd1000)
+    upside_attenuation = _calculate_upside_attenuation(up500, up1000)
+
+    if downside_attenuation is None or upside_attenuation is None:
+        final_attenuation = None
+    else:
+        final_attenuation = min(downside_attenuation, upside_attenuation)
+
+    return final_attenuation, {
+        "ma500": None if ma500 is None else round(ma500, 4),
+        "ma1000": None if ma1000 is None else round(ma1000, 4),
+        "downside_attenuation": None if downside_attenuation is None else round(downside_attenuation, 6),
+        "upside_attenuation": None if upside_attenuation is None else round(upside_attenuation, 6),
+        "final_attenuation": None if final_attenuation is None else round(final_attenuation, 6),
+        "up_deviation_500": None if up500 is None else round(up500, 6),
+        "up_deviation_1000": None if up1000 is None else round(up1000, 6),
+        "down_deviation_500": None if dd500 is None else round(dd500, 6),
+        "down_deviation_1000": None if dd1000 is None else round(dd1000, 6),
+    }
+
+
 def calculate_ultra_long_attenuation(
     price: float,
     ma500: Optional[float],
     ma1000: Optional[float],
 ) -> Optional[float]:
-    dd500 = below_ratio(price, ma500)
-    dd1000 = below_ratio(price, ma1000)
-    if dd500 is None or dd1000 is None:
-        return None
-    ultra_dd = max(dd500, dd1000)
-    attenuation = 1.0 - ultra_dd * ULTRA_LONG_ATTENUATION_SLOPE
-    return max(ULTRA_LONG_ATTENUATION_FLOOR, attenuation)
+    attenuation, _ = calculate_ultra_long_attenuation_details(price, ma500, ma1000)
+    return attenuation
 
 
 def clip(value: float, lower: float = 0.0, upper: float = 100.0) -> float:

@@ -11,7 +11,7 @@ def calculate_total_score(
     ma500: Optional[float] = None,
     ma1000: Optional[float] = None,
 ) -> float:
-    raw_score = round(0.6 * technical + 0.4 * macro + event_adjustment, 2)
+    raw_score = round(0.7 * technical + 0.3 * macro + event_adjustment, 2)
     attenuation = (
         calculate_ultra_long_attenuation(current_price, ma500, ma1000)
         if current_price is not None
