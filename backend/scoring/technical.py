@@ -212,6 +212,31 @@ def _calc_convergence_adjustment(convergence: Dict[str, Any], amp: float = CONVE
     return 0.0
 
 
+def _detect_ath_signal(closes: List[float]) -> Dict[str, Any]:
+    if not closes:
+        return {
+            "is_20d_high": False,
+            "is_60d_high": False,
+            "high_20": None,
+            "high_60": None,
+        }
+
+    latest_close = closes[-1]
+    # 「更新」を見るため当日を除く
+    prev_high_20 = max(closes[-21:-1]) if len(closes) >= 21 else None
+    prev_high_60 = max(closes[-61:-1]) if len(closes) >= 61 else None
+
+    is_20d_high = (prev_high_20 is not None) and (latest_close > prev_high_20)
+    is_60d_high = (prev_high_60 is not None) and (latest_close > prev_high_60)
+
+    return {
+        "is_20d_high": bool(is_20d_high),
+        "is_60d_high": bool(is_60d_high),
+        "high_20": None if prev_high_20 is None else round(prev_high_20, 2),
+        "high_60": None if prev_high_60 is None else round(prev_high_60, 2),
+    }
+
+
 def _build_multi_ma_status(price: float, closes: List[float]) -> Dict[str, Any]:
     if len(closes) < 200:
         return {
@@ -309,22 +334,26 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     if d <= -20:
         t_base = 0
     elif -20 < d < 0:
-        t_base = 30 * (d + 20) / 20
-    elif 0 <= d < 10:
-        t_base = 30 + 20 * d / 10
-    elif 10 <= d < 25:
-        t_base = 50 + 30 * (d - 10) / 15
+        t_base = 35 * (d + 20) / 20
+    elif 0 <= d < 5:
+        t_base = 40 + 15 * d / 5
+    elif 5 <= d < 10:
+        t_base = 55 + 15 * (d - 5) / 5
+    elif 10 <= d < 20:
+        t_base = 70 + 20 * (d - 10) / 10
+    elif 20 <= d < 30:
+        t_base = 90 + 10 * (d - 20) / 10
     else:
         t_base = 100
 
     # trend evaluation
-    def is_increasing(series: List[float]) -> bool:
-        if len(series) < 20:
+    def is_increasing(series: List[float], lookback: int = 10) -> bool:
+        if len(series) < lookback + 1:
             return False
-        return series[-1] > series[-20]
+        return series[-1] > series[-(lookback + 1)]
 
-    def is_decreasing(series: List[float]) -> bool:
-        if len(series) < 20:
+    def is_decreasing(series: List[float], lookback: int = 10) -> bool:
+        if len(series) < lookback + 1:
             return False
         return series[-1] < series[-20]
 
