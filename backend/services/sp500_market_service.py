@@ -1496,67 +1496,8 @@ class SP500MarketService:
         tried_providers.append("stooq")
         self._set_debug(index_type, tried_providers=tried_providers)
 
-        try:
-            hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
-            self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"])
-            return hist
-        except Exception as exc:
-            self._add_provider_reject_reason(index_type, f"yfinance:{symbol}:fetch_error:{exc}")
-            tried_providers.append("yfinance")
-            self._set_debug(index_type, tried_providers=tried_providers)
-
-        hist = self._fetch_sp500_from_github_dataset(start, end)
-        self._record_provider_attempt(
-            index_type,
-            provider="github_dataset",
-            success=True,
-            history=hist,
-            symbol=symbol,
-        )
-        self._set_last_source(index_type, "real")
-        self._update_last_good_history(index_type, hist, source_hint="real")
-        self._set_debug(
-            index_type,
-            tried_providers=tried_providers + ["github_dataset"],
-            adopted_provider="github_dataset",
-            adopted_symbol=symbol,
-            fetch_error=None,
-            quality_check={"symbol": symbol, "result": "success", "reason": None},
-        )
-        return hist
-
-    def _fetch_sp500_from_github_dataset(self, start: date, end: date) -> List[Tuple[str, float]]:
-        """
-        GitHub上の公開S&P500データ（月次）を営業日へ前方補完して返す。
-        外部プロキシ制約下でも取得可能な実データ経路として利用する。
-        """
-        url = "https://raw.githubusercontent.com/datasets/s-and-p-500/master/data/data.csv"
-        df = pd.read_csv(url, usecols=["Date", "SP500"])
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df["SP500"] = pd.to_numeric(df["SP500"], errors="coerce")
-        df = df.dropna(subset=["Date", "SP500"]).sort_values("Date")
-        if df.empty:
-            raise ValueError("github_dataset_empty")
-
-        # start直前の値を引けるように余裕を持って抽出
-        from_dt = pd.Timestamp(start) - pd.Timedelta(days=40)
-        to_dt = pd.Timestamp(end)
-        window = df[(df["Date"] <= to_dt) & (df["Date"] >= from_dt)].copy()
-        if window.empty:
-            raise ValueError("github_dataset_window_empty")
-
-        series = window.set_index("Date")["SP500"].sort_index()
-        business_days = pd.date_range(start=start, end=end, freq="B")
-        reindexed = series.reindex(series.index.union(business_days)).sort_index().ffill().reindex(business_days)
-        reindexed = reindexed.dropna()
-        if reindexed.empty:
-            raise ValueError("github_dataset_reindex_empty")
-
-        hist = [(idx.date().isoformat(), round(float(v), 2)) for idx, v in reindexed.items()]
-        reason = self._validate_history(hist, "SP500")
-        provider_reason = self._provider_acceptance_reason(hist, "SP500")
-        if reason or provider_reason:
-            raise ValueError(f"github_dataset_rejected:{provider_reason or reason}")
+        hist = self._fetch_yfinance_history_with_retry(start, end, index_type, enforce_quality=False)
+        self._set_debug(index_type, tried_providers=tried_providers + ["yfinance"])
         return hist
 
     def _topix_alt_1308_quality_reason(self, history: List[Tuple[str, float]]) -> Optional[str]:
@@ -2163,8 +2104,6 @@ class SP500MarketService:
             price_type = self._resolve_price_type(index_type)
             if index_type == "TOPIX":
                 return self._fetch_topix_with_provider_priority(start, end, allow_alt_probe=True)
-            if index_type == "SP500":
-                return self._fetch_sp500_with_provider_priority(start, end)
             if price_type == "index_jpy":
                 return self._get_validated_index_jpy_history(start, end, index_type)
 
