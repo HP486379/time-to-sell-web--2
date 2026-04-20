@@ -5,6 +5,9 @@ ULTRA_LONG_ATTENUATION_SLOPE = 1.5
 ULTRA_LONG_UPSIDE_TRIGGER = 0.28
 ULTRA_LONG_UPSIDE_SLOPE = 0.2
 ULTRA_LONG_UPSIDE_FLOOR = 0.94
+ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD = 0.0003
+ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD = 0.0005
+ULTRA_LONG_TREND_SLOPE_LOOKBACK = 20
 
 # NEW: convergence adjustment amplitude (max +/- points added to technical_score)
 CONVERGENCE_ADJ_MAX = 8.0
@@ -33,6 +36,48 @@ def calculate_ultra_long_mas(price_history: List[Tuple[str, float]]) -> Tuple[Op
     return ma500, ma1000
 
 
+def _normalized_ma_slope(ma_series: List[float], lookback: int) -> Optional[float]:
+    if len(ma_series) < lookback + 1:
+        return None
+    prev = ma_series[-(lookback + 1)]
+    if prev == 0:
+        return None
+    return (ma_series[-1] - prev) / prev / lookback
+
+
+def calculate_ultra_long_trend_context(
+    price_history: List[Tuple[str, float]],
+    slope_lookback: int = ULTRA_LONG_TREND_SLOPE_LOOKBACK,
+) -> Dict[str, Any]:
+    closes = [p[1] for p in price_history]
+    ma50 = latest_moving_average(closes, 50)
+    ma200 = latest_moving_average(closes, 200)
+    ma50_series = moving_average(closes, 50) if len(closes) >= 50 + slope_lookback else []
+    ma200_series = moving_average(closes, 200) if len(closes) >= 200 + slope_lookback else []
+    ma50_slope = _normalized_ma_slope(ma50_series, slope_lookback) if ma50_series else None
+    ma200_slope = _normalized_ma_slope(ma200_series, slope_lookback) if ma200_series else None
+
+    strong_by_ma200 = (ma200_slope is not None) and (ma200_slope > ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD)
+    strong_by_ma50 = (
+        ma50 is not None
+        and ma200 is not None
+        and ma50_slope is not None
+        and ma50 > ma200
+        and ma50_slope > ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD
+    )
+    strong_trend = bool(strong_by_ma200 or strong_by_ma50)
+
+    return {
+        "ma50": ma50,
+        "ma200": ma200,
+        "ma50_slope": ma50_slope,
+        "ma200_slope": ma200_slope,
+        "strong_trend": strong_trend,
+        "strong_by_ma200_slope": bool(strong_by_ma200),
+        "strong_by_ma50_stack_slope": bool(strong_by_ma50),
+    }
+
+
 def below_ratio(price: float, ma: Optional[float]) -> Optional[float]:
     if ma is None or ma == 0:
         return None
@@ -50,17 +95,19 @@ def above_ratio(price: float, ma: Optional[float]) -> Optional[float]:
 
 
 def _calculate_downside_attenuation(dd500: Optional[float], dd1000: Optional[float]) -> Optional[float]:
-    if dd500 is None or dd1000 is None:
+    downside_candidates = [v for v in (dd500, dd1000) if v is not None]
+    if not downside_candidates:
         return None
-    downside_dev = max(dd500, dd1000)
+    downside_dev = max(downside_candidates)
     attenuation = 1.0 - downside_dev * ULTRA_LONG_ATTENUATION_SLOPE
     return max(ULTRA_LONG_ATTENUATION_FLOOR, attenuation)
 
 
 def _calculate_upside_attenuation(up500: Optional[float], up1000: Optional[float]) -> Optional[float]:
-    if up500 is None or up1000 is None:
+    upside_candidates = [v for v in (up500, up1000) if v is not None]
+    if not upside_candidates:
         return None
-    upside_dev = max(up500, up1000)
+    upside_dev = max(upside_candidates)
     excess = max(0.0, upside_dev - ULTRA_LONG_UPSIDE_TRIGGER)
     attenuation = 1.0 - excess * ULTRA_LONG_UPSIDE_SLOPE
     return max(ULTRA_LONG_UPSIDE_FLOOR, attenuation)
@@ -70,6 +117,10 @@ def calculate_ultra_long_attenuation_details(
     price: float,
     ma500: Optional[float],
     ma1000: Optional[float],
+    ma50: Optional[float] = None,
+    ma200: Optional[float] = None,
+    ma50_slope: Optional[float] = None,
+    ma200_slope: Optional[float] = None,
 ) -> Tuple[Optional[float], Dict[str, Any]]:
     dd500 = below_ratio(price, ma500)
     dd1000 = below_ratio(price, ma1000)
@@ -79,7 +130,19 @@ def calculate_ultra_long_attenuation_details(
     downside_attenuation = _calculate_downside_attenuation(dd500, dd1000)
     upside_attenuation = _calculate_upside_attenuation(up500, up1000)
 
-    if downside_attenuation is None or upside_attenuation is None:
+    strong_by_ma200 = (ma200_slope is not None) and (ma200_slope > ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD)
+    strong_by_ma50 = (
+        ma50 is not None
+        and ma200 is not None
+        and ma50_slope is not None
+        and ma50 > ma200
+        and ma50_slope > ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD
+    )
+    strong_trend = bool(strong_by_ma200 or strong_by_ma50)
+
+    if strong_trend:
+        final_attenuation = 1.0
+    elif downside_attenuation is None or upside_attenuation is None:
         final_attenuation = None
     else:
         final_attenuation = min(downside_attenuation, upside_attenuation)
@@ -94,6 +157,15 @@ def calculate_ultra_long_attenuation_details(
         "up_deviation_1000": None if up1000 is None else round(up1000, 6),
         "down_deviation_500": None if dd500 is None else round(dd500, 6),
         "down_deviation_1000": None if dd1000 is None else round(dd1000, 6),
+        "ma50": None if ma50 is None else round(ma50, 4),
+        "ma200": None if ma200 is None else round(ma200, 4),
+        "ma50_slope": None if ma50_slope is None else round(ma50_slope, 8),
+        "ma200_slope": None if ma200_slope is None else round(ma200_slope, 8),
+        "strong_trend": strong_trend,
+        "strong_by_ma200_slope": bool(strong_by_ma200),
+        "strong_by_ma50_stack_slope": bool(strong_by_ma50),
+        "trend_ma200_slope_threshold": ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD,
+        "trend_ma50_slope_threshold": ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD,
     }
 
 
@@ -101,8 +173,14 @@ def calculate_ultra_long_attenuation(
     price: float,
     ma500: Optional[float],
     ma1000: Optional[float],
+    ma50: Optional[float] = None,
+    ma200: Optional[float] = None,
+    ma50_slope: Optional[float] = None,
+    ma200_slope: Optional[float] = None,
 ) -> Optional[float]:
-    attenuation, _ = calculate_ultra_long_attenuation_details(price, ma500, ma1000)
+    attenuation, _ = calculate_ultra_long_attenuation_details(
+        price, ma500, ma1000, ma50=ma50, ma200=ma200, ma50_slope=ma50_slope, ma200_slope=ma200_slope
+    )
     return attenuation
 
 
