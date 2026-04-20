@@ -212,6 +212,31 @@ def _calc_convergence_adjustment(convergence: Dict[str, Any], amp: float = CONVE
     return 0.0
 
 
+def _detect_ath_signal(closes: List[float]) -> Dict[str, Any]:
+    if not closes:
+        return {
+            "is_20d_high": False,
+            "is_60d_high": False,
+            "high_20": None,
+            "high_60": None,
+        }
+
+    latest_close = closes[-1]
+    # 「更新」を見るため当日を除く
+    prev_high_20 = max(closes[-21:-1]) if len(closes) >= 21 else None
+    prev_high_60 = max(closes[-61:-1]) if len(closes) >= 61 else None
+
+    is_20d_high = (prev_high_20 is not None) and (latest_close > prev_high_20)
+    is_60d_high = (prev_high_60 is not None) and (latest_close > prev_high_60)
+
+    return {
+        "is_20d_high": bool(is_20d_high),
+        "is_60d_high": bool(is_60d_high),
+        "high_20": None if prev_high_20 is None else round(prev_high_20, 2),
+        "high_60": None if prev_high_60 is None else round(prev_high_60, 2),
+    }
+
+
 def _build_multi_ma_status(price: float, closes: List[float]) -> Dict[str, Any]:
     if len(closes) < 200:
         return {
@@ -310,13 +335,13 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         t_base = min(100, 80 + (-d - 10) * 2)
 
     # trend evaluation
-    def is_increasing(series: List[float]) -> bool:
-        if len(series) < 20:
+    def is_increasing(series: List[float], lookback: int = 10) -> bool:
+        if len(series) < lookback + 1:
             return False
-        return series[-1] > series[-20]
+        return series[-1] > series[-(lookback + 1)]
 
-    def is_decreasing(series: List[float]) -> bool:
-        if len(series) < 20:
+    def is_decreasing(series: List[float], lookback: int = 10) -> bool:
+        if len(series) < lookback + 1:
             return False
         return series[-1] < series[-20]
 
@@ -340,7 +365,15 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     else:
         t_trend = 0
 
-    technical_score_raw = clip(t_base + t_trend)
+    phase = _detect_market_phase(current_price, ma_short, ma_mid, ma_long)
+    if phase == "bull":
+        t_phase_adj = 0.0
+    elif phase == "range":
+        t_phase_adj = -2.0
+    else:  # bear
+        t_phase_adj = -4.0
+
+    technical_score_raw = clip(t_base + t_trend + t_phase_adj)
 
     # --- NEW: convergence detection + small adjustment ---
     convergence = detect_ma200_convergence(closes)
@@ -356,6 +389,8 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "d": round(d, 2),
         "T_base": round(t_base, 2),
         "T_trend": round(t_trend, 2),
+        "phase": phase,
+        "T_phase_adj": round(t_phase_adj, 2),
         "T_conv_adj": round(t_conv_adj, 2),
         "T_ath_adj": round(t_ath_adj, 2),
         "technical_score_raw": round(technical_score_raw, 2),
