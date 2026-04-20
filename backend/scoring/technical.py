@@ -290,9 +290,9 @@ def _build_multi_ma_status(price: float, closes: List[float]) -> Dict[str, Any]:
 
 
 def _detect_market_phase(price: float, ma20: float, ma60: float, ma200: float) -> str:
-    if ma20 > ma60 > ma200:
+    if price > ma60 and ma20 > ma60 > ma200:
         return "bull"
-    if ma20 < ma60 < ma200:
+    if price < ma60 and ma20 < ma60 < ma200:
         return "bear"
     return "range"
 
@@ -385,13 +385,13 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
 
     phase = _detect_market_phase(current_price, ma_short, ma_mid, ma_long)
     if phase == "bull":
-        adjusted_t_trend = float(t_trend)
+        t_phase_adj = 0.0
     elif phase == "range":
-        adjusted_t_trend = float(t_trend) * 0.5
+        t_phase_adj = -2.0
     else:  # bear
-        adjusted_t_trend = -5.0
+        t_phase_adj = -4.0
 
-    technical_score_raw = clip(t_base + adjusted_t_trend)
+    technical_score_raw = clip(t_base + t_trend + t_phase_adj)
 
     # --- NEW: convergence detection + small adjustment ---
     convergence = detect_ma200_convergence(closes)
@@ -407,8 +407,8 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "d": round(d, 2),
         "T_base": round(t_base, 2),
         "T_trend": round(t_trend, 2),
-        "adjusted_T_trend": round(adjusted_t_trend, 2),
         "phase": phase,
+        "T_phase_adj": round(t_phase_adj, 2),
         "T_conv_adj": round(t_conv_adj, 2),
         "T_ath_adj": round(t_ath_adj, 2),
         "technical_score_raw": round(technical_score_raw, 2),
