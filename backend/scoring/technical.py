@@ -337,21 +337,21 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     def is_decreasing(series: List[float], lookback: int = 10) -> bool:
         if len(series) < lookback + 1:
             return False
-        return series[-1] < series[-(lookback + 1)]
+        return series[-1] < series[-20]
 
+    short_up = is_increasing(ma_short_series)
+    short_down = is_decreasing(ma_short_series)
+    mid_up = is_increasing(ma_mid_series)
+    mid_down = is_decreasing(ma_mid_series)
     price_above_mid = current_price > ma_mid
     price_below_mid = current_price < ma_mid
-    short_up = is_increasing(ma_short_series, lookback=5)
-    short_down = is_decreasing(ma_short_series, lookback=5)
-    mid_up = is_increasing(ma_mid_series, lookback=10)
-    mid_down = is_decreasing(ma_mid_series, lookback=10)
 
     if ma_short > ma_mid > ma_long and short_up and mid_up:
-        t_trend = 8
+        t_trend = 10
     elif ma_short > ma_mid > ma_long and (short_up or mid_up):
-        t_trend = 6
+        t_trend = 7
     elif ma_short > ma_mid and short_up and price_above_mid:
-        t_trend = 2
+        t_trend = 3
     elif ma_short > ma_long and short_up:
         t_trend = 1
     elif ma_short < ma_mid < ma_long and short_down and mid_down:
