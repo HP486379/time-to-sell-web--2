@@ -289,6 +289,16 @@ def _build_multi_ma_status(price: float, closes: List[float]) -> Dict[str, Any]:
     }
 
 
+def _detect_ath_signal(closes: List[float]) -> Dict[str, Any]:
+    if len(closes) < 61:
+        return {"is_60d_high": False, "high_60": None}
+
+    latest_close = closes[-1]
+    prev_high_60 = max(closes[-61:-1])
+    is_60d_high = latest_close > (prev_high_60 * 1.01)
+    return {"is_60d_high": bool(is_60d_high), "high_60": round(prev_high_60, 2)}
+
+
 def calculate_technical_score(price_history: List[Tuple[str, float]], base_window: int = 200):
     closes = [p[1] for p in price_history]
 
@@ -371,11 +381,7 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     convergence = detect_ma200_convergence(closes)
     t_conv_adj = _calc_convergence_adjustment(convergence, amp=CONVERGENCE_ADJ_MAX)
     ath_signal = _detect_ath_signal(closes)
-
-    if ath_signal.get("is_60d_high"):
-        t_ath_adj = -8.0
-    else:
-        t_ath_adj = 0.0
+    t_ath_adj = -12.0 if ath_signal.get("is_60d_high") else 0.0
 
     technical_score = clip(technical_score_raw + t_conv_adj + t_ath_adj)
 
