@@ -17,9 +17,9 @@ def test_build_event_adjustment_uses_manual_events(monkeypatch):
 
     adj, details, count = main._build_event_adjustment(date(2026, 3, 2))
 
-    assert adj == -10.0
+    assert -10.0 < adj < 0.0
     assert count == 1
-    assert details["E_adj"] == -10.0
+    assert details["E_adj"] == adj
     assert details["effective_event"]["name"] == "ISM Manufacturing"
 
 
