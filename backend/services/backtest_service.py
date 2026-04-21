@@ -9,7 +9,11 @@ import math
 import os
 from scoring.events import calculate_event_adjustment
 from scoring.macro import calculate_macro_score
-from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
+from scoring.technical import (
+    calculate_technical_score,
+    calculate_ultra_long_mas,
+    calculate_ultra_long_trend_context,
+)
 from scoring.total_score import calculate_total_score
 
 logger = logging.getLogger(__name__)
@@ -143,6 +147,7 @@ class BacktestService:
         event_adjustment, _ = calculate_event_adjustment(current_date, events)
 
         ma500, ma1000 = calculate_ultra_long_mas(price_history)
+        trend = calculate_ultra_long_trend_context(price_history)
         current_price = price_history[-1][1] if price_history else None
         total = calculate_total_score(
             technical_score,
@@ -151,6 +156,10 @@ class BacktestService:
             current_price=current_price,
             ma500=ma500,
             ma1000=ma1000,
+            ma50=trend.get("ma50"),
+            ma200=trend.get("ma200"),
+            ma50_slope=trend.get("ma50_slope"),
+            ma200_slope=trend.get("ma200_slope"),
         )
         return total
 
@@ -208,6 +217,22 @@ class BacktestService:
         score_min: float | None = None
         score_max: float | None = None
         buy_filled_dates: List[str] = []
+        warning_episode_active = False
+        current_holding_days = 0
+        holding_days_log: List[int] = []
+        sell_cooldown_days = 5
+        last_sell_idx: int | None = None
+        yearly_trade_counts: Dict[int, int] = {}
+        position_entry_price: float | None = None
+        position_peak_price: float | None = None
+        max_runup_pct = 0.0
+        trailing_exit_count = 0
+        trailing_partial_exit_count = 0
+        realized_profit_amount = 0.0
+        peak_profit_amount = 0.0
+        reentry_count = 0
+        missed_trend_count = 0
+        breakdown_streak = 0
 
         hold_cash = initial_cash_safe
         hold_shares = 0
@@ -234,23 +259,76 @@ class BacktestService:
                 if score >= sell_threshold_safe:
                     sell_threshold_hit_days += 1
 
-                if shares > 0 and score >= sell_threshold_safe:
-                    cash += shares * close
+                technical_details = {}
+                try:
+                    _, technical_details = calculate_technical_score(sub_history, base_window=score_ma)
+                except Exception:
+                    technical_details = {}
+                ma50_for_breakdown = float(technical_details.get("ma50_for_breakdown") or close)
+                ma200_for_breakdown = float(technical_details.get("ma200_for_breakdown") or close)
+                ma50_slope = technical_details.get("ma50_slope")
+                price_below_ma50 = close < ma50_for_breakdown
+                strong_uptrend = bool(technical_details.get("strong_uptrend"))
+                trend_break = (
+                    close < ma200_for_breakdown
+                    and ma50_for_breakdown < ma200_for_breakdown
+                    and (ma50_slope is not None and float(ma50_slope) <= 0.0)
+                    and price_below_ma50
+                )
+                breakdown_streak = breakdown_streak + 1 if trend_break else 0
+                breakdown_confirmed = breakdown_streak >= 2
+                trade_year = current_dt.year
+                yearly_trade_count = yearly_trade_counts.get(trade_year, 0)
+
+                if shares > 0:
+                    current_holding_days += 1
+                    if position_peak_price is None:
+                        position_peak_price = close
+                    else:
+                        position_peak_price = max(position_peak_price, close)
+                    if position_entry_price is not None and position_entry_price > 0:
+                        runup = (close - position_entry_price) / position_entry_price
+                        max_runup_pct = max(max_runup_pct, runup * 100.0)
+                trend_reentry_signal = (
+                    close > ma200_for_breakdown
+                    and (ma50_slope is not None and float(ma50_slope) > 0.0)
+                )
+                trend_stack_confirmed = ma50_for_breakdown > ma200_for_breakdown
+
+                if shares > 0 and breakdown_confirmed and not strong_uptrend:
+                    qty = shares
+                    cash += qty * close
                     sell_signal_count += 1
                     trades.append(
-                        {"action": "SELL", "date": date_str, "quantity": shares, "price": close}
+                        {"action": "SELL", "mode": "full_exit", "date": date_str, "quantity": qty, "price": close}
                     )
+                    if position_entry_price is not None and position_peak_price is not None:
+                        realized_profit_amount += qty * (close - position_entry_price)
+                        peak_profit_amount += qty * (position_peak_price - position_entry_price)
+                    yearly_trade_counts[trade_year] = yearly_trade_count + 1
+                    last_sell_idx = idx
                     shares = 0
-                elif shares == 0 and score < buy_threshold_safe:
+                    warning_episode_active = False
+                    holding_days_log.append(current_holding_days)
+                    current_holding_days = 0
+                    position_entry_price = None
+                    position_peak_price = None
+                if shares == 0 and trend_reentry_signal:
                     qty = floor(cash / close)
                     if qty > 0:
                         cash -= qty * close
                         shares += qty
                         buy_signal_count += 1
                         buy_filled_dates.append(date_str)
+                        buy_mode = "reentry_trend" if trend_stack_confirmed else "reentry_trend_early"
                         trades.append(
-                            {"action": "BUY", "date": date_str, "quantity": qty, "price": close}
+                            {"action": "BUY", "mode": buy_mode, "date": date_str, "quantity": qty, "price": close}
                         )
+                        current_holding_days = 0
+                        warning_episode_active = False
+                        position_entry_price = close
+                        position_peak_price = close
+                        reentry_count += 1
 
             portfolio_value = cash + shares * close
             portfolio_history.append({"date": date_str, "value": round(portfolio_value, 2)})
@@ -280,6 +358,24 @@ class BacktestService:
 
         max_dd = self._compute_max_drawdown([p["value"] for p in portfolio_history])
         max_dd = self._safe_float(max_dd, field_name="max_drawdown_pct")
+        buy_hold_max_dd = self._compute_max_drawdown([p["value"] for p in buy_hold_history])
+        buy_hold_max_dd = self._safe_float(buy_hold_max_dd, field_name="buy_hold_max_drawdown_pct")
+        if shares > 0 and current_holding_days > 0:
+            holding_days_log.append(current_holding_days)
+        average_holding_days = (
+            round(sum(holding_days_log) / len(holding_days_log), 2) if holding_days_log else 0.0
+        )
+        max_drawdown_improvement = round(buy_hold_max_dd - max_dd, 2)
+        realized_trade_count = max(1, sell_signal_count)
+        profit_per_trade = round((final_value - initial_cash_safe) / realized_trade_count, 2)
+        yearly_trade_count_max = max(yearly_trade_counts.values()) if yearly_trade_counts else 0
+        trailing_exit_rate = round((trailing_exit_count / sell_signal_count), 4) if sell_signal_count > 0 else 0.0
+        trailing_partial_exit_rate = round((trailing_partial_exit_count / sell_signal_count), 4) if sell_signal_count > 0 else 0.0
+        trend_capture_rate = round((realized_profit_amount / peak_profit_amount), 4) if peak_profit_amount > 0 else 0.0
+        missed_trend_rate = round(
+            (missed_trend_count / (reentry_count + missed_trend_count)),
+            4,
+        ) if (reentry_count + missed_trend_count) > 0 else 0.0
         entered_market_once = buy_signal_count > 0
         in_position = shares > 0
         final_trade_count = len(trades)
@@ -331,7 +427,17 @@ class BacktestService:
             "total_return_pct": round(total_return * 100, 2),
             "cagr_pct": round(cagr * 100, 2),
             "max_drawdown_pct": max_dd,
+            "buy_hold_max_drawdown_pct": buy_hold_max_dd,
+            "max_drawdown_improvement_pct": max_drawdown_improvement,
             "trade_count": len(trades),
+            "average_holding_days": average_holding_days,
+            "profit_per_trade": profit_per_trade,
+            "max_runup_pct": round(max_runup_pct, 2),
+            "trailing_exit_rate": trailing_exit_rate,
+            "trailing_partial_exit_rate": trailing_partial_exit_rate,
+            "trend_capture_rate": trend_capture_rate,
+            "reentry_count": reentry_count,
+            "missed_trend_rate": missed_trend_rate,
             "trades": trades,
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
@@ -352,5 +458,16 @@ class BacktestService:
                 "score_min": score_min,
                 "score_max": score_max,
                 "diagnosis": diagnosis,
+                "average_holding_days": average_holding_days,
+                "buy_hold_max_drawdown_pct": buy_hold_max_dd,
+                "max_drawdown_improvement_pct": max_drawdown_improvement,
+                "profit_per_trade": profit_per_trade,
+                "yearly_trade_count_max": yearly_trade_count_max,
+                "max_runup_pct": round(max_runup_pct, 2),
+                "trailing_exit_rate": trailing_exit_rate,
+                "trailing_partial_exit_rate": trailing_partial_exit_rate,
+                "trend_capture_rate": trend_capture_rate,
+                "reentry_count": reentry_count,
+                "missed_trend_rate": missed_trend_rate,
             },
         }
