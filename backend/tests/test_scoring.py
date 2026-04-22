@@ -59,3 +59,35 @@ def test_label_boundaries():
     assert get_label(65) == "利確を検討"
     assert get_label(50) == "ホールド"
     assert get_label(20) == "買い増し・追加投資検討"
+
+
+def test_trend_warning_mode_is_not_breakdown():
+    history = []
+    base_date = date(2020, 1, 1)
+    closes = [100 + i * 0.2 for i in range(240)] + [148 - i for i in range(20)]
+    for i, close in enumerate(closes):
+        history.append(((base_date + timedelta(days=i)).isoformat(), float(close)))
+
+    _, details = calculate_technical_score(history)
+    assert details["warning_mode"] is True
+    assert details["breakdown_confirmed"] is False
+    assert details["T_trend"] == -2
+    assert details["T_sell"] == -2.0
+
+
+def test_trend_breakdown_confirmed_dominates_sell_pressure():
+    history = []
+    base_date = date(2020, 1, 1)
+    closes = [100 + i * 0.4 for i in range(180)]
+    last = closes[-1]
+    for _ in range(80):
+        last -= 1.2
+        closes.append(last)
+    for i, close in enumerate(closes):
+        history.append(((base_date + timedelta(days=i)).isoformat(), float(close)))
+
+    _, details = calculate_technical_score(history)
+    assert details["warning_mode"] is True
+    assert details["breakdown_confirmed"] is True
+    assert details["T_trend"] == -8
+    assert details["T_sell"] == 18.0
