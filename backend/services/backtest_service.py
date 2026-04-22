@@ -233,6 +233,17 @@ class BacktestService:
         reentry_count = 0
         missed_trend_count = 0
         breakdown_streak = 0
+        dip_debug_counters = {
+            "drawdown_event_count": 0,
+            "dip_signal_true_count": 0,
+            "dip_blocked_by_position_count": 0,
+            "dip_blocked_by_cooldown_count": 0,
+            "dip_blocked_by_trade_cap_count": 0,
+            "dip_blocked_by_other_guard_count": 0,
+            "dip_actual_buy_count": 0,
+        }
+        last_drawdown_idx: int | None = None
+        drawdown_active = False
 
         hold_cash = initial_cash_safe
         hold_shares = 0
@@ -279,6 +290,7 @@ class BacktestService:
                 breakdown_confirmed = breakdown_streak >= 2
                 trade_year = current_dt.year
                 yearly_trade_count = yearly_trade_counts.get(trade_year, 0)
+                in_cooldown = (last_sell_idx is not None) and ((idx - last_sell_idx) <= sell_cooldown_days)
 
                 if shares > 0:
                     current_holding_days += 1
@@ -289,11 +301,28 @@ class BacktestService:
                     if position_entry_price is not None and position_entry_price > 0:
                         runup = (close - position_entry_price) / position_entry_price
                         max_runup_pct = max(max_runup_pct, runup * 100.0)
-                trend_reentry_signal = (
+                trend_reentry_base = (
                     close > ma200_for_breakdown
                     and (ma50_slope is not None and float(ma50_slope) > 0.0)
                 )
-                trend_stack_confirmed = ma50_for_breakdown > ma200_for_breakdown
+                dip_reentry_base = ma50_slope is not None and float(ma50_slope) > 0.0
+                recent_peak = max(p for _, p in sub_history[-60:]) if sub_history else close
+                drawdown_from_recent_peak = (
+                    ((close - recent_peak) / recent_peak) if recent_peak > 0 else 0.0
+                )
+                drawdown_hit = drawdown_from_recent_peak <= -0.05
+                if drawdown_hit and (not drawdown_active):
+                    dip_debug_counters["drawdown_event_count"] += 1
+                if drawdown_hit:
+                    last_drawdown_idx = idx
+                drawdown_active = drawdown_hit
+                normal_reentry_signal = trend_reentry_base and close > ma50_for_breakdown
+                recent_drawdown_window = (
+                    last_drawdown_idx is not None and ((idx - last_drawdown_idx) <= 20)
+                )
+                dip_reentry_signal = dip_reentry_base and recent_drawdown_window
+                if dip_reentry_signal:
+                    dip_debug_counters["dip_signal_true_count"] += 1
 
                 if shares > 0 and breakdown_confirmed and not strong_uptrend:
                     qty = shares
@@ -313,14 +342,14 @@ class BacktestService:
                     current_holding_days = 0
                     position_entry_price = None
                     position_peak_price = None
-                if shares == 0 and trend_reentry_signal:
+                if shares == 0 and dip_reentry_signal:
                     qty = floor(cash / close)
                     if qty > 0:
                         cash -= qty * close
                         shares += qty
                         buy_signal_count += 1
                         buy_filled_dates.append(date_str)
-                        buy_mode = "reentry_trend" if trend_stack_confirmed else "reentry_trend_early"
+                        buy_mode = "reentry_dip"
                         trades.append(
                             {"action": "BUY", "mode": buy_mode, "date": date_str, "quantity": qty, "price": close}
                         )
@@ -329,6 +358,34 @@ class BacktestService:
                         position_entry_price = close
                         position_peak_price = close
                         reentry_count += 1
+                        dip_debug_counters["dip_actual_buy_count"] += 1
+                    else:
+                        dip_debug_counters["dip_blocked_by_other_guard_count"] += 1
+                elif shares == 0 and normal_reentry_signal:
+                    qty = floor(cash / close)
+                    if qty > 0:
+                        cash -= qty * close
+                        shares += qty
+                        buy_signal_count += 1
+                        buy_filled_dates.append(date_str)
+                        buy_mode = "reentry_trend"
+                        trades.append(
+                            {"action": "BUY", "mode": buy_mode, "date": date_str, "quantity": qty, "price": close}
+                        )
+                        current_holding_days = 0
+                        warning_episode_active = False
+                        position_entry_price = close
+                        position_peak_price = close
+                        reentry_count += 1
+                elif dip_reentry_signal:
+                    if shares > 0:
+                        dip_debug_counters["dip_blocked_by_position_count"] += 1
+                    elif in_cooldown:
+                        dip_debug_counters["dip_blocked_by_cooldown_count"] += 1
+                    elif yearly_trade_count >= 40:
+                        dip_debug_counters["dip_blocked_by_trade_cap_count"] += 1
+                    else:
+                        dip_debug_counters["dip_blocked_by_other_guard_count"] += 1
 
             portfolio_value = cash + shares * close
             portfolio_history.append({"date": date_str, "value": round(portfolio_value, 2)})
@@ -437,8 +494,9 @@ class BacktestService:
             "trailing_partial_exit_rate": trailing_partial_exit_rate,
             "trend_capture_rate": trend_capture_rate,
             "reentry_count": reentry_count,
-            "missed_trend_rate": missed_trend_rate,
-            "trades": trades,
+                "missed_trend_rate": missed_trend_rate,
+                "dip_debug": dip_debug_counters,
+                "trades": trades,
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
             "price_history": price_history,
@@ -469,5 +527,6 @@ class BacktestService:
                 "trend_capture_rate": trend_capture_rate,
                 "reentry_count": reentry_count,
                 "missed_trend_rate": missed_trend_rate,
+                "dip_debug": dip_debug_counters,
             },
         }

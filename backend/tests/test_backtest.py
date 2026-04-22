@@ -136,7 +136,7 @@ def _flat_technical(*args, **kwargs):
 def test_sell_is_full_exit_only_when_breakdown_persists(monkeypatch):
     def _breakdown_two_days(price_history, base_window):
         details = {
-            "ma50_for_breakdown": 110.0,
+            "ma50_for_breakdown": 90.0,
             "ma200_for_breakdown": 100.0,
             "ma50_slope": 0.001,
             "strong_uptrend": False,
