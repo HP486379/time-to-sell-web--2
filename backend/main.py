@@ -12,11 +12,7 @@ from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, validator
 
-from scoring.technical import (
-    calculate_technical_score,
-    calculate_ultra_long_mas,
-    calculate_ultra_long_trend_context,
-)
+from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
 from scoring.macro import calculate_macro_score
 from scoring.events import calculate_event_adjustment
 from scoring.total_score import calculate_total_score, get_label
@@ -474,7 +470,6 @@ def get_cached_snapshot(
         event_adjustment, event_details, event_count = 0.0, {}, 0
 
     ma500, ma1000 = calculate_ultra_long_mas(price_history)
-    ultra_long_trend = calculate_ultra_long_trend_context(price_history)
 
     period_windows = {"short": 20, "mid": 60, "long": 200}
     period_scores = {"short": 0.0, "mid": 0.0, "long": 0.0}
@@ -501,10 +496,6 @@ def get_cached_snapshot(
                 current_price=current_price,
                 ma500=ma500,
                 ma1000=ma1000,
-                ma50=ultra_long_trend.get("ma50"),
-                ma200=ultra_long_trend.get("ma200"),
-                ma50_slope=ultra_long_trend.get("ma50_slope"),
-                ma200_slope=ultra_long_trend.get("ma200_slope"),
             ),
             2,
         )

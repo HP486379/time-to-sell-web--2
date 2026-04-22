@@ -2,12 +2,6 @@ from typing import List, Optional, Tuple, Dict, Any
 
 ULTRA_LONG_ATTENUATION_FLOOR = 0.6
 ULTRA_LONG_ATTENUATION_SLOPE = 1.5
-ULTRA_LONG_UPSIDE_TRIGGER = 0.28
-ULTRA_LONG_UPSIDE_SLOPE = 0.2
-ULTRA_LONG_UPSIDE_FLOOR = 0.94
-ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD = 0.0
-ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD = 0.0002
-ULTRA_LONG_TREND_SLOPE_LOOKBACK = 20
 
 # NEW: convergence adjustment amplitude (max +/- points added to technical_score)
 CONVERGENCE_ADJ_MAX = 8.0
@@ -36,54 +30,6 @@ def calculate_ultra_long_mas(price_history: List[Tuple[str, float]]) -> Tuple[Op
     return ma500, ma1000
 
 
-def _normalized_ma_slope(ma_series: List[float], lookback: int) -> Optional[float]:
-    if len(ma_series) < lookback + 1:
-        return None
-    prev = ma_series[-(lookback + 1)]
-    if prev == 0:
-        return None
-    return (ma_series[-1] - prev) / prev / lookback
-
-
-def calculate_ultra_long_trend_context(
-    price_history: List[Tuple[str, float]],
-    slope_lookback: int = ULTRA_LONG_TREND_SLOPE_LOOKBACK,
-) -> Dict[str, Any]:
-    closes = [p[1] for p in price_history]
-    ma50 = latest_moving_average(closes, 50)
-    ma200 = latest_moving_average(closes, 200)
-    ma50_series = moving_average(closes, 50) if len(closes) >= 50 + slope_lookback else []
-    ma200_series = moving_average(closes, 200) if len(closes) >= 200 + slope_lookback else []
-    ma50_slope = _normalized_ma_slope(ma50_series, slope_lookback) if ma50_series else None
-    ma200_slope = _normalized_ma_slope(ma200_series, slope_lookback) if ma200_series else None
-
-    strong_by_ma200 = (
-        ma50 is not None
-        and ma200 is not None
-        and ma50 > ma200
-        and (ma200_slope is not None)
-        and (ma200_slope > ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD)
-    )
-    strong_by_ma50 = (
-        ma50 is not None
-        and ma200 is not None
-        and ma50_slope is not None
-        and ma50 > ma200
-        and ma50_slope > ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD
-    )
-    strong_trend = bool(strong_by_ma200 or strong_by_ma50)
-
-    return {
-        "ma50": ma50,
-        "ma200": ma200,
-        "ma50_slope": ma50_slope,
-        "ma200_slope": ma200_slope,
-        "strong_trend": strong_trend,
-        "strong_by_ma200_slope": bool(strong_by_ma200),
-        "strong_by_ma50_stack_slope": bool(strong_by_ma50),
-    }
-
-
 def below_ratio(price: float, ma: Optional[float]) -> Optional[float]:
     if ma is None or ma == 0:
         return None
@@ -92,108 +38,18 @@ def below_ratio(price: float, ma: Optional[float]) -> Optional[float]:
     return (ma - price) / ma
 
 
-def above_ratio(price: float, ma: Optional[float]) -> Optional[float]:
-    if ma is None or ma == 0:
-        return None
-    if price <= ma:
-        return 0.0
-    return (price - ma) / ma
-
-
-def _calculate_downside_attenuation(dd500: Optional[float], dd1000: Optional[float]) -> Optional[float]:
-    downside_candidates = [v for v in (dd500, dd1000) if v is not None]
-    if not downside_candidates:
-        return None
-    downside_dev = max(downside_candidates)
-    attenuation = 1.0 - downside_dev * ULTRA_LONG_ATTENUATION_SLOPE
-    return max(ULTRA_LONG_ATTENUATION_FLOOR, attenuation)
-
-
-def _calculate_upside_attenuation(up500: Optional[float], up1000: Optional[float]) -> Optional[float]:
-    upside_candidates = [v for v in (up500, up1000) if v is not None]
-    if not upside_candidates:
-        return None
-    upside_dev = max(upside_candidates)
-    excess = max(0.0, upside_dev - ULTRA_LONG_UPSIDE_TRIGGER)
-    attenuation = 1.0 - excess * ULTRA_LONG_UPSIDE_SLOPE
-    return max(ULTRA_LONG_UPSIDE_FLOOR, attenuation)
-
-
-def calculate_ultra_long_attenuation_details(
-    price: float,
-    ma500: Optional[float],
-    ma1000: Optional[float],
-    ma50: Optional[float] = None,
-    ma200: Optional[float] = None,
-    ma50_slope: Optional[float] = None,
-    ma200_slope: Optional[float] = None,
-) -> Tuple[Optional[float], Dict[str, Any]]:
-    dd500 = below_ratio(price, ma500)
-    dd1000 = below_ratio(price, ma1000)
-    up500 = above_ratio(price, ma500)
-    up1000 = above_ratio(price, ma1000)
-
-    downside_attenuation = _calculate_downside_attenuation(dd500, dd1000)
-    upside_attenuation = _calculate_upside_attenuation(up500, up1000)
-
-    strong_by_ma200 = (
-        ma50 is not None
-        and ma200 is not None
-        and ma50 > ma200
-        and (ma200_slope is not None)
-        and (ma200_slope > ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD)
-    )
-    strong_by_ma50 = (
-        ma50 is not None
-        and ma200 is not None
-        and ma50_slope is not None
-        and ma50 > ma200
-        and ma50_slope > ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD
-    )
-    strong_trend = bool(strong_by_ma200 or strong_by_ma50)
-
-    if strong_trend:
-        final_attenuation = 1.0
-    elif downside_attenuation is None or upside_attenuation is None:
-        final_attenuation = None
-    else:
-        final_attenuation = min(downside_attenuation, upside_attenuation)
-
-    return final_attenuation, {
-        "ma500": None if ma500 is None else round(ma500, 4),
-        "ma1000": None if ma1000 is None else round(ma1000, 4),
-        "downside_attenuation": None if downside_attenuation is None else round(downside_attenuation, 6),
-        "upside_attenuation": None if upside_attenuation is None else round(upside_attenuation, 6),
-        "final_attenuation": None if final_attenuation is None else round(final_attenuation, 6),
-        "up_deviation_500": None if up500 is None else round(up500, 6),
-        "up_deviation_1000": None if up1000 is None else round(up1000, 6),
-        "down_deviation_500": None if dd500 is None else round(dd500, 6),
-        "down_deviation_1000": None if dd1000 is None else round(dd1000, 6),
-        "ma50": None if ma50 is None else round(ma50, 4),
-        "ma200": None if ma200 is None else round(ma200, 4),
-        "ma50_slope": None if ma50_slope is None else round(ma50_slope, 8),
-        "ma200_slope": None if ma200_slope is None else round(ma200_slope, 8),
-        "strong_trend": strong_trend,
-        "strong_by_ma200_slope": bool(strong_by_ma200),
-        "strong_by_ma50_stack_slope": bool(strong_by_ma50),
-        "trend_ma200_slope_threshold": ULTRA_LONG_TREND_MA200_SLOPE_THRESHOLD,
-        "trend_ma50_slope_threshold": ULTRA_LONG_TREND_MA50_SLOPE_THRESHOLD,
-    }
-
-
 def calculate_ultra_long_attenuation(
     price: float,
     ma500: Optional[float],
     ma1000: Optional[float],
-    ma50: Optional[float] = None,
-    ma200: Optional[float] = None,
-    ma50_slope: Optional[float] = None,
-    ma200_slope: Optional[float] = None,
 ) -> Optional[float]:
-    attenuation, _ = calculate_ultra_long_attenuation_details(
-        price, ma500, ma1000, ma50=ma50, ma200=ma200, ma50_slope=ma50_slope, ma200_slope=ma200_slope
-    )
-    return attenuation
+    dd500 = below_ratio(price, ma500)
+    dd1000 = below_ratio(price, ma1000)
+    if dd500 is None or dd1000 is None:
+        return None
+    ultra_dd = max(dd500, dd1000)
+    attenuation = 1.0 - ultra_dd * ULTRA_LONG_ATTENUATION_SLOPE
+    return max(ULTRA_LONG_ATTENUATION_FLOOR, attenuation)
 
 
 def clip(value: float, lower: float = 0.0, upper: float = 100.0) -> float:
@@ -209,36 +65,6 @@ def _slope(series: List[float], lookback: int = 5) -> Optional[float]:
     if series is None or len(series) < lookback + 1:
         return None
     return (series[-1] - series[-(lookback + 1)]) / lookback
-
-
-def _calc_rsi(closes: List[float], period: int = 14) -> Optional[float]:
-    if len(closes) < period + 1:
-        return None
-    gains = 0.0
-    losses = 0.0
-    for i in range(-period, 0):
-        diff = closes[i] - closes[i - 1]
-        if diff > 0:
-            gains += diff
-        else:
-            losses -= diff
-    if losses == 0:
-        return 100.0
-    rs = gains / losses
-    return 100.0 - (100.0 / (1.0 + rs))
-
-
-def _calc_volatility_spike(closes: List[float], short: int = 10, long: int = 60) -> bool:
-    if len(closes) < long + 1:
-        return False
-    returns = [(closes[i] / closes[i - 1] - 1.0) for i in range(1, len(closes)) if closes[i - 1] > 0]
-    if len(returns) < long:
-        return False
-    short_slice = returns[-short:]
-    long_slice = returns[-long:]
-    short_vol = (sum(r * r for r in short_slice) / len(short_slice)) ** 0.5
-    long_vol = (sum(r * r for r in long_slice) / len(long_slice)) ** 0.5
-    return long_vol > 0 and short_vol >= long_vol * 1.6
 
 
 def detect_ma200_convergence(
@@ -520,7 +346,7 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     else:
         t_base = 100
 
-    # trend evaluation (trend-follow / breakdown-confirmed sell)
+    # trend evaluation
     def is_increasing(series: List[float], lookback: int = 10) -> bool:
         if len(series) < lookback + 1:
             return False
@@ -537,70 +363,25 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     mid_down = is_decreasing(ma_mid_series)
     price_above_mid = current_price > ma_mid
     price_below_mid = current_price < ma_mid
-    ma20 = ma_series[20][-1]
-    ma50 = ma_series[60][-1] if 60 in ma_series else ma_mid
-    ma200 = ma_series[200][-1]
-    ma50_slope = _normalized_ma_slope(ma_series[60], 20) if (60 in ma_series and len(ma_series[60]) >= 21) else None
-    prev_ma50_slope = _normalized_ma_slope(ma_series[60][:-1], 20) if (60 in ma_series and len(ma_series[60]) >= 22) else None
-    ma200_slope = _normalized_ma_slope(ma_series[200], 20) if len(ma_series[200]) >= 21 else None
-    strong_uptrend = (
-        current_price > ma200
-        and ma50 > ma200
-        and (ma200_slope is not None and ma200_slope > 0)
-    )
 
-    prev_high_60 = max(closes[-61:-1]) if len(closes) >= 61 else None
-    drawdown_from_60d_high = 0.0
-    if prev_high_60 and prev_high_60 > 0:
-        drawdown_from_60d_high = max(0.0, (prev_high_60 - current_price) / prev_high_60)
-
-    dev50 = (current_price - ma50) / ma50 if ma50 else 0.0
-    dev200 = (current_price - ma200) / ma200 if ma200 else 0.0
-    recent_20d_return = (current_price / closes[-21] - 1.0) if len(closes) >= 21 and closes[-21] else 0.0
-    rsi_now = _calc_rsi(closes, period=14)
-    rsi_prev = _calc_rsi(closes[:-1], period=14) if len(closes) >= 16 else None
-    rsi_overheat_cooling = (
-        rsi_now is not None
-        and rsi_prev is not None
-        and rsi_prev >= 70.0
-        and rsi_now < rsi_prev
-    )
-    ma_slope_decelerating = (
-        ma50_slope is not None
-        and prev_ma50_slope is not None
-        and ma50_slope < prev_ma50_slope * 0.7
-    )
-    volatility_spike = _calc_volatility_spike(closes)
-
-    warning_mode = (
-        dev50 >= 0.12
-        or dev200 >= 0.2
-        or recent_20d_return >= 0.12
-        or drawdown_from_60d_high >= 0.02
-        or rsi_overheat_cooling
-        or ma_slope_decelerating
-        or (len(closes) >= 61 and current_price > max(closes[-61:-1]))
-    )
-    breakdown_drawdown_threshold = 0.03 if warning_mode else 0.05
-    base_breakdown = (current_price < ma50) and ((ma20 < ma50) or (ma50_slope is not None and ma50_slope <= 0))
-    breakdown_confirmed = base_breakdown and (
-        current_price < ma20
-        or drawdown_from_60d_high >= breakdown_drawdown_threshold
-        or volatility_spike
-    )
-
-    if strong_uptrend and not breakdown_confirmed:
-        t_trend = -12.0
-    elif ma_short > ma_mid > ma_long and (short_up or mid_up) and not breakdown_confirmed:
-        t_trend = -6.0
-    elif breakdown_confirmed:
-        t_trend = +70.0
-    elif base_breakdown:
-        t_trend = +45.0
-    elif ma_short < ma_mid < ma_long and (short_down or mid_down) and price_below_mid:
-        t_trend = +25.0
+    if ma_short > ma_mid > ma_long and short_up and mid_up:
+        t_trend = 12
+    elif ma_short > ma_mid > ma_long and (short_up or mid_up):
+        t_trend = 8
+    elif ma_short > ma_mid and short_up and price_above_mid:
+        t_trend = 4
+    elif ma_short > ma_long and short_up:
+        t_trend = 2
+    elif ma_short < ma_mid < ma_long and short_down and mid_down:
+        t_trend = -28
+    elif ma_short < ma_mid < ma_long and (short_down or mid_down):
+        t_trend = -20
+    elif ma_short < ma_mid and short_down and price_below_mid:
+        t_trend = -12
+    elif ma_short < ma_long and short_down:
+        t_trend = -6
     else:
-        t_trend = 0.0
+        t_trend = 0
 
     phase = _detect_market_phase(current_price, ma_short, ma_mid, ma_long)
     if phase == "bull":
@@ -614,11 +395,9 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
 
     # --- NEW: convergence detection + small adjustment ---
     convergence = detect_ma200_convergence(closes)
-    t_conv_adj = _calc_convergence_adjustment(convergence, amp=CONVERGENCE_ADJ_MAX * 0.35)
-    if strong_uptrend and t_conv_adj > 0:
-        t_conv_adj = 0.0
+    t_conv_adj = _calc_convergence_adjustment(convergence, amp=CONVERGENCE_ADJ_MAX)
     ath_signal = _detect_ath_signal(closes)
-    t_ath_adj = 0.0 if strong_uptrend else (-4.0 if ath_signal.get("is_60d_high") else 0.0)
+    t_ath_adj = -12.0 if ath_signal.get("is_60d_high") else 0.0
 
     technical_score = clip(technical_score_raw + t_conv_adj + t_ath_adj)
 
@@ -632,21 +411,6 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "T_phase_adj": round(t_phase_adj, 2),
         "T_conv_adj": round(t_conv_adj, 2),
         "T_ath_adj": round(t_ath_adj, 2),
-        "strong_uptrend": strong_uptrend,
-        "warning_mode": warning_mode,
-        "breakdown_confirmed": breakdown_confirmed,
-        "drawdown_from_60d_high": round(drawdown_from_60d_high, 4),
-        "breakdown_drawdown_threshold": breakdown_drawdown_threshold,
-        "ma50_for_breakdown": round(ma50, 2),
-        "ma200_for_breakdown": round(ma200, 2),
-        "ma50_slope": None if ma50_slope is None else round(ma50_slope, 8),
-        "ma200_slope": None if ma200_slope is None else round(ma200_slope, 8),
-        "prev_ma50_slope": None if prev_ma50_slope is None else round(prev_ma50_slope, 8),
-        "rsi_now": None if rsi_now is None else round(rsi_now, 2),
-        "rsi_prev": None if rsi_prev is None else round(rsi_prev, 2),
-        "rsi_overheat_cooling": rsi_overheat_cooling,
-        "ma_slope_decelerating": ma_slope_decelerating,
-        "volatility_spike": volatility_spike,
         "technical_score_raw": round(technical_score_raw, 2),
         "technical_score_adj": round(technical_score, 2),
         "base_window": base_window,
