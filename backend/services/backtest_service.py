@@ -228,7 +228,8 @@ class BacktestService:
                 _, technical_details = calculate_technical_score(sub_history, base_window=score_ma)
                 t_sell = float(technical_details.get("T_sell", 0.0) or 0.0)
                 breakdown_confirmed = bool(technical_details.get("breakdown_confirmed", False))
-                sell_gate_open = (t_sell > 0.0) or breakdown_confirmed
+                warning_mode = bool(technical_details.get("warning_mode", False))
+                sell_gate_open = (t_sell > 0.0) or breakdown_confirmed or warning_mode
                 valid_score_rows += 1
                 if score_min is None or score < score_min:
                     score_min = score

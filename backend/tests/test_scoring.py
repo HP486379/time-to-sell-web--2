@@ -22,9 +22,9 @@ def build_history(ma200_value: float, current_price: float):
 
 def test_technical_score_cases():
     cases = [
-        (4000, 4000, 40),
-        (4000, 4400, 70),
-        (4000, 5000, 95),
+        (4000, 4000, 36),
+        (4000, 4400, 56),
+        (4000, 5000, 77),
         (4000, 3000, 0),
     ]
     for ma, price, expected in cases:

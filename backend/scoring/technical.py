@@ -338,15 +338,15 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     elif -20 < d < 0:
         t_base = 35 * (d + 20) / 20
     elif 0 <= d < 5:
-        t_base = 40 + 15 * d / 5
+        t_base = 36 + 10 * d / 5
     elif 5 <= d < 10:
-        t_base = 55 + 15 * (d - 5) / 5
+        t_base = 46 + 10 * (d - 5) / 5
     elif 10 <= d < 20:
-        t_base = 70 + 20 * (d - 10) / 10
+        t_base = 56 + 16 * (d - 10) / 10
     elif 20 <= d < 30:
-        t_base = 90 + 10 * (d - 20) / 10
+        t_base = 72 + 10 * (d - 20) / 10
     else:
-        t_base = 100
+        t_base = 82
 
     # trend evaluation
     def is_increasing(series: List[float], lookback: int = 10) -> bool:
