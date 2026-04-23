@@ -72,7 +72,7 @@ def test_trend_warning_mode_is_not_breakdown():
     assert details["warning_mode"] is True
     assert details["breakdown_confirmed"] is False
     assert details["T_trend"] == -2
-    assert details["T_sell"] == -2.0
+    assert details["T_sell"] == -4.0
 
 
 def test_trend_breakdown_confirmed_dominates_sell_pressure():
@@ -89,5 +89,6 @@ def test_trend_breakdown_confirmed_dominates_sell_pressure():
     _, details = calculate_technical_score(history)
     assert details["warning_mode"] is True
     assert details["breakdown_confirmed"] is True
+    assert details["severe_breakdown"] is True
     assert details["T_trend"] == -8
-    assert details["T_sell"] == 18.0
+    assert details["T_sell"] == 12.0

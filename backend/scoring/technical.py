@@ -382,8 +382,15 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         and short_down
         and mid_down
         and ma50_weak
-        and len(closes) >= 5
-        and all(closes[-i] < ma50_series[-i] for i in range(1, 6))
+        and ma50 < ma_long
+        and len(closes) >= 10
+        and all(closes[-i] < ma50_series[-i] for i in range(1, 11))
+    )
+    severe_breakdown = (
+        breakdown_confirmed
+        and current_price < ma_long
+        and len(ma_long_series) >= 5
+        and all(closes[-i] < ma_long_series[-i] for i in range(1, 6))
     )
 
     if strong_uptrend:
@@ -405,12 +412,12 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     else:
         t_trend = 0
 
-    if breakdown_confirmed:
-        t_sell = 18.0
+    if severe_breakdown:
+        t_sell = 12.0
     elif strong_uptrend:
         t_sell = -6.0
     elif warning_mode and not strong_uptrend:
-        t_sell = -2.0
+        t_sell = -4.0
     else:
         t_sell = 0.0
 
@@ -442,6 +449,7 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "strong_uptrend": bool(strong_uptrend),
         "warning_mode": bool(warning_mode),
         "breakdown_confirmed": bool(breakdown_confirmed),
+        "severe_breakdown": bool(severe_breakdown),
         "phase": phase,
         "T_phase_adj": round(t_phase_adj, 2),
         "T_conv_adj": round(t_conv_adj, 2),

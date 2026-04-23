@@ -205,6 +205,7 @@ class BacktestService:
         sell_threshold_hit_days = 0
         buy_signal_count = 0
         sell_signal_count = 0
+        sell_gate_block_count = 0
         score_min: float | None = None
         score_max: float | None = None
         buy_filled_dates: List[str] = []
@@ -224,6 +225,10 @@ class BacktestService:
                 score_rows += 1
                 score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
                 score = self._safe_float(score, field_name="score")
+                _, technical_details = calculate_technical_score(sub_history, base_window=score_ma)
+                t_sell = float(technical_details.get("T_sell", 0.0) or 0.0)
+                breakdown_confirmed = bool(technical_details.get("breakdown_confirmed", False))
+                sell_gate_open = (t_sell > 0.0) or breakdown_confirmed
                 valid_score_rows += 1
                 if score_min is None or score < score_min:
                     score_min = score
@@ -234,13 +239,15 @@ class BacktestService:
                 if score >= sell_threshold_safe:
                     sell_threshold_hit_days += 1
 
-                if shares > 0 and score >= sell_threshold_safe:
+                if shares > 0 and score >= sell_threshold_safe and sell_gate_open:
                     cash += shares * close
                     sell_signal_count += 1
                     trades.append(
                         {"action": "SELL", "date": date_str, "quantity": shares, "price": close}
                     )
                     shares = 0
+                elif shares > 0 and score >= sell_threshold_safe and not sell_gate_open:
+                    sell_gate_block_count += 1
                 elif shares == 0 and score < buy_threshold_safe:
                     qty = floor(cash / close)
                     if qty > 0:
@@ -307,7 +314,8 @@ class BacktestService:
         logger.info(
             "[backtest-signals] index_type=%s total_price_rows=%d total_score_rows=%d valid_score_rows=%d "
             "buy_threshold_hit_days=%d sell_threshold_hit_days=%d buy_signal_count=%d sell_signal_count=%d "
-            "final_trade_count=%d entered_market_once=%s in_position=%s buy_filled_dates=%s score_min=%s score_max=%s diagnosis=%s",
+            "final_trade_count=%d entered_market_once=%s in_position=%s buy_filled_dates=%s score_min=%s score_max=%s "
+            "sell_gate_block_count=%d diagnosis=%s",
             index_type,
             len(price_history),
             score_rows,
@@ -322,6 +330,7 @@ class BacktestService:
             buy_filled_dates,
             score_min,
             score_max,
+            sell_gate_block_count,
             diagnosis,
         )
 
@@ -345,6 +354,7 @@ class BacktestService:
                 "sell_threshold_hit_days": sell_threshold_hit_days,
                 "buy_signal_count": buy_signal_count,
                 "sell_signal_count": sell_signal_count,
+                "sell_gate_block_count": sell_gate_block_count,
                 "final_trade_count": final_trade_count,
                 "entered_market_once": entered_market_once,
                 "in_position": in_position,
