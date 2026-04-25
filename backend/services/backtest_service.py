@@ -215,7 +215,13 @@ class BacktestService:
         sell_cooldown_days_remaining = 0
         days_since_last_sell: int | None = None
         recent_scores: List[float] = []
-        buy_reason_counts = {"initial_threshold": 0, "early_recovery_v2": 0, "day40": 0}
+        buy_reason_counts = {
+            "initial_threshold": 0,
+            "pattern_a": 0,
+            "pattern_b": 0,
+            "both": 0,
+            "day60": 0,
+        }
 
         hold_cash = initial_cash_safe
         hold_shares = 0
@@ -281,15 +287,23 @@ class BacktestService:
                         buy_reason = "initial_threshold"
                 elif days_since_last_sell < 20:
                     buy_gate_open = False
-                elif days_since_last_sell < 40:
-                    score_recovering_1day = len(recent_scores) >= 2 and recent_scores[-2] < recent_scores[-1]
-                    recovery_position_ok = score > 50
-                    buy_gate_open = score_recovering_1day and recovery_position_ok
+                elif days_since_last_sell < 60:
+                    pattern_a = close > ma20_series[-1] and score > (buy_threshold_safe - 5.0)
+                    pattern_b = (
+                        len(recent_scores) >= 3
+                        and recent_scores[-3] < recent_scores[-2] < recent_scores[-1]
+                    )
+                    buy_gate_open = pattern_a or pattern_b
                     if buy_gate_open:
-                        buy_reason = "early_recovery_v2"
+                        if pattern_a and pattern_b:
+                            buy_reason = "both"
+                        elif pattern_a:
+                            buy_reason = "pattern_a"
+                        else:
+                            buy_reason = "pattern_b"
                 else:
                     buy_gate_open = True
-                    buy_reason = "day40"
+                    buy_reason = "day60"
                 valid_score_rows += 1
                 if score_min is None or score < score_min:
                     score_min = score
@@ -334,7 +348,13 @@ class BacktestService:
                             score_delta_2,
                         )
                         trades.append(
-                            {"action": "BUY", "date": date_str, "quantity": qty, "price": close}
+                            {
+                                "action": "BUY",
+                                "date": date_str,
+                                "quantity": qty,
+                                "price": close,
+                                "reason": buy_reason,
+                            }
                         )
 
             portfolio_value = cash + shares * close
@@ -376,8 +396,12 @@ class BacktestService:
                 if wait_days >= 0:
                     sell_to_buy_wait_days.append(wait_days)
                 last_sell_dt = None
-        early_buy_count = buy_reason_counts.get("early_recovery_v2", 0)
-        post_sell_buy_count = early_buy_count + buy_reason_counts.get("day40", 0)
+        early_buy_count = (
+            buy_reason_counts.get("pattern_a", 0)
+            + buy_reason_counts.get("pattern_b", 0)
+            + buy_reason_counts.get("both", 0)
+        )
+        post_sell_buy_count = early_buy_count + buy_reason_counts.get("day60", 0)
         early_buy_ratio = (
             round((early_buy_count / post_sell_buy_count) * 100, 2) if post_sell_buy_count > 0 else 0.0
         )

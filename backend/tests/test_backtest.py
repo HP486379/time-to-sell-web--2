@@ -49,8 +49,10 @@ def test_backtest_generates_buy_and_sell_cycle():
     # sell gateにより、score条件のみではSELLしない
     assert result["diagnostics"]["sell_gate_block_count"] > 0
     assert "buy_reason_counts" in result["diagnostics"]
-    assert "early_recovery_v2" in result["diagnostics"]["buy_reason_counts"]
-    assert "day40" in result["diagnostics"]["buy_reason_counts"]
+    assert "pattern_a" in result["diagnostics"]["buy_reason_counts"]
+    assert "pattern_b" in result["diagnostics"]["buy_reason_counts"]
+    assert "both" in result["diagnostics"]["buy_reason_counts"]
+    assert "day60" in result["diagnostics"]["buy_reason_counts"]
     assert "early_buy_ratio_pct" in result["diagnostics"]
     assert "avg_cash_wait_days" in result["diagnostics"]
     # 新BUYゲートでは回復確認後に遅れてエントリーするため、
