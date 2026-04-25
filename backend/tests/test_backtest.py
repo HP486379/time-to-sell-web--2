@@ -48,8 +48,14 @@ def test_backtest_generates_buy_and_sell_cycle():
     assert result["trades"][0]["action"] == "BUY"
     # sell gateにより、score条件のみではSELLしない
     assert result["diagnostics"]["sell_gate_block_count"] > 0
-    # 10株を100で買い、最終200で評価される想定
-    assert result["final_value"] >= 2000.0
+    assert "buy_reason_counts" in result["diagnostics"]
+    assert "early_recovery_v2" in result["diagnostics"]["buy_reason_counts"]
+    assert "day40" in result["diagnostics"]["buy_reason_counts"]
+    assert "early_buy_ratio_pct" in result["diagnostics"]
+    assert "avg_cash_wait_days" in result["diagnostics"]
+    # 新BUYゲートでは回復確認後に遅れてエントリーするため、
+    # 最終日に近い買い付けとなるケースでは初期資金と同水準に留まる
+    assert result["final_value"] >= 1000.0
     assert result["buy_and_hold_final"] >= 2000.0
 
 
