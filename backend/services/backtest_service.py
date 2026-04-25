@@ -9,7 +9,7 @@ import math
 import os
 from scoring.events import calculate_event_adjustment
 from scoring.macro import calculate_macro_score
-from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
+from scoring.technical import calculate_technical_score, calculate_ultra_long_mas, moving_average
 from scoring.total_score import calculate_total_score
 
 logger = logging.getLogger(__name__)
@@ -205,9 +205,23 @@ class BacktestService:
         sell_threshold_hit_days = 0
         buy_signal_count = 0
         sell_signal_count = 0
+        sell_gate_block_count = 0
         score_min: float | None = None
         score_max: float | None = None
         buy_filled_dates: List[str] = []
+        overheat_event_date: str | None = None
+        overheat_event_consumed = False
+        prev_overheat_state = False
+        sell_cooldown_days_remaining = 0
+        days_since_last_sell: int | None = None
+        recent_scores: List[float] = []
+        buy_reason_counts = {
+            "initial_threshold": 0,
+            "pattern_a": 0,
+            "pattern_b": 0,
+            "both": 0,
+            "day60": 0,
+        }
 
         hold_cash = initial_cash_safe
         hold_shares = 0
@@ -218,12 +232,78 @@ class BacktestService:
 
         for idx, (date_str, close) in enumerate(price_history):
             current_dt = date.fromisoformat(date_str)
+            if sell_cooldown_days_remaining > 0:
+                sell_cooldown_days_remaining -= 1
+            if days_since_last_sell is not None:
+                days_since_last_sell += 1
 
             if idx >= max(score_ma - 1, 199):
                 sub_history = price_history[: idx + 1]
                 score_rows += 1
                 score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
                 score = self._safe_float(score, field_name="score")
+                closes = [p[1] for p in sub_history]
+                ma20_series = moving_average(closes, 20)
+                ma50_series = moving_average(closes, 50)
+
+                is_overheat_today = score >= sell_threshold_safe
+                if is_overheat_today and not prev_overheat_state:
+                    overheat_event_date = date_str
+                    overheat_event_consumed = False
+                prev_overheat_state = is_overheat_today
+
+                recent_scores.append(score)
+                score_declining_3days = (
+                    len(recent_scores) >= 4
+                    and recent_scores[-1] < recent_scores[-2] < recent_scores[-3] < recent_scores[-4]
+                )
+                close_below_ma20 = close < ma20_series[-1]
+                peakout_detected = score_declining_3days and close_below_ma20
+
+                close_below_ma20_2days = (
+                    len(closes) >= 2
+                    and close < ma20_series[-1]
+                    and closes[-2] < ma20_series[-2]
+                )
+                close_below_ma50 = close < ma50_series[-1]
+                confirmation_detected = close_below_ma20_2days or close_below_ma50
+
+                overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
+                sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
+                cooldown_active = sell_cooldown_days_remaining > 0
+                score_t2 = recent_scores[-3] if len(recent_scores) >= 3 else None
+                score_t1 = recent_scores[-2] if len(recent_scores) >= 2 else None
+                score_t0 = recent_scores[-1] if len(recent_scores) >= 1 else None
+                score_delta_2 = (
+                    (score_t0 - score_t2)
+                    if score_t0 is not None and score_t2 is not None
+                    else None
+                )
+                buy_reason: str | None = None
+                if days_since_last_sell is None:
+                    # 初回エントリーは従来閾値を利用
+                    buy_gate_open = score < buy_threshold_safe
+                    if buy_gate_open:
+                        buy_reason = "initial_threshold"
+                elif days_since_last_sell < 20:
+                    buy_gate_open = False
+                elif days_since_last_sell < 60:
+                    pattern_a = close > ma20_series[-1] and score > (buy_threshold_safe - 5.0)
+                    pattern_b = (
+                        len(recent_scores) >= 3
+                        and recent_scores[-3] < recent_scores[-2] < recent_scores[-1]
+                    )
+                    buy_gate_open = pattern_a or pattern_b
+                    if buy_gate_open:
+                        if pattern_a and pattern_b:
+                            buy_reason = "both"
+                        elif pattern_a:
+                            buy_reason = "pattern_a"
+                        else:
+                            buy_reason = "pattern_b"
+                else:
+                    buy_gate_open = True
+                    buy_reason = "day60"
                 valid_score_rows += 1
                 if score_min is None or score < score_min:
                     score_min = score
@@ -234,22 +314,47 @@ class BacktestService:
                 if score >= sell_threshold_safe:
                     sell_threshold_hit_days += 1
 
-                if shares > 0 and score >= sell_threshold_safe:
+                if shares > 0 and sell_gate_open and not cooldown_active:
                     cash += shares * close
                     sell_signal_count += 1
                     trades.append(
                         {"action": "SELL", "date": date_str, "quantity": shares, "price": close}
                     )
                     shares = 0
-                elif shares == 0 and score < buy_threshold_safe:
+                    overheat_event_consumed = True
+                    sell_cooldown_days_remaining = 30
+                    days_since_last_sell = 0
+                elif shares > 0 and (sell_gate_open and cooldown_active):
+                    sell_gate_block_count += 1
+                elif shares > 0 and overheat_event_active and not sell_gate_open:
+                    sell_gate_block_count += 1
+                elif shares == 0 and buy_gate_open:
                     qty = floor(cash / close)
                     if qty > 0:
                         cash -= qty * close
                         shares += qty
                         buy_signal_count += 1
+                        if buy_reason in buy_reason_counts:
+                            buy_reason_counts[buy_reason] += 1
                         buy_filled_dates.append(date_str)
+                        logger.info(
+                            "[buy-trigger] date=%s reason=%s days_since_last_sell=%s score_t-2=%s score_t-1=%s score_t=%s delta_2=%s",
+                            date_str,
+                            buy_reason,
+                            days_since_last_sell,
+                            score_t2,
+                            score_t1,
+                            score_t0,
+                            score_delta_2,
+                        )
                         trades.append(
-                            {"action": "BUY", "date": date_str, "quantity": qty, "price": close}
+                            {
+                                "action": "BUY",
+                                "date": date_str,
+                                "quantity": qty,
+                                "price": close,
+                                "reason": buy_reason,
+                            }
                         )
 
             portfolio_value = cash + shares * close
@@ -280,6 +385,32 @@ class BacktestService:
 
         max_dd = self._compute_max_drawdown([p["value"] for p in portfolio_history])
         max_dd = self._safe_float(max_dd, field_name="max_drawdown_pct")
+        sell_to_buy_wait_days: List[int] = []
+        last_sell_dt: date | None = None
+        for trade in trades:
+            trade_dt = date.fromisoformat(trade["date"])
+            if trade["action"] == "SELL":
+                last_sell_dt = trade_dt
+            elif trade["action"] == "BUY" and last_sell_dt is not None:
+                wait_days = (trade_dt - last_sell_dt).days
+                if wait_days >= 0:
+                    sell_to_buy_wait_days.append(wait_days)
+                last_sell_dt = None
+        early_buy_count = (
+            buy_reason_counts.get("pattern_a", 0)
+            + buy_reason_counts.get("pattern_b", 0)
+            + buy_reason_counts.get("both", 0)
+        )
+        post_sell_buy_count = early_buy_count + buy_reason_counts.get("day60", 0)
+        early_buy_ratio = (
+            round((early_buy_count / post_sell_buy_count) * 100, 2) if post_sell_buy_count > 0 else 0.0
+        )
+        avg_cash_wait_days = (
+            round(sum(sell_to_buy_wait_days) / len(sell_to_buy_wait_days), 2)
+            if sell_to_buy_wait_days
+            else None
+        )
+        max_cash_wait_days = max(sell_to_buy_wait_days) if sell_to_buy_wait_days else None
         entered_market_once = buy_signal_count > 0
         in_position = shares > 0
         final_trade_count = len(trades)
@@ -307,7 +438,8 @@ class BacktestService:
         logger.info(
             "[backtest-signals] index_type=%s total_price_rows=%d total_score_rows=%d valid_score_rows=%d "
             "buy_threshold_hit_days=%d sell_threshold_hit_days=%d buy_signal_count=%d sell_signal_count=%d "
-            "final_trade_count=%d entered_market_once=%s in_position=%s buy_filled_dates=%s score_min=%s score_max=%s diagnosis=%s",
+            "final_trade_count=%d entered_market_once=%s in_position=%s buy_filled_dates=%s score_min=%s score_max=%s "
+            "sell_gate_block_count=%d early_buy_ratio_pct=%s avg_cash_wait_days=%s max_cash_wait_days=%s diagnosis=%s",
             index_type,
             len(price_history),
             score_rows,
@@ -322,6 +454,10 @@ class BacktestService:
             buy_filled_dates,
             score_min,
             score_max,
+            sell_gate_block_count,
+            early_buy_ratio,
+            avg_cash_wait_days,
+            max_cash_wait_days,
             diagnosis,
         )
 
@@ -345,10 +481,15 @@ class BacktestService:
                 "sell_threshold_hit_days": sell_threshold_hit_days,
                 "buy_signal_count": buy_signal_count,
                 "sell_signal_count": sell_signal_count,
+                "sell_gate_block_count": sell_gate_block_count,
                 "final_trade_count": final_trade_count,
                 "entered_market_once": entered_market_once,
                 "in_position": in_position,
                 "buy_filled_dates": buy_filled_dates,
+                "buy_reason_counts": buy_reason_counts,
+                "early_buy_ratio_pct": early_buy_ratio,
+                "avg_cash_wait_days": avg_cash_wait_days,
+                "max_cash_wait_days": max_cash_wait_days,
                 "score_min": score_min,
                 "score_max": score_max,
                 "diagnosis": diagnosis,

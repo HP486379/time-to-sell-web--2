@@ -44,11 +44,20 @@ def test_backtest_generates_buy_and_sell_cycle():
 
     result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
 
-    assert result["trade_count"] == 2
+    assert result["trade_count"] == 1
     assert result["trades"][0]["action"] == "BUY"
-    assert result["trades"][1]["action"] == "SELL"
-    # 10株を100で買い200で売る想定 → 2000円前後の評価
-    assert result["final_value"] >= 2000.0
+    # sell gateにより、score条件のみではSELLしない
+    assert result["diagnostics"]["sell_gate_block_count"] > 0
+    assert "buy_reason_counts" in result["diagnostics"]
+    assert "pattern_a" in result["diagnostics"]["buy_reason_counts"]
+    assert "pattern_b" in result["diagnostics"]["buy_reason_counts"]
+    assert "both" in result["diagnostics"]["buy_reason_counts"]
+    assert "day60" in result["diagnostics"]["buy_reason_counts"]
+    assert "early_buy_ratio_pct" in result["diagnostics"]
+    assert "avg_cash_wait_days" in result["diagnostics"]
+    # 新BUYゲートでは回復確認後に遅れてエントリーするため、
+    # 最終日に近い買い付けとなるケースでは初期資金と同水準に留まる
+    assert result["final_value"] >= 1000.0
     assert result["buy_and_hold_final"] >= 2000.0
 
 
