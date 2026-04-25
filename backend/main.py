@@ -37,17 +37,16 @@ app = FastAPI(title="S&P500 Timing API")
 
 ALLOWED_ORIGINS = [
     "https://time-to-sell-web-2.vercel.app",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://time-to-sell-web-2.vercel.app",
-        "http://localhost:5173",
-    ],
-    allow_origin_regex=r"^https://.*\.vercel\.app$",
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1107,6 +1106,11 @@ def health():
 # ======================
 
 if __name__ == "__main__":
+    import os
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+    )
