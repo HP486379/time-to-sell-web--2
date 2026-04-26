@@ -206,6 +206,11 @@ class BacktestService:
         buy_signal_count = 0
         sell_signal_count = 0
         sell_gate_block_count = 0
+        sell_reason_counts = {"breakdown": 0, "crash": 0}
+        sell_events: List[Dict] = []
+        sell_post_returns: List[Dict] = []
+        max_no_sell_streak_days = 0
+        no_sell_streak_days = 0
         score_min: float | None = None
         score_max: float | None = None
         buy_filled_dates: List[str] = []
@@ -232,6 +237,7 @@ class BacktestService:
 
         for idx, (date_str, close) in enumerate(price_history):
             current_dt = date.fromisoformat(date_str)
+            no_sell_streak_days += 1
             if sell_cooldown_days_remaining > 0:
                 sell_cooldown_days_remaining -= 1
             if days_since_last_sell is not None:
@@ -245,6 +251,7 @@ class BacktestService:
                 closes = [p[1] for p in sub_history]
                 ma20_series = moving_average(closes, 20)
                 ma50_series = moving_average(closes, 50)
+                ma200_series = moving_average(closes, 200)
 
                 is_overheat_today = score >= sell_threshold_safe
                 if is_overheat_today and not prev_overheat_state:
@@ -254,22 +261,41 @@ class BacktestService:
 
                 recent_scores.append(score)
                 score_declining_3days = (
-                    len(recent_scores) >= 4
-                    and recent_scores[-1] < recent_scores[-2] < recent_scores[-3] < recent_scores[-4]
+                    len(recent_scores) >= 3
+                    and recent_scores[-3] > recent_scores[-2] > recent_scores[-1]
                 )
-                close_below_ma20 = close < ma20_series[-1]
-                peakout_detected = score_declining_3days and close_below_ma20
-
-                close_below_ma20_2days = (
-                    len(closes) >= 2
+                ma50_falling_5days = len(ma50_series) >= 6 and ma50_series[-1] < ma50_series[-6]
+                breakdown_sell = (
+                    close < ma50_series[-1]
+                    and ma50_falling_5days
                     and close < ma20_series[-1]
-                    and closes[-2] < ma20_series[-2]
+                    and score_declining_3days
                 )
-                close_below_ma50 = close < ma50_series[-1]
-                confirmation_detected = close_below_ma20_2days or close_below_ma50
-
-                overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
-                sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
+                drop_10d = (
+                    (close / closes[-11] - 1.0)
+                    if len(closes) >= 11 and closes[-11] > 0
+                    else None
+                )
+                drop_20d = (
+                    (close / closes[-21] - 1.0)
+                    if len(closes) >= 21 and closes[-21] > 0
+                    else None
+                )
+                crash_sell = (
+                    (drop_10d is not None and drop_10d <= -0.08)
+                    or (drop_20d is not None and drop_20d <= -0.12)
+                )
+                strong_uptrend = (
+                    ma20_series[-1] > ma50_series[-1] > ma200_series[-1]
+                    and close > ma50_series[-1]
+                )
+                sell_breakdown_active = breakdown_sell and not strong_uptrend
+                sell_gate_open = sell_breakdown_active or crash_sell
+                sell_reason: str | None = None
+                if crash_sell:
+                    sell_reason = "crash"
+                elif sell_breakdown_active:
+                    sell_reason = "breakdown"
                 cooldown_active = sell_cooldown_days_remaining > 0
                 score_t2 = recent_scores[-3] if len(recent_scores) >= 3 else None
                 score_t1 = recent_scores[-2] if len(recent_scores) >= 2 else None
@@ -317,16 +343,37 @@ class BacktestService:
                 if shares > 0 and sell_gate_open and not cooldown_active:
                     cash += shares * close
                     sell_signal_count += 1
+                    if sell_reason in sell_reason_counts:
+                        sell_reason_counts[sell_reason] += 1
+                    sell_events.append(
+                        {
+                            "date": date_str,
+                            "index_type": index_type,
+                            "reason": sell_reason,
+                            "price": round(close, 4),
+                            "score": round(score, 4),
+                            "drawdown_10d_pct": round((drop_10d or 0.0) * 100, 4),
+                            "drawdown_20d_pct": round((drop_20d or 0.0) * 100, 4),
+                            "_row_index": idx,
+                        }
+                    )
                     trades.append(
-                        {"action": "SELL", "date": date_str, "quantity": shares, "price": close}
+                        {
+                            "action": "SELL",
+                            "date": date_str,
+                            "quantity": shares,
+                            "price": close,
+                            "reason": sell_reason,
+                        }
                     )
                     shares = 0
                     overheat_event_consumed = True
                     sell_cooldown_days_remaining = 30
                     days_since_last_sell = 0
+                    if no_sell_streak_days > max_no_sell_streak_days:
+                        max_no_sell_streak_days = no_sell_streak_days
+                    no_sell_streak_days = 0
                 elif shares > 0 and (sell_gate_open and cooldown_active):
-                    sell_gate_block_count += 1
-                elif shares > 0 and overheat_event_active and not sell_gate_open:
                     sell_gate_block_count += 1
                 elif shares == 0 and buy_gate_open:
                     qty = floor(cash / close)
@@ -385,6 +432,24 @@ class BacktestService:
 
         max_dd = self._compute_max_drawdown([p["value"] for p in portfolio_history])
         max_dd = self._safe_float(max_dd, field_name="max_drawdown_pct")
+        max_no_sell_streak_days = max(max_no_sell_streak_days, no_sell_streak_days)
+        for event in sell_events:
+            row_idx = int(event.pop("_row_index"))
+            price_now = price_history[row_idx][1]
+            return_5d_pct = None
+            return_20d_pct = None
+            if row_idx + 5 < len(price_history):
+                return_5d_pct = round(((price_history[row_idx + 5][1] / price_now) - 1.0) * 100, 4)
+            if row_idx + 20 < len(price_history):
+                return_20d_pct = round(((price_history[row_idx + 20][1] / price_now) - 1.0) * 100, 4)
+            sell_post_returns.append(
+                {
+                    "date": event["date"],
+                    "reason": event["reason"],
+                    "return_5d_pct": return_5d_pct,
+                    "return_20d_pct": return_20d_pct,
+                }
+            )
         sell_to_buy_wait_days: List[int] = []
         last_sell_dt: date | None = None
         for trade in trades:
@@ -460,6 +525,16 @@ class BacktestService:
             max_cash_wait_days,
             diagnosis,
         )
+        logger.info(
+            "[backtest-sell-summary] index_type=%s total_sell=%d breakdown=%d crash=%d max_no_sell_streak_days=%d",
+            index_type,
+            sell_signal_count,
+            sell_reason_counts.get("breakdown", 0),
+            sell_reason_counts.get("crash", 0),
+            max_no_sell_streak_days,
+        )
+        if sell_signal_count == 0:
+            logger.info("[backtest-sell-summary] index_type=%s NO SELL TRIGGERED", index_type)
 
         return {
             "final_value": round(final_value, 2),
@@ -472,6 +547,7 @@ class BacktestService:
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
             "price_history": price_history,
+            "sell_count_by_reason": sell_reason_counts,
             "diagnostics": {
                 "index_type": index_type,
                 "total_price_rows": len(price_history),
@@ -482,6 +558,10 @@ class BacktestService:
                 "buy_signal_count": buy_signal_count,
                 "sell_signal_count": sell_signal_count,
                 "sell_gate_block_count": sell_gate_block_count,
+                "sell_reason_counts": sell_reason_counts,
+                "sell_events": sell_events,
+                "sell_post_returns": sell_post_returns,
+                "max_no_sell_streak_days": max_no_sell_streak_days,
                 "final_trade_count": final_trade_count,
                 "entered_market_once": entered_market_once,
                 "in_position": in_position,

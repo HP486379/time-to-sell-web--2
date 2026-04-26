@@ -46,8 +46,12 @@ def test_backtest_generates_buy_and_sell_cycle():
 
     assert result["trade_count"] == 1
     assert result["trades"][0]["action"] == "BUY"
-    # sell gateにより、score条件のみではSELLしない
-    assert result["diagnostics"]["sell_gate_block_count"] > 0
+    assert "sell_gate_block_count" in result["diagnostics"]
+    assert "sell_reason_counts" in result["diagnostics"]
+    assert "sell_events" in result["diagnostics"]
+    assert "sell_post_returns" in result["diagnostics"]
+    assert "max_no_sell_streak_days" in result["diagnostics"]
+    assert "sell_count_by_reason" in result
     assert "buy_reason_counts" in result["diagnostics"]
     assert "pattern_a" in result["diagnostics"]["buy_reason_counts"]
     assert "pattern_b" in result["diagnostics"]["buy_reason_counts"]
