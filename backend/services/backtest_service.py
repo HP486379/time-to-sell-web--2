@@ -334,6 +334,12 @@ class BacktestService:
                             "total_score": score,
                             "quantity": sold_quantity,
                             "portfolio_cash_after_sell": cash,
+                            "score_threshold_today": score >= sell_threshold_safe,
+                            "overheat_event_active": overheat_event_active,
+                            "peakout_detected": peakout_detected,
+                            "confirmation_detected": confirmation_detected,
+                            "sell_gate_open": sell_gate_open,
+                            "cooldown_clear": not cooldown_active,
                         }
                     )
                     shares = 0
@@ -578,7 +584,26 @@ class BacktestService:
                     "index_type": index_type,
                     "quantity": trade["quantity"],
                     "portfolio_cash_after_sell": round(trade["portfolio_cash_after_sell"], 2),
-                    "sell_reason": "score >= sell_threshold",
+                    "sell_reason": [
+                        condition
+                        for condition, enabled in [
+                            ("score_threshold", trade.get("score_threshold_today", False)),
+                            ("overheat_event_active", trade.get("overheat_event_active", False)),
+                            ("peakout_detected", trade.get("peakout_detected", False)),
+                            ("confirmation_detected", trade.get("confirmation_detected", False)),
+                            ("sell_gate_open", trade.get("sell_gate_open", False)),
+                            ("cooldown_clear", trade.get("cooldown_clear", False)),
+                        ]
+                        if enabled
+                    ],
+                    "sell_reason_flags": {
+                        "score_threshold": trade.get("score_threshold_today", False),
+                        "overheat_event_active": trade.get("overheat_event_active", False),
+                        "peakout_detected": trade.get("peakout_detected", False),
+                        "confirmation_detected": trade.get("confirmation_detected", False),
+                        "sell_gate_open": trade.get("sell_gate_open", False),
+                        "cooldown_clear": trade.get("cooldown_clear", False),
+                    },
                     "post_return_20d_pct": post_return_20d_pct,
                     "post_return_60d_pct": post_return_60d_pct,
                     "buyback_date": buyback_date,

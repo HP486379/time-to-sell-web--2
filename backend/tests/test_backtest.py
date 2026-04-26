@@ -139,3 +139,44 @@ def test_backtest_starts_invested_and_initial_position_not_counted_as_trade():
     assert result["diagnostics"]["initial_position"]["initial_shares"] == 10
     assert result["trade_count"] == len(result["trades"]) == 0
     assert result["final_value"] == result["buy_and_hold_final"]
+
+
+class FakeMarketServiceForSellDiagnostics:
+    def get_price_history_range(
+        self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
+    ):
+        history = []
+        for i in range(260):
+            dt = start + timedelta(days=i)
+            if i < 230:
+                price = 100.0
+            else:
+                price = 100.0 - (i - 229) * 0.8
+            history.append((dt.isoformat(), price))
+        return history
+
+
+class BacktestServiceForSellDiagnostics(BacktestService):
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        idx = len(price_history) - 1
+        if idx < 230:
+            return 85.0
+        return 85.0 - ((idx - 229) * 1.5)
+
+
+def test_sell_diagnostics_reason_reflects_sell_gate_conditions():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    service = BacktestServiceForSellDiagnostics(
+        FakeMarketServiceForSellDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
+    )
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+    sell_events = result["diagnostics"]["sell_events"]
+
+    assert len(sell_events) >= 1
+    first_sell = sell_events[0]
+    assert "sell_gate_open" in first_sell["sell_reason"]
+    assert "cooldown_clear" in first_sell["sell_reason"]
+    assert first_sell["sell_reason_flags"]["sell_gate_open"] is True
+    assert first_sell["sell_reason_flags"]["cooldown_clear"] is True
