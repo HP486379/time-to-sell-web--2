@@ -327,6 +327,8 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     ma_short = ma_short_series[-1]
     ma_mid = ma_mid_series[-1]
     ma_long = ma_long_series[-1]
+    ma50_series = moving_average(closes, 50)
+    ma50 = ma50_series[-1]
 
     d = (current_price - ma_base) / ma_base * 100
 
@@ -336,15 +338,15 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     elif -20 < d < 0:
         t_base = 35 * (d + 20) / 20
     elif 0 <= d < 5:
-        t_base = 40 + 15 * d / 5
+        t_base = 36 + 10 * d / 5
     elif 5 <= d < 10:
-        t_base = 55 + 15 * (d - 5) / 5
+        t_base = 46 + 10 * (d - 5) / 5
     elif 10 <= d < 20:
-        t_base = 70 + 20 * (d - 10) / 10
+        t_base = 56 + 16 * (d - 10) / 10
     elif 20 <= d < 30:
-        t_base = 90 + 10 * (d - 20) / 10
+        t_base = 72 + 10 * (d - 20) / 10
     else:
-        t_base = 100
+        t_base = 82
 
     # trend evaluation
     def is_increasing(series: List[float], lookback: int = 10) -> bool:
@@ -363,8 +365,35 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     mid_down = is_decreasing(ma_mid_series)
     price_above_mid = current_price > ma_mid
     price_below_mid = current_price < ma_mid
+    strong_uptrend = (
+        ma_short > ma_mid > ma_long
+        and short_up
+        and mid_up
+        and current_price >= ma_short
+    )
+    ma50_weak = len(ma50_series) >= 6 and ma50_series[-1] < ma50_series[-6]
+    price_below_ma50 = current_price < ma50
+    warning_mode = (
+        (ma_short < ma_mid and short_down)
+        or (price_below_ma50 and ma50_weak)
+    )
+    breakdown_confirmed = (
+        ma_short < ma_mid < ma_long
+        and short_down
+        and mid_down
+        and ma50_weak
+        and ma50 < ma_long
+        and len(closes) >= 10
+        and all(closes[-i] < ma50_series[-i] for i in range(1, 11))
+    )
+    severe_breakdown = (
+        breakdown_confirmed
+        and current_price < ma_long
+        and len(ma_long_series) >= 5
+        and all(closes[-i] < ma_long_series[-i] for i in range(1, 6))
+    )
 
-    if ma_short > ma_mid > ma_long and short_up and mid_up:
+    if strong_uptrend:
         t_trend = 12
     elif ma_short > ma_mid > ma_long and (short_up or mid_up):
         t_trend = 8
@@ -372,16 +401,25 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         t_trend = 4
     elif ma_short > ma_long and short_up:
         t_trend = 2
-    elif ma_short < ma_mid < ma_long and short_down and mid_down:
-        t_trend = -28
+    elif breakdown_confirmed:
+        t_trend = -8
     elif ma_short < ma_mid < ma_long and (short_down or mid_down):
-        t_trend = -20
-    elif ma_short < ma_mid and short_down and price_below_mid:
-        t_trend = -12
-    elif ma_short < ma_long and short_down:
-        t_trend = -6
+        t_trend = -4
+    elif warning_mode and price_below_mid and not strong_uptrend:
+        t_trend = -2
+    elif warning_mode and not strong_uptrend:
+        t_trend = -1
     else:
         t_trend = 0
+
+    if severe_breakdown:
+        t_sell = 12.0
+    elif strong_uptrend:
+        t_sell = -6.0
+    elif warning_mode and not strong_uptrend:
+        t_sell = -4.0
+    else:
+        t_sell = 0.0
 
     phase = _detect_market_phase(current_price, ma_short, ma_mid, ma_long)
     if phase == "bull":
@@ -391,7 +429,7 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
     else:  # bear
         t_phase_adj = -4.0
 
-    technical_score_raw = clip(t_base + t_trend + t_phase_adj)
+    technical_score_raw = clip(t_base + t_trend + t_phase_adj + t_sell)
 
     # --- NEW: convergence detection + small adjustment ---
     convergence = detect_ma200_convergence(closes)
@@ -407,6 +445,11 @@ def calculate_technical_score(price_history: List[Tuple[str, float]], base_windo
         "d": round(d, 2),
         "T_base": round(t_base, 2),
         "T_trend": round(t_trend, 2),
+        "T_sell": round(t_sell, 2),
+        "strong_uptrend": bool(strong_uptrend),
+        "warning_mode": bool(warning_mode),
+        "breakdown_confirmed": bool(breakdown_confirmed),
+        "severe_breakdown": bool(severe_breakdown),
         "phase": phase,
         "T_phase_adj": round(t_phase_adj, 2),
         "T_conv_adj": round(t_conv_adj, 2),
