@@ -195,8 +195,11 @@ class BacktestService:
 
         macro_series = self.macro_service.get_macro_series_range(start_date, end_date)
 
-        cash = initial_cash_safe
-        shares = 0
+        first_price = price_history[0][1]
+        initial_shares = floor(initial_cash_safe / first_price)
+        initial_cash_after_buy = initial_cash_safe - (initial_shares * first_price)
+        cash = initial_cash_after_buy
+        shares = initial_shares
         portfolio_history: List[Dict] = []
         trades: List[Dict] = []
         score_rows = 0
@@ -222,10 +225,11 @@ class BacktestService:
             "both": 0,
             "day60": 0,
         }
+        daily_scores: List[Dict] = []
+        trade_enriched_rows: List[Dict] = []
 
         hold_cash = initial_cash_safe
         hold_shares = 0
-        first_price = price_history[0][1]
         hold_shares = floor(hold_cash / first_price)
         hold_cash -= hold_shares * first_price
         buy_hold_history: List[Dict] = []
@@ -242,6 +246,7 @@ class BacktestService:
                 score_rows += 1
                 score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
                 score = self._safe_float(score, field_name="score")
+                daily_scores.append({"date": date_str, "score": score})
                 closes = [p[1] for p in sub_history]
                 ma20_series = moving_average(closes, 20)
                 ma50_series = moving_average(closes, 50)
@@ -315,10 +320,27 @@ class BacktestService:
                     sell_threshold_hit_days += 1
 
                 if shares > 0 and sell_gate_open and not cooldown_active:
+                    sold_quantity = shares
                     cash += shares * close
                     sell_signal_count += 1
                     trades.append(
                         {"action": "SELL", "date": date_str, "quantity": shares, "price": close}
+                    )
+                    trade_enriched_rows.append(
+                        {
+                            "action": "SELL",
+                            "date": date_str,
+                            "price": close,
+                            "total_score": score,
+                            "quantity": sold_quantity,
+                            "portfolio_cash_after_sell": cash,
+                            "score_threshold_today": score >= sell_threshold_safe,
+                            "overheat_event_active": overheat_event_active,
+                            "peakout_detected": peakout_detected,
+                            "confirmation_detected": confirmation_detected,
+                            "sell_gate_open": sell_gate_open,
+                            "cooldown_clear": not cooldown_active,
+                        }
                     )
                     shares = 0
                     overheat_event_consumed = True
@@ -331,6 +353,7 @@ class BacktestService:
                 elif shares == 0 and buy_gate_open:
                     qty = floor(cash / close)
                     if qty > 0:
+                        cash_before_buy = cash
                         cash -= qty * close
                         shares += qty
                         buy_signal_count += 1
@@ -354,6 +377,17 @@ class BacktestService:
                                 "quantity": qty,
                                 "price": close,
                                 "reason": buy_reason,
+                            }
+                        )
+                        trade_enriched_rows.append(
+                            {
+                                "action": "BUY",
+                                "date": date_str,
+                                "price": close,
+                                "total_score": score,
+                                "quantity": qty,
+                                "cash_before_buy": cash_before_buy,
+                                "cash_after_buy": cash,
                             }
                         )
 
@@ -461,6 +495,161 @@ class BacktestService:
             diagnosis,
         )
 
+        buy_trades = [trade for trade in trades if trade["action"] == "BUY"]
+        sell_trades = [trade for trade in trades if trade["action"] == "SELL"]
+        first_trade = trades[0] if trades else None
+        last_trade = trades[-1] if trades else None
+        first_signal_buy_trade = buy_trades[0] if buy_trades else None
+        start_date_str = price_history[0][0] if price_history else None
+        start_price = price_history[0][1] if price_history else None
+        first_signal_buy_date_str = first_signal_buy_trade["date"] if first_signal_buy_trade else None
+        first_signal_buy_price = first_signal_buy_trade["price"] if first_signal_buy_trade else None
+        first_signal_buy_calendar_days = (
+            (date.fromisoformat(first_signal_buy_date_str) - date.fromisoformat(start_date_str)).days
+            if first_signal_buy_date_str and start_date_str
+            else None
+        )
+        first_signal_buy_trading_days = (
+            next((idx for idx, (dt, _) in enumerate(price_history) if dt == first_signal_buy_date_str), None)
+            if first_signal_buy_date_str
+            else None
+        )
+        missed_return_until_first_signal_buy_pct = (
+            round(((first_signal_buy_price / start_price) - 1) * 100, 4)
+            if first_signal_buy_price is not None and start_price is not None
+            else None
+        )
+
+        buy_events: List[Dict] = []
+        for idx, trade in enumerate(trade_enriched_rows):
+            if trade["action"] != "BUY":
+                continue
+            buy_events.append(
+                {
+                    "date": trade["date"],
+                    "price": trade["price"],
+                    "total_score": trade["total_score"],
+                    "buy_threshold": buy_threshold_safe,
+                    "index_type": index_type,
+                    "quantity": trade["quantity"],
+                    "buy_reason": "score < buy_threshold",
+                    "is_initial_entry": False,
+                    "cash_before_buy": round(trade["cash_before_buy"], 2),
+                    "cash_after_buy": round(trade["cash_after_buy"], 2),
+                }
+            )
+
+        index_by_date = {dt: idx for idx, (dt, _) in enumerate(price_history)}
+        sell_events: List[Dict] = []
+        for trade in trade_enriched_rows:
+            if trade["action"] != "SELL":
+                continue
+            trade_day_idx = index_by_date.get(trade["date"])
+            post_return_20d_pct = None
+            post_return_60d_pct = None
+            if trade_day_idx is not None:
+                if trade_day_idx + 20 < len(price_history):
+                    post_price_20 = price_history[trade_day_idx + 20][1]
+                    post_return_20d_pct = round(((post_price_20 / trade["price"]) - 1) * 100, 4)
+                if trade_day_idx + 60 < len(price_history):
+                    post_price_60 = price_history[trade_day_idx + 60][1]
+                    post_return_60d_pct = round(((post_price_60 / trade["price"]) - 1) * 100, 4)
+            buyback_trade = next(
+                (
+                    buy_trade
+                    for buy_trade in trade_enriched_rows
+                    if buy_trade["action"] == "BUY"
+                    and date.fromisoformat(buy_trade["date"]) > date.fromisoformat(trade["date"])
+                ),
+                None,
+            )
+            buyback_date = buyback_trade["date"] if buyback_trade else None
+            buyback_price = buyback_trade["price"] if buyback_trade else None
+            days_until_buyback = (
+                (date.fromisoformat(buyback_date) - date.fromisoformat(trade["date"])).days
+                if buyback_date
+                else None
+            )
+            return_until_buyback_pct = (
+                round(((buyback_price / trade["price"]) - 1) * 100, 4)
+                if buyback_price is not None
+                else None
+            )
+            sell_events.append(
+                {
+                    "date": trade["date"],
+                    "price": trade["price"],
+                    "total_score": trade["total_score"],
+                    "sell_threshold": sell_threshold_safe,
+                    "index_type": index_type,
+                    "quantity": trade["quantity"],
+                    "portfolio_cash_after_sell": round(trade["portfolio_cash_after_sell"], 2),
+                    "sell_reason": [
+                        condition
+                        for condition, enabled in [
+                            ("score_threshold", trade.get("score_threshold_today", False)),
+                            ("overheat_event_active", trade.get("overheat_event_active", False)),
+                            ("peakout_detected", trade.get("peakout_detected", False)),
+                            ("confirmation_detected", trade.get("confirmation_detected", False)),
+                            ("sell_gate_open", trade.get("sell_gate_open", False)),
+                            ("cooldown_clear", trade.get("cooldown_clear", False)),
+                        ]
+                        if enabled
+                    ],
+                    "sell_reason_flags": {
+                        "score_threshold": trade.get("score_threshold_today", False),
+                        "overheat_event_active": trade.get("overheat_event_active", False),
+                        "peakout_detected": trade.get("peakout_detected", False),
+                        "confirmation_detected": trade.get("confirmation_detected", False),
+                        "sell_gate_open": trade.get("sell_gate_open", False),
+                        "cooldown_clear": trade.get("cooldown_clear", False),
+                    },
+                    "post_return_20d_pct": post_return_20d_pct,
+                    "post_return_60d_pct": post_return_60d_pct,
+                    "buyback_date": buyback_date,
+                    "buyback_price": buyback_price,
+                    "days_until_buyback": days_until_buyback,
+                    "return_until_buyback_pct": return_until_buyback_pct,
+                }
+            )
+
+        total_trading_days = len(price_history)
+        position_state: List[int] = []
+        running_shares = initial_shares
+        trades_by_date: Dict[str, List[Dict]] = {}
+        for trade in trades:
+            trades_by_date.setdefault(trade["date"], []).append(trade)
+        for dt, _ in price_history:
+            day_trades = trades_by_date.get(dt, [])
+            for trade in day_trades:
+                if trade["action"] == "BUY":
+                    running_shares += trade["quantity"]
+                elif trade["action"] == "SELL":
+                    running_shares = max(0, running_shares - trade["quantity"])
+            position_state.append(1 if running_shares > 0 else 0)
+
+        longest_cash_streak_days = 0
+        longest_invested_streak_days = 0
+        cash_streak = 0
+        invested_streak = 0
+        for state in position_state:
+            if state == 1:
+                invested_streak += 1
+                cash_streak = 0
+            else:
+                cash_streak += 1
+                invested_streak = 0
+            longest_cash_streak_days = max(longest_cash_streak_days, cash_streak)
+            longest_invested_streak_days = max(longest_invested_streak_days, invested_streak)
+
+        average_score = (
+            round(sum(score["score"] for score in daily_scores) / len(daily_scores), 4)
+            if daily_scores
+            else None
+        )
+        first_score = daily_scores[0]["score"] if daily_scores else None
+        first_score_date = daily_scores[0]["date"] if daily_scores else None
+
         return {
             "final_value": round(final_value, 2),
             "buy_and_hold_final": round(buy_hold_final, 2),
@@ -493,5 +682,66 @@ class BacktestService:
                 "score_min": score_min,
                 "score_max": score_max,
                 "diagnosis": diagnosis,
+                "trade_summary": {
+                    "buy_count": len(buy_trades),
+                    "sell_count": len(sell_trades),
+                    "trade_count": len(trades),
+                    "first_trade_action": first_trade["action"] if first_trade else None,
+                    "first_trade_date": first_trade["date"] if first_trade else None,
+                    "first_trade_price": first_trade["price"] if first_trade else None,
+                    "last_trade_action": last_trade["action"] if last_trade else None,
+                    "last_trade_date": last_trade["date"] if last_trade else None,
+                    "last_trade_price": last_trade["price"] if last_trade else None,
+                },
+                "initial_entry": {
+                    "first_signal_buy_date": first_signal_buy_date_str,
+                    "first_signal_buy_price": first_signal_buy_price,
+                    "days_until_first_signal_buy": first_signal_buy_calendar_days,
+                    "trading_days_until_first_signal_buy": first_signal_buy_trading_days,
+                    "missed_return_until_first_signal_buy_pct": missed_return_until_first_signal_buy_pct,
+                    "starts_invested": True,
+                    "note": (
+                        "strategy starts invested at start_date; initial position is not counted as a trade"
+                        if first_signal_buy_trade
+                        else "strategy starts invested at start_date; no BUY signal trade executed during backtest period"
+                    ),
+                },
+                "initial_position": {
+                    "starts_invested": True,
+                    "initial_position_date": start_date_str,
+                    "initial_position_price": start_price,
+                    "initial_shares": initial_shares,
+                    "initial_cash_after_buy": round(initial_cash_after_buy, 2),
+                    "initial_position_is_trade": False,
+                    "note": "strategy starts invested at start_date; initial position is not counted as a trade",
+                },
+                "sell_events": sell_events,
+                "buy_events": buy_events,
+                "exposure": {
+                    "total_trading_days": total_trading_days,
+                    "invested_days": sum(position_state),
+                    "cash_days": total_trading_days - sum(position_state),
+                    "invested_ratio_pct": (
+                        round((sum(position_state) / total_trading_days) * 100, 4)
+                        if total_trading_days > 0
+                        else 0.0
+                    ),
+                    "cash_ratio_pct": (
+                        round(((total_trading_days - sum(position_state)) / total_trading_days) * 100, 4)
+                        if total_trading_days > 0
+                        else 0.0
+                    ),
+                    "longest_cash_streak_days": longest_cash_streak_days,
+                    "longest_invested_streak_days": longest_invested_streak_days,
+                },
+                "score_samples": {
+                    "first_score_date": first_score_date,
+                    "first_score": first_score,
+                    "min_score": score_min,
+                    "max_score": score_max,
+                    "average_score": average_score,
+                    "days_score_below_buy_threshold": buy_threshold_hit_days,
+                    "days_score_above_sell_threshold": sell_threshold_hit_days,
+                },
             },
         }

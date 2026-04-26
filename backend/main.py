@@ -159,6 +159,7 @@ class BacktestPoint(BaseModel):
 class BacktestResponse(BaseModel):
     summary: BacktestSummary
     equity_curve: List[BacktestPoint]
+    diagnostics: Optional[dict] = None
     # iOS旧実装との後方互換（flat形式）
     final_asset: Optional[float] = None
     buy_and_hold_asset: Optional[float] = None
@@ -810,6 +811,7 @@ def run_backtest(payload: BacktestRequest):
         return BacktestResponse(
             summary=summary,
             equity_curve=equity_curve,
+            diagnostics=result.get("diagnostics"),
             final_asset=result["final_value"],
             buy_and_hold_asset=result["buy_and_hold_final"],
             total_return=result["total_return_pct"],
