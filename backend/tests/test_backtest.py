@@ -48,6 +48,12 @@ def test_backtest_generates_buy_and_sell_cycle():
     assert result["trades"][0]["action"] == "BUY"
     # sell gateにより、score条件のみではSELLしない
     assert result["diagnostics"]["sell_gate_block_count"] > 0
+    assert "trade_summary" in result["diagnostics"]
+    assert "initial_entry" in result["diagnostics"]
+    assert "exposure" in result["diagnostics"]
+    assert result["trade_count"] == len(result["trades"])
+    assert result["diagnostics"]["trade_summary"]["trade_count"] == len(result["trades"])
+    assert result["diagnostics"]["initial_entry"]["was_initially_in_cash"] is True
     assert "buy_reason_counts" in result["diagnostics"]
     assert "pattern_a" in result["diagnostics"]["buy_reason_counts"]
     assert "pattern_b" in result["diagnostics"]["buy_reason_counts"]
@@ -88,6 +94,9 @@ def test_backtest_sanitizes_invalid_price_rows():
     assert math.isfinite(result["total_return_pct"])
     assert math.isfinite(result["max_drawdown_pct"])
     assert all(math.isfinite(v) for _, v in result["price_history"])
+    assert "score_samples" in result["diagnostics"]
+    assert "sell_events" in result["diagnostics"]
+    assert "buy_events" in result["diagnostics"]
 
 
 class BacktestServiceWithNaNScore(BacktestService):
