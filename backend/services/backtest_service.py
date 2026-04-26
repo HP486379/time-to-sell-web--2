@@ -195,8 +195,11 @@ class BacktestService:
 
         macro_series = self.macro_service.get_macro_series_range(start_date, end_date)
 
-        cash = initial_cash_safe
-        shares = 0
+        first_price = price_history[0][1]
+        initial_shares = floor(initial_cash_safe / first_price)
+        initial_cash_after_buy = initial_cash_safe - (initial_shares * first_price)
+        cash = initial_cash_after_buy
+        shares = initial_shares
         portfolio_history: List[Dict] = []
         trades: List[Dict] = []
         score_rows = 0
@@ -227,7 +230,6 @@ class BacktestService:
 
         hold_cash = initial_cash_safe
         hold_shares = 0
-        first_price = price_history[0][1]
         hold_shares = floor(hold_cash / first_price)
         hold_cash -= hold_shares * first_price
         buy_hold_history: List[Dict] = []
@@ -491,28 +493,24 @@ class BacktestService:
         sell_trades = [trade for trade in trades if trade["action"] == "SELL"]
         first_trade = trades[0] if trades else None
         last_trade = trades[-1] if trades else None
-        first_buy_trade = buy_trades[0] if buy_trades else None
-        first_buy_idx = next(
-            (idx for idx, trade in enumerate(trades) if trade["action"] == "BUY"),
-            None,
-        )
+        first_signal_buy_trade = buy_trades[0] if buy_trades else None
         start_date_str = price_history[0][0] if price_history else None
         start_price = price_history[0][1] if price_history else None
-        first_buy_date_str = first_buy_trade["date"] if first_buy_trade else None
-        first_buy_price = first_buy_trade["price"] if first_buy_trade else None
-        first_buy_calendar_days = (
-            (date.fromisoformat(first_buy_date_str) - date.fromisoformat(start_date_str)).days
-            if first_buy_date_str and start_date_str
+        first_signal_buy_date_str = first_signal_buy_trade["date"] if first_signal_buy_trade else None
+        first_signal_buy_price = first_signal_buy_trade["price"] if first_signal_buy_trade else None
+        first_signal_buy_calendar_days = (
+            (date.fromisoformat(first_signal_buy_date_str) - date.fromisoformat(start_date_str)).days
+            if first_signal_buy_date_str and start_date_str
             else None
         )
-        first_buy_trading_days = (
-            next((idx for idx, (dt, _) in enumerate(price_history) if dt == first_buy_date_str), None)
-            if first_buy_date_str
+        first_signal_buy_trading_days = (
+            next((idx for idx, (dt, _) in enumerate(price_history) if dt == first_signal_buy_date_str), None)
+            if first_signal_buy_date_str
             else None
         )
-        missed_return_until_first_buy_pct = (
-            round(((first_buy_price / start_price) - 1) * 100, 4)
-            if first_buy_price is not None and start_price is not None
+        missed_return_until_first_signal_buy_pct = (
+            round(((first_signal_buy_price / start_price) - 1) * 100, 4)
+            if first_signal_buy_price is not None and start_price is not None
             else None
         )
 
@@ -529,7 +527,7 @@ class BacktestService:
                     "index_type": index_type,
                     "quantity": trade["quantity"],
                     "buy_reason": "score < buy_threshold",
-                    "is_initial_entry": first_buy_idx == idx,
+                    "is_initial_entry": False,
                     "cash_before_buy": round(trade["cash_before_buy"], 2),
                     "cash_after_buy": round(trade["cash_after_buy"], 2),
                 }
@@ -592,7 +590,7 @@ class BacktestService:
 
         total_trading_days = len(price_history)
         position_state: List[int] = []
-        running_shares = 0
+        running_shares = initial_shares
         trades_by_date: Dict[str, List[Dict]] = {}
         for trade in trades:
             trades_by_date.setdefault(trade["date"], []).append(trade)
@@ -671,19 +669,26 @@ class BacktestService:
                     "last_trade_price": last_trade["price"] if last_trade else None,
                 },
                 "initial_entry": {
-                    "start_date": start_date_str,
-                    "start_price": start_price,
-                    "first_buy_date": first_buy_date_str,
-                    "first_buy_price": first_buy_price,
-                    "days_until_first_buy": first_buy_calendar_days,
-                    "trading_days_until_first_buy": first_buy_trading_days,
-                    "missed_return_until_first_buy_pct": missed_return_until_first_buy_pct,
-                    "was_initially_in_cash": True,
+                    "first_signal_buy_date": first_signal_buy_date_str,
+                    "first_signal_buy_price": first_signal_buy_price,
+                    "days_until_first_signal_buy": first_signal_buy_calendar_days,
+                    "trading_days_until_first_signal_buy": first_signal_buy_trading_days,
+                    "missed_return_until_first_signal_buy_pct": missed_return_until_first_signal_buy_pct,
+                    "starts_invested": True,
                     "note": (
-                        "strategy starts in cash; buy-and-hold starts invested"
-                        if first_buy_trade
-                        else "no BUY executed during backtest period"
+                        "strategy starts invested at start_date; initial position is not counted as a trade"
+                        if first_signal_buy_trade
+                        else "strategy starts invested at start_date; no BUY signal trade executed during backtest period"
                     ),
+                },
+                "initial_position": {
+                    "starts_invested": True,
+                    "initial_position_date": start_date_str,
+                    "initial_position_price": start_price,
+                    "initial_shares": initial_shares,
+                    "initial_cash_after_buy": round(initial_cash_after_buy, 2),
+                    "initial_position_is_trade": False,
+                    "note": "strategy starts invested at start_date; initial position is not counted as a trade",
                 },
                 "sell_events": sell_events,
                 "buy_events": buy_events,

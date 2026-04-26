@@ -31,7 +31,8 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
             "price_history": [("2024-01-01", 100.0), ("2024-01-02", 101.0)],
             "diagnostics": {
                 "trade_summary": {"trade_count": 7},
-                "initial_entry": {"was_initially_in_cash": True},
+                "initial_entry": {"starts_invested": True},
+                "initial_position": {"starts_invested": True, "initial_position_is_trade": False},
                 "exposure": {"total_trading_days": 2},
             },
         }
@@ -64,4 +65,5 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
     assert "diagnostics" in body
     assert "trade_summary" in body["diagnostics"]
     assert "initial_entry" in body["diagnostics"]
+    assert "initial_position" in body["diagnostics"]
     assert "exposure" in body["diagnostics"]
