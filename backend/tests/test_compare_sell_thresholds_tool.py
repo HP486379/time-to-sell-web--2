@@ -19,6 +19,12 @@ def _fake_run_backtest(
         "max_drawdown_pct": 12.3,
         "diagnostics": {
             "trade_summary": {"sell_count": 1, "buy_count": 1},
+            "score_max": 88.8,
+            "sell_threshold_hit_days": 5,
+            "sell_gate_open_days": 2,
+            "score_threshold_true_but_gate_closed_days": 4,
+            "sell_gate_open_but_score_below_threshold_days": 1,
+            "sell_signal_count": 1,
             "sell_events": [
                 {
                     "date": "2025-01-10",
@@ -83,3 +89,40 @@ def test_run_comparison_contains_required_summary_fields():
     assert row["trade_count"] == 2
     assert row["sell_count"] == 1
     assert row["buy_count"] == 1
+    assert row["max_score"] == 88.8
+    assert row["sell_threshold_hit_days"] == 5
+    assert row["sell_gate_open_days"] == 2
+    assert row["score_threshold_true_but_gate_closed_days"] == 4
+    assert row["sell_gate_open_but_score_below_threshold_days"] == 1
+    assert row["sell_signal_count"] == 1
+
+
+def test_run_comparison_fallback_calculates_score_threshold_true_but_gate_closed_days():
+    def _fake_without_explicit_breakdown(*args):
+        return {
+            "final_value": 1100.0,
+            "buy_and_hold_final": 1000.0,
+            "trade_count": 0,
+            "max_drawdown_pct": 12.3,
+            "diagnostics": {
+                "trade_summary": {"sell_count": 0, "buy_count": 0},
+                "sell_threshold_hit_days": 3,
+                "sell_signal_count": 1,
+                "sell_events": [],
+                "buy_events": [],
+            },
+        }
+
+    rows = run_comparison(
+        _fake_without_explicit_breakdown,
+        start_date=date(2020, 1, 1),
+        end_date=date(2020, 12, 31),
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        thresholds=[80.0],
+        index_types=["SP500"],
+        score_ma=200,
+    )
+
+    row = rows[0]
+    assert row["score_threshold_true_but_gate_closed_days"] == 2

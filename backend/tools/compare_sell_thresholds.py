@@ -81,6 +81,15 @@ def build_row(index_type: str, sell_threshold: float, result: Dict) -> Dict:
     hold_equity = float(result["buy_and_hold_final"])
     diff_amount = final_equity - hold_equity
     diff_pct = ((diff_amount / hold_equity) * 100) if hold_equity != 0 else 0.0
+    sell_signal_count = int(diagnostics.get("sell_signal_count", 0))
+    sell_threshold_hit_days = int(diagnostics.get("sell_threshold_hit_days", 0))
+    score_threshold_true_but_gate_closed_days = diagnostics.get(
+        "score_threshold_true_but_gate_closed_days"
+    )
+    if score_threshold_true_but_gate_closed_days is None:
+        score_threshold_true_but_gate_closed_days = max(
+            0, sell_threshold_hit_days - sell_signal_count
+        )
 
     return {
         "index_type": index_type,
@@ -107,6 +116,14 @@ def build_row(index_type: str, sell_threshold: float, result: Dict) -> Dict:
             if isinstance(event, dict) and event.get("return_until_buyback_pct") is not None
         ],
         "max_drawdown": result.get("max_drawdown_pct"),
+        "max_score": diagnostics.get("max_score", diagnostics.get("score_max")),
+        "sell_threshold_hit_days": sell_threshold_hit_days,
+        "sell_gate_open_days": diagnostics.get("sell_gate_open_days"),
+        "score_threshold_true_but_gate_closed_days": score_threshold_true_but_gate_closed_days,
+        "sell_gate_open_but_score_below_threshold_days": diagnostics.get(
+            "sell_gate_open_but_score_below_threshold_days"
+        ),
+        "sell_signal_count": sell_signal_count,
     }
 
 
@@ -171,6 +188,12 @@ def _output_rows(rows: List[Dict], output_format: str, output_path: str | None):
             "sell_post_return_20d_pct",
             "buyback_return_pct",
             "max_drawdown",
+            "max_score",
+            "sell_threshold_hit_days",
+            "sell_gate_open_days",
+            "score_threshold_true_but_gate_closed_days",
+            "sell_gate_open_but_score_below_threshold_days",
+            "sell_signal_count",
         ]
     else:
         header = list(rows[0].keys())
