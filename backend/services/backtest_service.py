@@ -285,9 +285,13 @@ class BacktestService:
                     else None
                 )
                 buy_reason: str | None = None
+                pattern_a = False
+                pattern_b = False
+                day60_condition = False
+                score_threshold_condition = score < buy_threshold_safe
                 if days_since_last_sell is None:
                     # 初回エントリーは従来閾値を利用
-                    buy_gate_open = score < buy_threshold_safe
+                    buy_gate_open = score_threshold_condition
                     if buy_gate_open:
                         buy_reason = "initial_threshold"
                 elif days_since_last_sell < 20:
@@ -309,6 +313,12 @@ class BacktestService:
                 else:
                     buy_gate_open = True
                     buy_reason = "day60"
+                    day60_condition = True
+                rebound_detected = pattern_b
+                confirmation_detected = pattern_a
+                cooldown_clear_condition = (
+                    days_since_last_sell is None or days_since_last_sell >= 20
+                )
                 valid_score_rows += 1
                 if score_min is None or score < score_min:
                     score_min = score
@@ -388,6 +398,15 @@ class BacktestService:
                                 "quantity": qty,
                                 "cash_before_buy": cash_before_buy,
                                 "cash_after_buy": cash,
+                                "score_threshold": score_threshold_condition,
+                                "buy_gate_open": buy_gate_open,
+                                "cooldown_clear": cooldown_clear_condition,
+                                "pattern_a": pattern_a,
+                                "pattern_b": pattern_b,
+                                "day60": day60_condition,
+                                "rebound_detected": rebound_detected,
+                                "confirmation_detected": confirmation_detected,
+                                "signal_reason": buy_reason,
                             }
                         )
 
@@ -532,7 +551,31 @@ class BacktestService:
                     "buy_threshold": buy_threshold_safe,
                     "index_type": index_type,
                     "quantity": trade["quantity"],
-                    "buy_reason": "score < buy_threshold",
+                    "buy_reason": [
+                        condition
+                        for condition, enabled in [
+                            ("score_threshold", trade.get("score_threshold", False)),
+                            ("buy_gate_open", trade.get("buy_gate_open", False)),
+                            ("cooldown_clear", trade.get("cooldown_clear", False)),
+                            ("pattern_a", trade.get("pattern_a", False)),
+                            ("pattern_b", trade.get("pattern_b", False)),
+                            ("day60", trade.get("day60", False)),
+                            ("rebound_detected", trade.get("rebound_detected", False)),
+                            ("confirmation_detected", trade.get("confirmation_detected", False)),
+                        ]
+                        if enabled
+                    ],
+                    "buy_reason_flags": {
+                        "score_threshold": trade.get("score_threshold", False),
+                        "buy_gate_open": trade.get("buy_gate_open", False),
+                        "cooldown_clear": trade.get("cooldown_clear", False),
+                        "pattern_a": trade.get("pattern_a", False),
+                        "pattern_b": trade.get("pattern_b", False),
+                        "day60": trade.get("day60", False),
+                        "rebound_detected": trade.get("rebound_detected", False),
+                        "confirmation_detected": trade.get("confirmation_detected", False),
+                        "signal_reason": trade.get("signal_reason"),
+                    },
                     "is_initial_entry": False,
                     "cash_before_buy": round(trade["cash_before_buy"], 2),
                     "cash_after_buy": round(trade["cash_after_buy"], 2),

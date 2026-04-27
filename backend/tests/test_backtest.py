@@ -180,3 +180,53 @@ def test_sell_diagnostics_reason_reflects_sell_gate_conditions():
     assert "cooldown_clear" in first_sell["sell_reason"]
     assert first_sell["sell_reason_flags"]["sell_gate_open"] is True
     assert first_sell["sell_reason_flags"]["cooldown_clear"] is True
+
+
+class FakeMarketServiceForBuyDiagnostics:
+    def get_price_history_range(
+        self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
+    ):
+        history = []
+        for i in range(340):
+            dt = start + timedelta(days=i)
+            if i < 230:
+                price = 100.0
+            elif i < 260:
+                price = 100.0 - (i - 229) * 0.8
+            else:
+                price = 80.0
+            history.append((dt.isoformat(), price))
+        return history
+
+
+class BacktestServiceForBuyDiagnostics(BacktestService):
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        idx = len(price_history) - 1
+        if idx < 230:
+            return 85.0
+        if idx < 240:
+            return 85.0 - ((idx - 229) * 1.5)
+        return 72.8
+
+
+def test_buy_diagnostics_reason_flags_reflect_actual_gate_conditions():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=339)
+    service = BacktestServiceForBuyDiagnostics(
+        FakeMarketServiceForBuyDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
+    )
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="NIKKEI225")
+    buy_events = result["diagnostics"]["buy_events"]
+
+    assert len(buy_events) >= 1
+    first_buy = buy_events[0]
+    assert "buy_reason_flags" in first_buy
+    assert first_buy["buy_reason_flags"]["buy_gate_open"] is True
+    assert first_buy["buy_reason_flags"]["cooldown_clear"] is True
+    assert (
+        first_buy["buy_reason_flags"]["day60"]
+        or first_buy["buy_reason_flags"]["pattern_a"]
+        or first_buy["buy_reason_flags"]["pattern_b"]
+    )
+    assert first_buy["buy_reason_flags"]["signal_reason"] in {"day60", "pattern_a", "pattern_b", "both"}
