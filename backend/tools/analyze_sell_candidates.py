@@ -96,11 +96,31 @@ def _summarize(rows: List[Dict]) -> Dict:
     }
 
 
+def _passes_filters(
+    *,
+    total_score: float,
+    technical_score: float,
+    macro_score: float,
+    min_total_score: float,
+    min_technical_score: Optional[float],
+    min_macro_score: Optional[float],
+) -> bool:
+    if total_score < min_total_score:
+        return False
+    if min_technical_score is not None and technical_score < min_technical_score:
+        return False
+    if min_macro_score is not None and macro_score < min_macro_score:
+        return False
+    return True
+
+
 def analyze_single_index(
     ctx: AnalysisContext,
     *,
     index_type: str,
-    threshold: float,
+    min_total_score: float,
+    min_technical_score: Optional[float],
+    min_macro_score: Optional[float],
     start_date: date,
     end_date: date,
     initial_cash: float,
@@ -118,7 +138,7 @@ def analyze_single_index(
         end_date,
         initial_cash,
         buy_threshold,
-        threshold,
+        min_total_score,
         index_type,
         score_ma,
     )
@@ -160,14 +180,21 @@ def analyze_single_index(
             ma1000=ma1000,
         )
 
-        if total_score < threshold:
+        if not _passes_filters(
+            total_score=float(total_score),
+            technical_score=float(technical_score),
+            macro_score=float(macro_score),
+            min_total_score=min_total_score,
+            min_technical_score=min_technical_score,
+            min_macro_score=min_macro_score,
+        ):
             continue
 
         sell_meta = sell_meta_by_date.get(date_str, {})
         rows.append(
             {
                 "index_type": index_type,
-                "candidate_threshold": threshold,
+                "candidate_threshold": min_total_score,
                 "date": date_str,
                 "close": close,
                 "total_score": round(float(total_score), 4),
@@ -184,14 +211,23 @@ def analyze_single_index(
             }
         )
 
-    return {"index_type": index_type, "threshold": threshold, "candidates": rows, "summary": _summarize(rows)}
+    return {
+        "index_type": index_type,
+        "threshold": min_total_score,
+        "min_technical_score": min_technical_score,
+        "min_macro_score": min_macro_score,
+        "candidates": rows,
+        "summary": _summarize(rows),
+    }
 
 
 def run_analysis(
     ctx: AnalysisContext,
     *,
     index_types: List[str],
-    threshold: float,
+    min_total_score: float,
+    min_technical_score: Optional[float],
+    min_macro_score: Optional[float],
     start_date: date,
     end_date: date,
     initial_cash: float,
@@ -202,7 +238,9 @@ def run_analysis(
         analyze_single_index(
             ctx,
             index_type=index_type,
-            threshold=threshold,
+            min_total_score=min_total_score,
+            min_technical_score=min_technical_score,
+            min_macro_score=min_macro_score,
             start_date=start_date,
             end_date=end_date,
             initial_cash=initial_cash,
@@ -211,7 +249,12 @@ def run_analysis(
         )
         for index_type in index_types
     ]
-    return {"threshold": threshold, "results": results}
+    return {
+        "min_total_score": min_total_score,
+        "min_technical_score": min_technical_score,
+        "min_macro_score": min_macro_score,
+        "results": results,
+    }
 
 
 def _build_context() -> AnalysisContext:
@@ -276,6 +319,9 @@ def main():
     parser = argparse.ArgumentParser(description="Offline SELL candidate analyzer (threshold-hit days).")
     parser.add_argument("--index", dest="index_types", default=None, help="Comma-separated index types")
     parser.add_argument("--threshold", type=float, default=70.0)
+    parser.add_argument("--min-total-score", type=float, default=None)
+    parser.add_argument("--min-technical-score", type=float, default=None)
+    parser.add_argument("--min-macro-score", type=float, default=None)
     parser.add_argument("--start-date", default="2014-01-01")
     parser.add_argument("--end-date", default=date.today().isoformat())
     parser.add_argument("--initial-cash", type=float, default=1_000_000.0)
@@ -285,11 +331,14 @@ def main():
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
+    min_total_score = args.min_total_score if args.min_total_score is not None else args.threshold
     ctx = _build_context()
     payload = run_analysis(
         ctx,
         index_types=parse_index_types(args.index_types),
-        threshold=args.threshold,
+        min_total_score=min_total_score,
+        min_technical_score=args.min_technical_score,
+        min_macro_score=args.min_macro_score,
         start_date=date.fromisoformat(args.start_date),
         end_date=date.fromisoformat(args.end_date),
         initial_cash=args.initial_cash,
