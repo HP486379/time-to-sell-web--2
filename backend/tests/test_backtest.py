@@ -160,14 +160,36 @@ class BacktestServiceForSellDiagnostics(BacktestService):
     def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
         idx = len(price_history) - 1
         if idx < 230:
-            return 85.0
-        return 85.0 - ((idx - 229) * 1.5)
+            return 82.0
+        return 70.0 - ((idx - 229) * 0.5)
 
 
-def test_sell_diagnostics_reason_reflects_sell_gate_conditions():
+class BacktestServiceForSellDiagnosticsAboveThreshold(BacktestService):
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        idx = len(price_history) - 1
+        if idx < 230:
+            return 90.0
+        return 90.0 - ((idx - 229) * 0.2)
+
+
+def test_sell_does_not_execute_when_score_below_threshold_even_if_gate_open():
     start = date(2020, 1, 1)
     end = start + timedelta(days=259)
     service = BacktestServiceForSellDiagnostics(
+        FakeMarketServiceForSellDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
+    )
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+
+    assert result["trade_count"] == 0
+    assert result["diagnostics"]["sell_signal_count"] == 0
+    assert result["diagnostics"]["sell_events"] == []
+
+
+def test_sell_executes_only_when_score_threshold_and_sell_gate_conditions_are_met():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    service = BacktestServiceForSellDiagnosticsAboveThreshold(
         FakeMarketServiceForSellDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
     )
 
@@ -176,10 +198,25 @@ def test_sell_diagnostics_reason_reflects_sell_gate_conditions():
 
     assert len(sell_events) >= 1
     first_sell = sell_events[0]
+    assert first_sell["sell_reason_flags"]["score_threshold"] is True
     assert "sell_gate_open" in first_sell["sell_reason"]
     assert "cooldown_clear" in first_sell["sell_reason"]
     assert first_sell["sell_reason_flags"]["sell_gate_open"] is True
     assert first_sell["sell_reason_flags"]["cooldown_clear"] is True
+
+
+def test_nikkei225_like_case_does_not_sell_when_score_threshold_is_false():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    service = BacktestServiceForSellDiagnostics(
+        FakeMarketServiceForSellDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
+    )
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="NIKKEI225")
+
+    assert result["trade_count"] == 0
+    assert result["final_value"] == result["buy_and_hold_final"]
+    assert all(event["sell_reason_flags"]["score_threshold"] for event in result["diagnostics"]["sell_events"])
 
 
 class FakeMarketServiceForBuyDiagnostics:

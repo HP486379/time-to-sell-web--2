@@ -328,8 +328,9 @@ class BacktestService:
                     buy_threshold_hit_days += 1
                 if score >= sell_threshold_safe:
                     sell_threshold_hit_days += 1
+                score_threshold_today = score >= sell_threshold_safe
 
-                if shares > 0 and sell_gate_open and not cooldown_active:
+                if shares > 0 and sell_gate_open and not cooldown_active and score_threshold_today:
                     sold_quantity = shares
                     cash += shares * close
                     sell_signal_count += 1
@@ -344,7 +345,7 @@ class BacktestService:
                             "total_score": score,
                             "quantity": sold_quantity,
                             "portfolio_cash_after_sell": cash,
-                            "score_threshold_today": score >= sell_threshold_safe,
+                            "score_threshold_today": score_threshold_today,
                             "overheat_event_active": overheat_event_active,
                             "peakout_detected": peakout_detected,
                             "confirmation_detected": confirmation_detected,
