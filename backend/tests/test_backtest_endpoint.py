@@ -5,7 +5,7 @@ from datetime import date
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import main
-from main import BacktestRequest
+from main import BacktestRequest, BacktestDiagnosticsSummaryRequest
 
 
 def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
