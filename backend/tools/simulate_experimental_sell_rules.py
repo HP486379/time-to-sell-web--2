@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date
 from math import floor
 from pathlib import Path
+from statistics import mean, median
 from typing import Dict, List, Optional
 
 
@@ -16,6 +17,9 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
 from scoring.technical import calculate_technical_score, moving_average
+from scoring.technical import calculate_ultra_long_attenuation, calculate_ultra_long_mas, clip
+from scoring.macro import calculate_macro_score
+from scoring.events import calculate_event_adjustment
 from services.backtest_service import BacktestService
 from services.event_service import EventService
 from services.macro_data_service import MacroDataService
@@ -25,6 +29,20 @@ from services.sp500_market_service import SP500MarketService
 @dataclass
 class SimulationContext:
     backtest_service: BacktestService
+
+
+@dataclass
+class CalibrationConfig:
+    multiplier: float = 1.0
+    offset: float = 0.0
+
+
+@dataclass
+class WeightAdjustConfig:
+    technical_weight: float = 0.7
+    macro_weight: float = 0.3
+    event_weight: float = 1.0
+    scale: float = 1.0
 
 
 def _compute_max_drawdown(values: List[float]) -> float:
@@ -89,6 +107,109 @@ def _summarize_rule_result(rule_name: str, index_type: str, result: Dict) -> Dic
         "sell_post_return_20d_pct": sell_post_return_20d_pct,
         "buyback_return_pct": buyback_return_pct,
         "max_drawdown": result.get("max_drawdown_pct"),
+        "score_max_before": result.get("score_max_before"),
+        "score_max_after": result.get("score_max_after"),
+        "score_p95_before": result.get("score_p95_before"),
+        "score_p95_after": result.get("score_p95_after"),
+        "score_distribution_before": result.get("score_distribution_before"),
+        "score_distribution_after": result.get("score_distribution_after"),
+    }
+
+
+def _percentile(values: List[float], p: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    sorted_values = sorted(values)
+    rank = (len(sorted_values) - 1) * (p / 100.0)
+    lo = int(rank)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = rank - lo
+    return float(sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac)
+
+
+def _score_distribution(values: List[float]) -> Dict[str, float]:
+    if not values:
+        return {
+            "min": 0.0,
+            "max": 0.0,
+            "average": 0.0,
+            "median": 0.0,
+            "p90": 0.0,
+            "p95": 0.0,
+            "p97": 0.0,
+            "p99": 0.0,
+        }
+    return {
+        "min": round(min(values), 2),
+        "max": round(max(values), 2),
+        "average": round(mean(values), 2),
+        "median": round(float(median(values)), 2),
+        "p90": round(_percentile(values, 90), 2),
+        "p95": round(_percentile(values, 95), 2),
+        "p97": round(_percentile(values, 97), 2),
+        "p99": round(_percentile(values, 99), 2),
+    }
+
+
+def _build_calibration_config(values: List[float]) -> CalibrationConfig:
+    p95 = _percentile(values, 95)
+    if p95 <= 0:
+        return CalibrationConfig()
+    multiplier = 80.0 / p95
+    multiplier = max(0.7, min(multiplier, 2.0))
+    offset = 80.0 - (p95 * multiplier)
+    return CalibrationConfig(multiplier=round(multiplier, 4), offset=round(offset, 4))
+
+
+def _build_weight_adjust_config(score_components: List[Dict[str, float]]) -> WeightAdjustConfig:
+    if not score_components:
+        return WeightAdjustConfig()
+    p95_technical = _percentile([s["technical_score"] for s in score_components], 95)
+    p95_macro = _percentile([s["macro_score"] for s in score_components], 95)
+    p95_event = _percentile([s["event_adjustment"] for s in score_components], 95)
+    denom = max(p95_technical + p95_macro, 1e-9)
+    technical_weight = max(0.55, min(0.85, 0.5 + 0.4 * (p95_technical / denom)))
+    macro_weight = 1.0 - technical_weight
+    projected_p95 = (technical_weight * p95_technical) + (macro_weight * p95_macro) + p95_event
+    scale = 80.0 / projected_p95 if projected_p95 > 0 else 1.0
+    scale = max(0.7, min(scale, 1.8))
+    return WeightAdjustConfig(
+        technical_weight=round(technical_weight, 4),
+        macro_weight=round(macro_weight, 4),
+        event_weight=1.0,
+        scale=round(scale, 4),
+    )
+
+
+def _calculate_score_snapshot(
+    svc: BacktestService,
+    sub_history: List[tuple[str, float]],
+    macro_series: Dict[str, List[tuple[date, float]]],
+    current_date: date,
+    score_ma: int,
+) -> Dict[str, float]:
+    technical_score, _ = calculate_technical_score(sub_history, base_window=score_ma)
+    r_hist, r_cur = svc._history_and_current(macro_series["r_10y"], current_date)
+    cpi_hist, cpi_cur = svc._history_and_current(macro_series["cpi"], current_date)
+    vix_hist, vix_cur = svc._history_and_current(macro_series["vix"], current_date)
+    macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
+    events = svc.event_service.get_events_for_date(current_date)
+    event_adjustment, _ = calculate_event_adjustment(current_date, events)
+    ma500, ma1000 = calculate_ultra_long_mas(sub_history)
+    current_price = sub_history[-1][1] if sub_history else None
+    total_score = float(
+        svc._calculate_scores(sub_history, macro_series, current_date, score_ma)
+    )
+    return {
+        "technical_score": float(technical_score),
+        "macro_score": float(macro_score),
+        "event_adjustment": float(event_adjustment),
+        "ma500": ma500,
+        "ma1000": ma1000,
+        "current_price": current_price,
+        "total_score_raw": total_score,
     }
 
 
@@ -104,6 +225,8 @@ def _run_simulation_core(
     initial_cash: float,
     buy_threshold: float,
     score_ma: int,
+    calibration_config: CalibrationConfig | None = None,
+    weight_adjust_config: WeightAdjustConfig | None = None,
 ) -> Dict:
     svc = ctx.backtest_service
     raw_history = svc.market_service.get_price_history_range(
@@ -125,6 +248,8 @@ def _run_simulation_core(
     overheat_event_consumed = False
     prev_overheat_state = False
     buy_reason_counts = {"initial_threshold": 0, "pattern_a": 0, "pattern_b": 0, "both": 0, "day60": 0}
+    score_before_values: List[float] = []
+    score_after_values: List[float] = []
 
     hold_cash = initial_cash
     first_price = price_history[0][1]
@@ -139,8 +264,27 @@ def _run_simulation_core(
 
         if idx >= max(score_ma - 1, 199):
             sub_history = price_history[: idx + 1]
-            total_score = float(svc._calculate_scores(sub_history, macro_series, date.fromisoformat(date_str), score_ma))
-            technical_score, _ = calculate_technical_score(sub_history, base_window=score_ma)
+            snapshot = _calculate_score_snapshot(
+                svc, sub_history, macro_series, date.fromisoformat(date_str), score_ma
+            )
+            raw_total_score = snapshot["total_score_raw"]
+            total_score = raw_total_score
+            technical_score = snapshot["technical_score"]
+            if weight_adjust_config is not None:
+                weighted_raw = (
+                    (weight_adjust_config.technical_weight * snapshot["technical_score"])
+                    + (weight_adjust_config.macro_weight * snapshot["macro_score"])
+                    + (weight_adjust_config.event_weight * snapshot["event_adjustment"])
+                )
+                attenuation = calculate_ultra_long_attenuation(
+                    snapshot["current_price"], snapshot["ma500"], snapshot["ma1000"]
+                )
+                total_score = clip(weighted_raw * weight_adjust_config.scale * (attenuation if attenuation is not None else 1.0))
+            elif calibration_config is not None:
+                total_score = clip((raw_total_score * calibration_config.multiplier) + calibration_config.offset)
+
+            score_before_values.append(float(raw_total_score))
+            score_after_values.append(float(total_score))
             recent_scores.append(total_score)
             closes = [p[1] for p in sub_history]
             ma20_series = moving_average(closes, 20)
@@ -200,7 +344,7 @@ def _run_simulation_core(
                 and technical_threshold is not None
                 and float(technical_score) >= technical_threshold
             )
-            should_sell = current_logic_sell if rule_name == "current_logic" else experimental_sell
+            should_sell = current_logic_sell if technical_threshold is None else experimental_sell
             if should_sell:
                 trades.append(
                     {
@@ -219,7 +363,7 @@ def _run_simulation_core(
                 shares = 0
                 sell_cooldown_days_remaining = 30
                 days_since_last_sell = 0
-                if rule_name == "current_logic":
+                if technical_threshold is None:
                     overheat_event_consumed = True
             elif shares == 0 and days_since_last_sell is not None and buy_gate_open:
                 qty = floor(cash / close)
@@ -250,14 +394,20 @@ def _run_simulation_core(
         "trades": trades,
         "price_history": price_history,
         "buy_reason_counts": buy_reason_counts,
+        "score_max_before": round(max(score_before_values), 2) if score_before_values else 0.0,
+        "score_max_after": round(max(score_after_values), 2) if score_after_values else 0.0,
+        "score_p95_before": round(_percentile(score_before_values, 95), 2) if score_before_values else 0.0,
+        "score_p95_after": round(_percentile(score_after_values, 95), 2) if score_after_values else 0.0,
+        "score_distribution_before": _score_distribution(score_before_values),
+        "score_distribution_after": _score_distribution(score_after_values),
     }
 
 
-def run_experimental_rule(
+def run_calibrated_rule(
     ctx: SimulationContext,
     *,
     index_type: str,
-    technical_threshold: float,
+    calibration_config: CalibrationConfig,
     start_date: date,
     end_date: date,
     initial_cash: float,
@@ -268,14 +418,42 @@ def run_experimental_rule(
     return _run_simulation_core(
         ctx,
         index_type=index_type,
-        rule_name="experimental",
+        rule_name="index_calibrated_score",
         sell_threshold=sell_threshold,
-        technical_threshold=technical_threshold,
+        technical_threshold=None,
         start_date=start_date,
         end_date=end_date,
         initial_cash=initial_cash,
         buy_threshold=buy_threshold,
         score_ma=score_ma,
+        calibration_config=calibration_config,
+    )
+
+
+def run_weight_adjusted_rule(
+    ctx: SimulationContext,
+    *,
+    index_type: str,
+    weight_adjust_config: WeightAdjustConfig,
+    start_date: date,
+    end_date: date,
+    initial_cash: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    score_ma: int,
+) -> Dict:
+    return _run_simulation_core(
+        ctx,
+        index_type=index_type,
+        rule_name="index_weight_adjusted_score",
+        sell_threshold=sell_threshold,
+        technical_threshold=None,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=buy_threshold,
+        score_ma=score_ma,
+        weight_adjust_config=weight_adjust_config,
     )
 
 
@@ -314,26 +492,62 @@ def run_comparison(
     buy_threshold: float,
     score_ma: int,
 ) -> List[Dict]:
-    rows: List[Dict] = []
-    for technical_threshold in (77.0, 78.0, 79.0, 80.0):
-        result = run_experimental_rule(
-            ctx,
-            index_type=index_type,
-            technical_threshold=technical_threshold,
-            start_date=start_date,
-            end_date=end_date,
-            initial_cash=initial_cash,
-            buy_threshold=buy_threshold,
-            sell_threshold=70.0,
-            score_ma=score_ma,
-        )
-        rows.append(
-            _summarize_rule_result(
-                f"experimental_total70_technical{int(technical_threshold)}", index_type, result
+    svc = ctx.backtest_service
+    raw_history = svc.market_service.get_price_history_range(
+        start_date, end_date, allow_fallback=svc.allow_fallback, index_type=index_type
+    )
+    price_history = svc._prepare_price_history(raw_history, index_type)
+    macro_series = svc.macro_service.get_macro_series_range(start_date, end_date)
+    score_components: List[Dict[str, float]] = []
+    for idx, (date_str, _) in enumerate(price_history):
+        if idx < max(score_ma - 1, 199):
+            continue
+        score_components.append(
+            _calculate_score_snapshot(
+                svc, price_history[: idx + 1], macro_series, date.fromisoformat(date_str), score_ma
             )
         )
+    raw_scores = [s["total_score_raw"] for s in score_components]
+    calibration_config = _build_calibration_config(raw_scores)
+    weight_adjust_config = _build_weight_adjust_config(score_components)
 
-    return rows
+    current = run_current_logic_rule(
+        ctx,
+        index_type=index_type,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=40.0,
+        sell_threshold=80.0,
+        score_ma=score_ma,
+    )
+    calibrated = run_calibrated_rule(
+        ctx,
+        index_type=index_type,
+        calibration_config=calibration_config,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=40.0,
+        sell_threshold=80.0,
+        score_ma=score_ma,
+    )
+    weight_adjusted = run_weight_adjusted_rule(
+        ctx,
+        index_type=index_type,
+        weight_adjust_config=weight_adjust_config,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=40.0,
+        sell_threshold=80.0,
+        score_ma=score_ma,
+    )
+    return [
+        _summarize_rule_result("current_logic", index_type, current),
+        _summarize_rule_result("index_calibrated_score", index_type, calibrated),
+        _summarize_rule_result("index_weight_adjusted_score", index_type, weight_adjusted),
+    ]
 
 
 def _build_context() -> SimulationContext:
@@ -361,7 +575,16 @@ def _output(rows: List[Dict], output_format: str, output_path: str | None):
         writer.writeheader()
         for row in rows:
             serializable = dict(row)
-            for key in ("sell_dates", "buy_dates", "sell_reasons", "buy_reasons", "sell_post_return_20d_pct", "buyback_return_pct"):
+            for key in (
+                "sell_dates",
+                "buy_dates",
+                "sell_reasons",
+                "buy_reasons",
+                "sell_post_return_20d_pct",
+                "buyback_return_pct",
+                "score_distribution_before",
+                "score_distribution_after",
+            ):
                 serializable[key] = json.dumps(serializable.get(key, []), ensure_ascii=False)
             writer.writerow(serializable)
     finally:
