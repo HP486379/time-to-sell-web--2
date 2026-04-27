@@ -314,45 +314,26 @@ def run_comparison(
     buy_threshold: float,
     score_ma: int,
 ) -> List[Dict]:
-    current = run_current_logic_rule(
-        ctx,
-        index_type=index_type,
-        start_date=start_date,
-        end_date=end_date,
-        initial_cash=initial_cash,
-        buy_threshold=buy_threshold,
-        sell_threshold=80.0,
-        score_ma=score_ma,
-    )
+    rows: List[Dict] = []
+    for technical_threshold in (77.0, 78.0, 79.0, 80.0):
+        result = run_experimental_rule(
+            ctx,
+            index_type=index_type,
+            technical_threshold=technical_threshold,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            buy_threshold=buy_threshold,
+            sell_threshold=70.0,
+            score_ma=score_ma,
+        )
+        rows.append(
+            _summarize_rule_result(
+                f"experimental_total70_technical{int(technical_threshold)}", index_type, result
+            )
+        )
 
-    exp75 = run_experimental_rule(
-        ctx,
-        index_type=index_type,
-        technical_threshold=75.0,
-        start_date=start_date,
-        end_date=end_date,
-        initial_cash=initial_cash,
-        buy_threshold=buy_threshold,
-        sell_threshold=70.0,
-        score_ma=score_ma,
-    )
-    exp78 = run_experimental_rule(
-        ctx,
-        index_type=index_type,
-        technical_threshold=78.0,
-        start_date=start_date,
-        end_date=end_date,
-        initial_cash=initial_cash,
-        buy_threshold=buy_threshold,
-        sell_threshold=70.0,
-        score_ma=score_ma,
-    )
-
-    return [
-        _summarize_rule_result("current_logic", index_type, current),
-        _summarize_rule_result("experimental_total70_technical75", index_type, exp75),
-        _summarize_rule_result("experimental_total70_technical78", index_type, exp78),
-    ]
+    return rows
 
 
 def _build_context() -> SimulationContext:

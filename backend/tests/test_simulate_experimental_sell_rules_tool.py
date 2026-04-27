@@ -72,16 +72,7 @@ def test_summarize_rule_result_contains_required_fields():
     assert row["buy_count"] == 1
 
 
-def test_run_comparison_runs_three_rule_variants(monkeypatch):
-    def _fake_current(*args, **kwargs):
-        return {
-            "final_value": 1200.0,
-            "buy_and_hold_final": 1000.0,
-            "max_drawdown_pct": 10.0,
-            "trades": [],
-            "price_history": [("2020-01-01", 100.0)],
-        }
-
+def test_run_comparison_runs_four_experimental_thresholds(monkeypatch):
     def _fake_experimental(*args, **kwargs):
         return {
             "final_value": 1100.0,
@@ -91,7 +82,6 @@ def test_run_comparison_runs_three_rule_variants(monkeypatch):
             "price_history": [("2020-01-01", 100.0)],
         }
 
-    monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_current_logic_rule", _fake_current)
     monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_experimental_rule", _fake_experimental)
     rows = run_comparison(
         ctx=FakeContext(),
@@ -103,11 +93,11 @@ def test_run_comparison_runs_three_rule_variants(monkeypatch):
         score_ma=200,
     )
     assert [row["rule_name"] for row in rows] == [
-        "current_logic",
-        "experimental_total70_technical75",
+        "experimental_total70_technical77",
         "experimental_total70_technical78",
+        "experimental_total70_technical79",
+        "experimental_total70_technical80",
     ]
-
 
 class _MarketService:
     def get_price_history_range(self, start, end, allow_fallback, index_type):
