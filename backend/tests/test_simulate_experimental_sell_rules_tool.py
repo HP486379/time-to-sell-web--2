@@ -1,6 +1,10 @@
 from datetime import date
 
-from tools.simulate_experimental_sell_rules import _summarize_rule_result, run_comparison
+from tools.simulate_experimental_sell_rules import (
+    _run_simulation_core,
+    _summarize_rule_result,
+    run_comparison,
+)
 
 
 class FakeBacktestService:
@@ -69,6 +73,15 @@ def test_summarize_rule_result_contains_required_fields():
 
 
 def test_run_comparison_runs_three_rule_variants(monkeypatch):
+    def _fake_current(*args, **kwargs):
+        return {
+            "final_value": 1200.0,
+            "buy_and_hold_final": 1000.0,
+            "max_drawdown_pct": 10.0,
+            "trades": [],
+            "price_history": [("2020-01-01", 100.0)],
+        }
+
     def _fake_experimental(*args, **kwargs):
         return {
             "final_value": 1100.0,
@@ -78,6 +91,7 @@ def test_run_comparison_runs_three_rule_variants(monkeypatch):
             "price_history": [("2020-01-01", 100.0)],
         }
 
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_current_logic_rule", _fake_current)
     monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_experimental_rule", _fake_experimental)
     rows = run_comparison(
         ctx=FakeContext(),
@@ -93,3 +107,127 @@ def test_run_comparison_runs_three_rule_variants(monkeypatch):
         "experimental_total70_technical75",
         "experimental_total70_technical78",
     ]
+
+
+class _MarketService:
+    def get_price_history_range(self, start, end, allow_fallback, index_type):
+        history = []
+        for i in range(320):
+            dt = start.fromordinal(start.toordinal() + i)
+            history.append((dt.isoformat(), 100.0))
+        return history
+
+
+class _MacroService:
+    def get_macro_series_range(self, start, end):
+        values = []
+        days = (end - start).days
+        for i in range(days + 1):
+            dt = start.fromordinal(start.toordinal() + i)
+            values.append((dt, 0.0))
+        return {"r_10y": values, "cpi": values, "vix": values}
+
+
+class _BacktestServiceForSimulation:
+    allow_fallback = False
+    market_service = _MarketService()
+    macro_service = _MacroService()
+
+    def _prepare_price_history(self, raw_history, index_type):
+        return raw_history
+
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        idx = len(price_history) - 1
+        if idx == 200:
+            return 80.0
+        if idx >= 260:
+            return 30.0
+        return 50.0
+
+
+class _SimulationContext:
+    backtest_service = _BacktestServiceForSimulation()
+
+
+def test_initial_position_is_not_in_buy_dates_and_buy_appears_only_after_sell(monkeypatch):
+    def _fake_technical(price_history, base_window=200):
+        idx = len(price_history) - 1
+        return (80.0, {}) if idx == 200 else (40.0, {})
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules.calculate_technical_score", _fake_technical)
+    result = _run_simulation_core(
+        _SimulationContext(),
+        index_type="SP500_JPY",
+        rule_name="experimental",
+        sell_threshold=70.0,
+        technical_threshold=78.0,
+        start_date=date(2020, 1, 1),
+        end_date=date(2020, 11, 15),
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=200,
+    )
+    sell_dates = [t["date"] for t in result["trades"] if t["action"] == "SELL"]
+    buy_dates = [t["date"] for t in result["trades"] if t["action"] == "BUY"]
+    assert len(sell_dates) == 1
+    assert len(buy_dates) == 1
+    assert buy_dates[0] > sell_dates[0]
+
+
+def test_no_sell_case_keeps_final_equal_to_hold(monkeypatch):
+    def _low_scores(price_history, base_window=200):
+        return (40.0, {})
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules.calculate_technical_score", _low_scores)
+
+    class _NoSellBacktestService(_BacktestServiceForSimulation):
+        def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+            return 30.0
+
+    class _NoSellContext:
+        backtest_service = _NoSellBacktestService()
+
+    result = _run_simulation_core(
+        _NoSellContext(),
+        index_type="SP500_JPY",
+        rule_name="experimental",
+        sell_threshold=70.0,
+        technical_threshold=78.0,
+        start_date=date(2020, 1, 1),
+        end_date=date(2020, 10, 30),
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=200,
+    )
+    assert result["trades"] == []
+    assert result["final_value"] == result["buy_and_hold_final"]
+
+
+def test_no_buy_is_recorded_before_first_sell_even_if_initial_cash_cannot_buy_one_share(monkeypatch):
+    def _always_low_technical(price_history, base_window=200):
+        return (40.0, {})
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules.calculate_technical_score", _always_low_technical)
+
+    class _NoSellBacktestService(_BacktestServiceForSimulation):
+        def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+            return 30.0
+
+    class _NoSellContext:
+        backtest_service = _NoSellBacktestService()
+
+    result = _run_simulation_core(
+        _NoSellContext(),
+        index_type="SP500_JPY",
+        rule_name="experimental",
+        sell_threshold=70.0,
+        technical_threshold=78.0,
+        start_date=date(2020, 1, 1),
+        end_date=date(2020, 10, 30),
+        initial_cash=50.0,
+        buy_threshold=40.0,
+        score_ma=200,
+    )
+
+    assert result["trades"] == []
+

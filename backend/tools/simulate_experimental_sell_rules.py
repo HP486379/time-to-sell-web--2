@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import date
 from math import floor
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Dict, List, Optional
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -92,16 +92,17 @@ def _summarize_rule_result(rule_name: str, index_type: str, result: Dict) -> Dic
     }
 
 
-def run_experimental_rule(
+def _run_simulation_core(
     ctx: SimulationContext,
     *,
     index_type: str,
-    technical_threshold: float,
+    rule_name: str,
+    sell_threshold: float,
+    technical_threshold: Optional[float],
     start_date: date,
     end_date: date,
     initial_cash: float,
     buy_threshold: float,
-    sell_threshold: float,
     score_ma: int,
 ) -> Dict:
     svc = ctx.backtest_service
@@ -111,13 +112,18 @@ def run_experimental_rule(
     price_history = svc._prepare_price_history(raw_history, index_type)
     macro_series = svc.macro_service.get_macro_series_range(start_date, end_date)
 
-    cash = initial_cash
-    shares = 0
+    first_price = price_history[0][1]
+    initial_shares = floor(initial_cash / first_price)
+    cash = initial_cash - (initial_shares * first_price)
+    shares = initial_shares
     trades: List[Dict] = []
     sell_cooldown_days_remaining = 0
     days_since_last_sell: int | None = None
     recent_scores: List[float] = []
     portfolio_values: List[float] = []
+    overheat_event_date: str | None = None
+    overheat_event_consumed = False
+    prev_overheat_state = False
     buy_reason_counts = {"initial_threshold": 0, "pattern_a": 0, "pattern_b": 0, "both": 0, "day60": 0}
 
     hold_cash = initial_cash
@@ -138,7 +144,28 @@ def run_experimental_rule(
             recent_scores.append(total_score)
             closes = [p[1] for p in sub_history]
             ma20_series = moving_average(closes, 20)
+            ma50_series = moving_average(closes, 50)
             cooldown_active = sell_cooldown_days_remaining > 0
+            is_overheat_today = total_score >= sell_threshold
+            if is_overheat_today and not prev_overheat_state:
+                overheat_event_date = date_str
+                overheat_event_consumed = False
+            prev_overheat_state = is_overheat_today
+            score_declining_3days = (
+                len(recent_scores) >= 4
+                and recent_scores[-1] < recent_scores[-2] < recent_scores[-3] < recent_scores[-4]
+            )
+            close_below_ma20 = close < ma20_series[-1]
+            peakout_detected = score_declining_3days and close_below_ma20
+            close_below_ma20_2days = (
+                len(closes) >= 2
+                and close < ma20_series[-1]
+                and closes[-2] < ma20_series[-2]
+            )
+            close_below_ma50 = close < ma50_series[-1]
+            confirmation_detected = close_below_ma20_2days or close_below_ma50
+            overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
+            sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
 
             buy_reason = None
             if days_since_last_sell is None:
@@ -165,27 +192,36 @@ def run_experimental_rule(
                 buy_gate_open = True
                 buy_reason = "day60"
 
+            current_logic_sell = shares > 0 and sell_gate_open and not cooldown_active
             experimental_sell = (
                 shares > 0
                 and not cooldown_active
                 and total_score >= sell_threshold
+                and technical_threshold is not None
                 and float(technical_score) >= technical_threshold
             )
-            if experimental_sell:
+            should_sell = current_logic_sell if rule_name == "current_logic" else experimental_sell
+            if should_sell:
                 trades.append(
                     {
                         "action": "SELL",
                         "date": date_str,
                         "quantity": shares,
                         "price": close,
-                        "reason": f"experimental_total>={sell_threshold}_technical>={technical_threshold}",
+                        "reason": (
+                            "current_logic_sell"
+                            if rule_name == "current_logic"
+                            else f"experimental_total>={sell_threshold}_technical>={technical_threshold}"
+                        ),
                     }
                 )
                 cash += shares * close
                 shares = 0
                 sell_cooldown_days_remaining = 30
                 days_since_last_sell = 0
-            elif shares == 0 and buy_gate_open:
+                if rule_name == "current_logic":
+                    overheat_event_consumed = True
+            elif shares == 0 and days_since_last_sell is not None and buy_gate_open:
                 qty = floor(cash / close)
                 if qty > 0:
                     cash -= qty * close
@@ -217,6 +253,57 @@ def run_experimental_rule(
     }
 
 
+def run_experimental_rule(
+    ctx: SimulationContext,
+    *,
+    index_type: str,
+    technical_threshold: float,
+    start_date: date,
+    end_date: date,
+    initial_cash: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    score_ma: int,
+) -> Dict:
+    return _run_simulation_core(
+        ctx,
+        index_type=index_type,
+        rule_name="experimental",
+        sell_threshold=sell_threshold,
+        technical_threshold=technical_threshold,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=buy_threshold,
+        score_ma=score_ma,
+    )
+
+
+def run_current_logic_rule(
+    ctx: SimulationContext,
+    *,
+    index_type: str,
+    start_date: date,
+    end_date: date,
+    initial_cash: float,
+    buy_threshold: float,
+    sell_threshold: float,
+    score_ma: int,
+) -> Dict:
+    return _run_simulation_core(
+        ctx,
+        index_type=index_type,
+        rule_name="current_logic",
+        sell_threshold=sell_threshold,
+        technical_threshold=None,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=buy_threshold,
+        score_ma=score_ma,
+    )
+
+
 def run_comparison(
     *,
     ctx: SimulationContext,
@@ -227,22 +314,16 @@ def run_comparison(
     buy_threshold: float,
     score_ma: int,
 ) -> List[Dict]:
-    current = ctx.backtest_service.run_backtest(
-        start_date,
-        end_date,
-        initial_cash,
-        buy_threshold,
-        80.0,
-        index_type,
-        score_ma,
+    current = run_current_logic_rule(
+        ctx,
+        index_type=index_type,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=buy_threshold,
+        sell_threshold=80.0,
+        score_ma=score_ma,
     )
-    current_trades = []
-    for trade in current.get("trades", []):
-        t = dict(trade)
-        if t["action"] == "SELL" and "reason" not in t:
-            t["reason"] = "current_logic_sell"
-        current_trades.append(t)
-    current["trades"] = current_trades
 
     exp75 = run_experimental_rule(
         ctx,
