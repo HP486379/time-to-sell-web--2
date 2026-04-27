@@ -168,6 +168,62 @@ class BacktestResponse(BaseModel):
     trade_count: Optional[int] = None
 
 
+class BacktestDiagnosticsSummaryRequest(BaseModel):
+    start_date: date
+    end_date: date
+    initial_cash: float
+    buy_threshold: float = 40.0
+    sell_threshold: float = 80.0
+    score_ma: int = Field(200)
+    index_types: Optional[List[IndexType]] = None
+
+    @field_validator("initial_cash", "buy_threshold", "sell_threshold", mode="before")
+    @classmethod
+    def validate_finite_numbers(cls, value, info: ValidationInfo):
+        field_name = str(info.field_name or "value")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be numeric") from exc
+        if not math.isfinite(parsed):
+            raise ValueError(f"{field_name} must be finite")
+        return parsed
+
+    @field_validator("index_types", mode="before")
+    @classmethod
+    def normalize_index_types(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            raise ValueError("index_types must be a list")
+        return [_normalize_index_type_value(item) for item in value]
+
+
+class BacktestDiagnosticsSummaryItem(BaseModel):
+    index_type: str
+    final_equity: float
+    hold_equity: float
+    diff_amount: float
+    diff_pct: float
+    trade_count: int
+    buy_count: int
+    sell_count: int
+    sell_dates: List[str]
+    buy_dates: List[str]
+    sell_reasons: List[str]
+    buy_reasons: List[str]
+    return_until_buyback_pct: List[float]
+    post_return_20d_pct: List[float]
+    max_score: Optional[float] = None
+    sell_threshold_hit_days: int
+    sell_signal_count: int
+
+
+class BacktestDiagnosticsSummaryResponse(BaseModel):
+    results: List[BacktestDiagnosticsSummaryItem]
+    errors: List[dict]
+
+
 # ======================
 # Services
 # ======================
@@ -834,6 +890,103 @@ def run_backtest(payload: BacktestRequest):
             status_code=502,
             detail="Backtest failed: external data unavailable.",
         )
+
+
+@app.post("/api/backtest/diagnostics-summary", response_model=BacktestDiagnosticsSummaryResponse)
+def run_backtest_diagnostics_summary(payload: BacktestDiagnosticsSummaryRequest):
+    default_indexes = [
+        IndexType.SP500.value,
+        IndexType.SP500_JPY.value,
+        IndexType.TOPIX.value,
+        IndexType.NIKKEI225.value,
+        IndexType.NIFTY50.value,
+        IndexType.ALLCOUNTRY.value,
+        IndexType.ALLCOUNTRY_JPY.value,
+    ]
+    target_indexes = [item.value for item in payload.index_types] if payload.index_types else default_indexes
+    items: List[BacktestDiagnosticsSummaryItem] = []
+    errors: List[dict] = []
+
+    for index_type in target_indexes:
+        try:
+            result = backtest_service.run_backtest(
+                payload.start_date,
+                payload.end_date,
+                payload.initial_cash,
+                payload.buy_threshold,
+                payload.sell_threshold,
+                index_type,
+                payload.score_ma,
+            )
+            diagnostics = result.get("diagnostics", {}) if isinstance(result, dict) else {}
+            trade_summary = diagnostics.get("trade_summary", {}) if isinstance(diagnostics, dict) else {}
+            sell_events = diagnostics.get("sell_events", []) if isinstance(diagnostics, dict) else []
+            buy_events = diagnostics.get("buy_events", []) if isinstance(diagnostics, dict) else []
+
+            sell_dates = [str(event.get("date")) for event in sell_events if isinstance(event, dict) and event.get("date")]
+            buy_dates = [str(event.get("date")) for event in buy_events if isinstance(event, dict) and event.get("date")]
+
+            sell_reasons = sorted(
+                {
+                    str(reason)
+                    for event in sell_events
+                    if isinstance(event, dict)
+                    for reason in (event.get("sell_reason") or [])
+                }
+            )
+            buy_reasons = sorted(
+                {
+                    str(reason)
+                    for event in buy_events
+                    if isinstance(event, dict)
+                    for reason in (event.get("buy_reason") or [])
+                }
+            )
+            return_until_buyback_pct = [
+                float(event.get("return_until_buyback_pct"))
+                for event in sell_events
+                if isinstance(event, dict) and event.get("return_until_buyback_pct") is not None
+            ]
+            post_return_20d_pct = [
+                float(event.get("post_return_20d_pct"))
+                for event in sell_events
+                if isinstance(event, dict) and event.get("post_return_20d_pct") is not None
+            ]
+
+            final_equity = float(result["final_value"])
+            hold_equity = float(result["buy_and_hold_final"])
+            diff_amount = final_equity - hold_equity
+            diff_pct = ((diff_amount / hold_equity) * 100) if hold_equity != 0 else 0.0
+
+            items.append(
+                BacktestDiagnosticsSummaryItem(
+                    index_type=index_type,
+                    final_equity=round(final_equity, 2),
+                    hold_equity=round(hold_equity, 2),
+                    diff_amount=round(diff_amount, 2),
+                    diff_pct=round(diff_pct, 2),
+                    trade_count=int(result.get("trade_count", 0)),
+                    buy_count=int(trade_summary.get("buy_count", 0)),
+                    sell_count=int(trade_summary.get("sell_count", 0)),
+                    sell_dates=sell_dates,
+                    buy_dates=buy_dates,
+                    sell_reasons=sell_reasons,
+                    buy_reasons=buy_reasons,
+                    return_until_buyback_pct=return_until_buyback_pct,
+                    post_return_20d_pct=post_return_20d_pct,
+                    max_score=diagnostics.get("score_max"),
+                    sell_threshold_hit_days=int(diagnostics.get("sell_threshold_hit_days", 0)),
+                    sell_signal_count=int(diagnostics.get("sell_signal_count", 0)),
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "[backtest-diagnostics-summary] failed index_type=%s reason=%s",
+                index_type,
+                str(exc),
+            )
+            errors.append({"index_type": index_type, "error": str(exc)})
+    return BacktestDiagnosticsSummaryResponse(results=items, errors=errors)
 
 
 # ======================
