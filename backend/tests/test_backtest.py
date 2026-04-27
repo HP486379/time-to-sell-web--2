@@ -44,10 +44,16 @@ def test_backtest_generates_buy_and_sell_cycle():
 
     result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
 
-    assert result["trade_count"] == 1
-    assert result["trades"][0]["action"] == "BUY"
+    assert result["trade_count"] == len(result["trades"])
     # sell gateにより、score条件のみではSELLしない
     assert result["diagnostics"]["sell_gate_block_count"] > 0
+    assert "trade_summary" in result["diagnostics"]
+    assert "initial_entry" in result["diagnostics"]
+    assert "initial_position" in result["diagnostics"]
+    assert "exposure" in result["diagnostics"]
+    assert result["diagnostics"]["trade_summary"]["trade_count"] == len(result["trades"])
+    assert result["diagnostics"]["initial_position"]["starts_invested"] is True
+    assert result["diagnostics"]["initial_position"]["initial_position_is_trade"] is False
     assert "buy_reason_counts" in result["diagnostics"]
     assert "pattern_a" in result["diagnostics"]["buy_reason_counts"]
     assert "pattern_b" in result["diagnostics"]["buy_reason_counts"]
@@ -55,9 +61,7 @@ def test_backtest_generates_buy_and_sell_cycle():
     assert "day60" in result["diagnostics"]["buy_reason_counts"]
     assert "early_buy_ratio_pct" in result["diagnostics"]
     assert "avg_cash_wait_days" in result["diagnostics"]
-    # 新BUYゲートでは回復確認後に遅れてエントリーするため、
-    # 最終日に近い買い付けとなるケースでは初期資金と同水準に留まる
-    assert result["final_value"] >= 1000.0
+    assert result["final_value"] >= 2000.0
     assert result["buy_and_hold_final"] >= 2000.0
 
 
@@ -88,6 +92,9 @@ def test_backtest_sanitizes_invalid_price_rows():
     assert math.isfinite(result["total_return_pct"])
     assert math.isfinite(result["max_drawdown_pct"])
     assert all(math.isfinite(v) for _, v in result["price_history"])
+    assert "score_samples" in result["diagnostics"]
+    assert "sell_events" in result["diagnostics"]
+    assert "buy_events" in result["diagnostics"]
 
 
 class BacktestServiceWithNaNScore(BacktestService):
@@ -102,3 +109,124 @@ def test_backtest_raises_when_score_becomes_nan():
 
     with pytest.raises(ValueError, match="invalid_score:non_finite"):
         service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+
+
+class FakeMarketServiceFlat:
+    def get_price_history_range(
+        self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
+    ):
+        return [((start + timedelta(days=i)).isoformat(), 100.0) for i in range(260)]
+
+
+class FakeMacroServiceFlat:
+    def get_macro_series_range(self, start: date, end: date):
+        return {
+            "r_10y": [(start + timedelta(days=i), 0.0) for i in range((end - start).days + 1)],
+            "cpi": [(start + timedelta(days=i), 0.0) for i in range((end - start).days + 1)],
+            "vix": [(start + timedelta(days=i), 0.0) for i in range((end - start).days + 1)],
+        }
+
+
+def test_backtest_starts_invested_and_initial_position_not_counted_as_trade():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    service = BacktestService(FakeMarketServiceFlat(), FakeMacroServiceFlat(), FakeEventService())
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+
+    assert result["diagnostics"]["initial_position"]["starts_invested"] is True
+    assert result["diagnostics"]["initial_position"]["initial_position_is_trade"] is False
+    assert result["diagnostics"]["initial_position"]["initial_shares"] == 10
+    assert result["trade_count"] == len(result["trades"]) == 0
+    assert result["final_value"] == result["buy_and_hold_final"]
+
+
+class FakeMarketServiceForSellDiagnostics:
+    def get_price_history_range(
+        self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
+    ):
+        history = []
+        for i in range(260):
+            dt = start + timedelta(days=i)
+            if i < 230:
+                price = 100.0
+            else:
+                price = 100.0 - (i - 229) * 0.8
+            history.append((dt.isoformat(), price))
+        return history
+
+
+class BacktestServiceForSellDiagnostics(BacktestService):
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        idx = len(price_history) - 1
+        if idx < 230:
+            return 85.0
+        return 85.0 - ((idx - 229) * 1.5)
+
+
+def test_sell_diagnostics_reason_reflects_sell_gate_conditions():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    service = BacktestServiceForSellDiagnostics(
+        FakeMarketServiceForSellDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
+    )
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+    sell_events = result["diagnostics"]["sell_events"]
+
+    assert len(sell_events) >= 1
+    first_sell = sell_events[0]
+    assert "sell_gate_open" in first_sell["sell_reason"]
+    assert "cooldown_clear" in first_sell["sell_reason"]
+    assert first_sell["sell_reason_flags"]["sell_gate_open"] is True
+    assert first_sell["sell_reason_flags"]["cooldown_clear"] is True
+
+
+class FakeMarketServiceForBuyDiagnostics:
+    def get_price_history_range(
+        self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"
+    ):
+        history = []
+        for i in range(340):
+            dt = start + timedelta(days=i)
+            if i < 230:
+                price = 100.0
+            elif i < 260:
+                price = 100.0 - (i - 229) * 0.8
+            else:
+                price = 80.0
+            history.append((dt.isoformat(), price))
+        return history
+
+
+class BacktestServiceForBuyDiagnostics(BacktestService):
+    def _calculate_scores(self, price_history, macro_series, current_date, score_ma):
+        idx = len(price_history) - 1
+        if idx < 230:
+            return 85.0
+        if idx < 240:
+            return 85.0 - ((idx - 229) * 1.5)
+        return 72.8
+
+
+def test_buy_diagnostics_reason_flags_reflect_actual_gate_conditions():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=339)
+    service = BacktestServiceForBuyDiagnostics(
+        FakeMarketServiceForBuyDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
+    )
+
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="NIKKEI225")
+    buy_events = result["diagnostics"]["buy_events"]
+
+    assert len(buy_events) >= 1
+    first_buy = buy_events[0]
+    assert "buy_reason_flags" in first_buy
+    assert first_buy["buy_reason_flags"]["buy_gate_open"] is True
+    assert first_buy["buy_reason_flags"]["cooldown_clear"] is True
+    assert (
+        first_buy["buy_reason_flags"]["day60"]
+        or first_buy["buy_reason_flags"]["pattern_a"]
+        or first_buy["buy_reason_flags"]["pattern_b"]
+    )
+    assert first_buy["buy_reason_flags"]["signal_reason"] in {"day60", "pattern_a", "pattern_b", "both"}
