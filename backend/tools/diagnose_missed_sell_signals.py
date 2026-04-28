@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Missed-SELL diagnostics tool (offline only, fixed thresholds: SELL=80 / BUY=40)."""
+
 import argparse
 import csv
 import json
@@ -94,13 +96,31 @@ def _score_snapshot(
     vix_hist, vix_cur = svc._history_and_current(macro_series["vix"], current_date)
     macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
     events = svc.event_service.get_events_for_date(current_date)
-    event_adjustment, _ = calculate_event_adjustment(current_date, events)
+    event_adjustment, event_debug = calculate_event_adjustment(current_date, events)
+    nearby_events = []
+    for ev in event_debug.get("events", [])[:5]:
+        nearby_events.append(
+            {
+                "date": ev.get("date").isoformat() if hasattr(ev.get("date"), "isoformat") else str(ev.get("date")),
+                "event": ev.get("event"),
+                "importance": ev.get("importance"),
+            }
+        )
+    effective_event = event_debug.get("effective_event")
+    event_adjustment_reason = "no_nearby_events"
+    if event_adjustment != 0:
+        event_adjustment_reason = "risk_weighted_penalty_applied"
+    elif effective_event is not None:
+        event_adjustment_reason = "nearby_events_but_zero_risk"
     total_score = float(svc._calculate_scores(sub_history, macro_series, current_date, score_ma))
     return {
         "total_score": total_score,
         "technical_score": float(technical_score),
         "macro_score": float(macro_score),
         "event_adjustment": float(event_adjustment),
+        "event_adjustment_reason": event_adjustment_reason,
+        "event_source_count": len(event_debug.get("events", [])),
+        "nearby_events": nearby_events,
     }
 
 
@@ -168,6 +188,20 @@ def diagnose_index(
         overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
         sell_gate_core = overheat_event_active and peakout_detected and confirmation_detected
         sell_gate_open = shares > 0 and not cooldown_active and sell_gate_core
+        overheat_event_raw_conditions = {
+            "is_overheat_today": is_overheat_today,
+            "prev_overheat_state": prev_overheat_state,
+            "overheat_event_date": overheat_event_date,
+            "overheat_event_consumed": overheat_event_consumed,
+            "overheat_event_active": overheat_event_active,
+        }
+        sell_gate_required_conditions = {
+            "has_shares": shares > 0,
+            "cooldown_clear": not cooldown_active,
+            "overheat_event_active": overheat_event_active,
+            "peakout_detected": peakout_detected,
+            "confirmation_detected": confirmation_detected,
+        }
 
         blockers: List[str] = []
         if not sell_gate_open:
@@ -181,6 +215,7 @@ def diagnose_index(
                 blockers.append("peakout_not_detected")
             if not confirmation_detected:
                 blockers.append("confirmation_not_detected")
+        sell_gate_failed_conditions = [k for k, v in sell_gate_required_conditions.items() if not v]
 
         f20 = _forward_return(price_history, idx, 20)
         f60 = _forward_return(price_history, idx, 60)
@@ -189,6 +224,21 @@ def diagnose_index(
 
         is_large_drop = (f20 is not None and f20 <= -5.0) or (f60 is not None and (f60 <= -8.0 or f60 <= -10.0))
         if is_large_drop:
+            technical_high_total_shortage = snapshot["technical_score"] >= 70.0 and total_score < SELL_THRESHOLD
+            technical_very_high_total_shortage = snapshot["technical_score"] >= 75.0 and total_score < SELL_THRESHOLD
+            macro_drag_suspected = snapshot["macro_score"] < 45.0 and total_score < SELL_THRESHOLD
+            event_adjustment_is_zero = abs(snapshot["event_adjustment"]) < 1e-9
+            case_tags: List[str] = []
+            if snapshot["technical_score"] >= 70.0 and (event_adjustment_is_zero or snapshot["macro_score"] < 50.0 or not sell_gate_open):
+                case_tags.append("technical_high_but_macro_event_or_gate_blocked")
+            if snapshot["macro_score"] >= 60.0 and snapshot["technical_score"] < 60.0 and total_score < SELL_THRESHOLD:
+                case_tags.append("macro_high_but_technical_low")
+            if event_adjustment_is_zero:
+                case_tags.append("event_adjustment_zero")
+            if "overheat_event_inactive" in blockers:
+                case_tags.append("blocked_by_overheat_event_inactive")
+            if "peakout_not_detected" in blockers:
+                case_tags.append("blocked_by_peakout_not_detected")
             details.append(
                 {
                     "index_type": index_type,
@@ -198,9 +248,23 @@ def diagnose_index(
                     "technical_score": round(snapshot["technical_score"], 2),
                     "macro_score": round(snapshot["macro_score"], 2),
                     "event_adjustment": round(snapshot["event_adjustment"], 2),
+                    "event_adjustment_reason": snapshot["event_adjustment_reason"],
+                    "event_source_count": snapshot["event_source_count"],
+                    "nearby_events": snapshot["nearby_events"],
                     "score_shortage_to_80": round(max(0.0, SELL_THRESHOLD - total_score), 2),
                     "sell_gate_open": sell_gate_open,
                     "blockers": blockers,
+                    "overheat_event_raw_conditions": overheat_event_raw_conditions,
+                    "sell_gate_required_conditions": sell_gate_required_conditions,
+                    "sell_gate_failed_conditions": sell_gate_failed_conditions,
+                    "overheat_event_active": overheat_event_active,
+                    "peakout_detected": peakout_detected,
+                    "confirmation_detected": confirmation_detected,
+                    "technical_high_total_shortage": technical_high_total_shortage,
+                    "technical_very_high_total_shortage": technical_very_high_total_shortage,
+                    "macro_drag_suspected": macro_drag_suspected,
+                    "event_adjustment_is_zero": event_adjustment_is_zero,
+                    "case_tags": case_tags,
                     "forward_20d_pct": f20,
                     "forward_60d_pct": f60,
                     "max_drawdown_next_20d": d20,
@@ -239,13 +303,32 @@ def diagnose_index(
     summary = {
         "index_type": index_type,
         "large_drop_candidate_count": len(details),
+        "event_adjustment_nonzero_count": sum(1 for d in details if not d["event_adjustment_is_zero"]),
+        "overheat_event_inactive_count": sum(1 for d in details if "overheat_event_inactive" in d["blockers"]),
+        "peakout_not_detected_count": sum(1 for d in details if "peakout_not_detected" in d["blockers"]),
+        "confirmation_not_detected_count": sum(1 for d in details if "confirmation_not_detected" in d["blockers"]),
         "avg_total_score_before_large_drop": round(mean([d["total_score"] for d in details]), 2) if details else 0.0,
         "max_total_score_before_large_drop": round(max([d["total_score"] for d in details]), 2) if details else 0.0,
         "p95_total_score_before_large_drop": round(_percentile([d["total_score"] for d in details], 95), 2) if details else 0.0,
-        "avg_technical_score_before_large_drop": round(mean([d["technical_score"] for d in details]), 2) if details else 0.0,
-        "avg_macro_score_before_large_drop": round(mean([d["macro_score"] for d in details]), 2) if details else 0.0,
-        "avg_event_adjustment_before_large_drop": round(mean([d["event_adjustment"] for d in details]), 2) if details else 0.0,
+        "avg_score_shortage_to_80": round(mean([d["score_shortage_to_80"] for d in details]), 2) if details else 0.0,
+        "avg_technical_score": round(mean([d["technical_score"] for d in details]), 2) if details else 0.0,
+        "avg_macro_score": round(mean([d["macro_score"] for d in details]), 2) if details else 0.0,
+        "avg_event_adjustment": round(mean([d["event_adjustment"] for d in details]), 2) if details else 0.0,
         "sell_gate_open_count": sum(1 for d in details if d["sell_gate_open"]),
+        "technical_ge70_total_lt80_count": sum(1 for d in details if d["technical_high_total_shortage"]),
+        "technical_ge75_total_lt80_count": sum(1 for d in details if d["technical_very_high_total_shortage"]),
+        "macro_drag_suspected_count": sum(1 for d in details if d["macro_drag_suspected"]),
+        "technical_high_but_macro_event_or_gate_blocked_count": sum(
+            1 for d in details if "technical_high_but_macro_event_or_gate_blocked" in d["case_tags"]
+        ),
+        "macro_high_but_technical_low_count": sum(1 for d in details if "macro_high_but_technical_low" in d["case_tags"]),
+        "event_adjustment_zero_large_drop_count": sum(1 for d in details if "event_adjustment_zero" in d["case_tags"]),
+        "overheat_event_inactive_blocked_count": sum(
+            1 for d in details if "blocked_by_overheat_event_inactive" in d["case_tags"]
+        ),
+        "peakout_not_detected_blocked_count": sum(
+            1 for d in details if "blocked_by_peakout_not_detected" in d["case_tags"]
+        ),
         "most_common_blockers": [{"blocker": k, "count": v} for k, v in blocker_counter.most_common(5)],
     }
     return {"summary": summary, "details": details}
@@ -303,7 +386,15 @@ def _output(payload: Dict, output_format: str, output_path: str | None):
         writer.writeheader()
         for r in rows:
             obj = dict(r)
-            for k in ("blockers", "most_common_blockers"):
+            for k in (
+                "blockers",
+                "most_common_blockers",
+                "case_tags",
+                "nearby_events",
+                "overheat_event_raw_conditions",
+                "sell_gate_required_conditions",
+                "sell_gate_failed_conditions",
+            ):
                 if k in obj:
                     obj[k] = json.dumps(obj[k], ensure_ascii=False)
             writer.writerow(obj)

@@ -52,6 +52,7 @@ class _Ctx:
 
 def test_parse_index_types():
     assert parse_index_types(None)[0] == "SP500"
+    assert "ALLCOUNTRY_JPY" in parse_index_types(None)
     assert parse_index_types("SP500,TOPIX") == ["SP500", "TOPIX"]
 
 
@@ -73,10 +74,25 @@ def test_diagnose_index_returns_detail_and_summary(monkeypatch):
     assert "details" in result
     assert result["summary"]["index_type"] == "SP500"
     assert result["summary"]["large_drop_candidate_count"] >= 1
+    assert "technical_ge70_total_lt80_count" in result["summary"]
+    assert "macro_drag_suspected_count" in result["summary"]
     first = result["details"][0]
     assert "score_shortage_to_80" in first
     assert "sell_gate_open" in first
     assert "blockers" in first
+    assert "technical_high_total_shortage" in first
+    assert "macro_drag_suspected" in first
+    assert "event_adjustment_is_zero" in first
+    assert "event_adjustment_reason" in first
+    assert "event_source_count" in first
+    assert "nearby_events" in first
+    assert "overheat_event_raw_conditions" in first
+    assert "sell_gate_required_conditions" in first
+    assert "sell_gate_failed_conditions" in first
+    assert "overheat_event_active" in first
+    assert "peakout_detected" in first
+    assert "confirmation_detected" in first
+    assert "case_tags" in first
     assert "max_drawdown_next_60d" in first
 
 
