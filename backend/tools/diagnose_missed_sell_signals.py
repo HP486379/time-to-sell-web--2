@@ -96,13 +96,31 @@ def _score_snapshot(
     vix_hist, vix_cur = svc._history_and_current(macro_series["vix"], current_date)
     macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
     events = svc.event_service.get_events_for_date(current_date)
-    event_adjustment, _ = calculate_event_adjustment(current_date, events)
+    event_adjustment, event_debug = calculate_event_adjustment(current_date, events)
+    nearby_events = []
+    for ev in event_debug.get("events", [])[:5]:
+        nearby_events.append(
+            {
+                "date": ev.get("date").isoformat() if hasattr(ev.get("date"), "isoformat") else str(ev.get("date")),
+                "event": ev.get("event"),
+                "importance": ev.get("importance"),
+            }
+        )
+    effective_event = event_debug.get("effective_event")
+    event_adjustment_reason = "no_nearby_events"
+    if event_adjustment != 0:
+        event_adjustment_reason = "risk_weighted_penalty_applied"
+    elif effective_event is not None:
+        event_adjustment_reason = "nearby_events_but_zero_risk"
     total_score = float(svc._calculate_scores(sub_history, macro_series, current_date, score_ma))
     return {
         "total_score": total_score,
         "technical_score": float(technical_score),
         "macro_score": float(macro_score),
         "event_adjustment": float(event_adjustment),
+        "event_adjustment_reason": event_adjustment_reason,
+        "event_source_count": len(event_debug.get("events", [])),
+        "nearby_events": nearby_events,
     }
 
 
@@ -170,6 +188,20 @@ def diagnose_index(
         overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
         sell_gate_core = overheat_event_active and peakout_detected and confirmation_detected
         sell_gate_open = shares > 0 and not cooldown_active and sell_gate_core
+        overheat_event_raw_conditions = {
+            "is_overheat_today": is_overheat_today,
+            "prev_overheat_state": prev_overheat_state,
+            "overheat_event_date": overheat_event_date,
+            "overheat_event_consumed": overheat_event_consumed,
+            "overheat_event_active": overheat_event_active,
+        }
+        sell_gate_required_conditions = {
+            "has_shares": shares > 0,
+            "cooldown_clear": not cooldown_active,
+            "overheat_event_active": overheat_event_active,
+            "peakout_detected": peakout_detected,
+            "confirmation_detected": confirmation_detected,
+        }
 
         blockers: List[str] = []
         if not sell_gate_open:
@@ -183,6 +215,7 @@ def diagnose_index(
                 blockers.append("peakout_not_detected")
             if not confirmation_detected:
                 blockers.append("confirmation_not_detected")
+        sell_gate_failed_conditions = [k for k, v in sell_gate_required_conditions.items() if not v]
 
         f20 = _forward_return(price_history, idx, 20)
         f60 = _forward_return(price_history, idx, 60)
@@ -215,6 +248,9 @@ def diagnose_index(
                     "technical_score": round(snapshot["technical_score"], 2),
                     "macro_score": round(snapshot["macro_score"], 2),
                     "event_adjustment": round(snapshot["event_adjustment"], 2),
+                    "event_adjustment_reason": snapshot["event_adjustment_reason"],
+                    "event_source_count": snapshot["event_source_count"],
+                    "nearby_events": snapshot["nearby_events"],
                     "score_shortage_to_80": round(max(0.0, SELL_THRESHOLD - total_score), 2),
                     "sell_gate_open": sell_gate_open,
                     "blockers": blockers,
