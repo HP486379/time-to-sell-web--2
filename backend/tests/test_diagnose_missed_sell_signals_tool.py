@@ -76,6 +76,7 @@ def test_diagnose_index_returns_detail_and_summary(monkeypatch):
     assert result["summary"]["large_drop_candidate_count"] >= 1
     assert "technical_ge70_total_lt80_count" in result["summary"]
     assert "macro_drag_suspected_count" in result["summary"]
+    assert "event_date_mismatch_count" in result["summary"]
     first = result["details"][0]
     assert "score_shortage_to_80" in first
     assert "sell_gate_open" in first
@@ -86,6 +87,7 @@ def test_diagnose_index_returns_detail_and_summary(monkeypatch):
     assert "event_adjustment_reason" in first
     assert "event_source_count" in first
     assert "nearby_events" in first
+    assert "event_date_mismatch" in first
     assert "overheat_event_raw_conditions" in first
     assert "sell_gate_required_conditions" in first
     assert "sell_gate_failed_conditions" in first
@@ -111,3 +113,42 @@ def test_run_diagnosis_multi_index(monkeypatch):
     )
     assert len(payload["summaries"]) == 2
     assert all("index_type" in x for x in payload["summaries"])
+
+
+def test_nearby_events_are_candidate_date_based_and_reasons_vary(monkeypatch):
+    class _EventService:
+        def get_events_for_date(self, d):
+            events = [
+                {"date": "2026-04-29", "event": "FAR_A", "importance": 5},
+                {"date": "2026-04-30", "event": "FAR_B", "importance": 4},
+            ]
+            if d.day % 2 == 0:
+                events.append({"date": d.isoformat(), "event": "NEAR_TODAY", "importance": 5})
+            return events
+
+    class _BacktestWithEvents(_BacktestService):
+        event_service = _EventService()
+
+    class _CtxWithEvents:
+        backtest_service = _BacktestWithEvents()
+
+    monkeypatch.setattr(
+        "tools.diagnose_missed_sell_signals.calculate_technical_score",
+        lambda history, base_window=200: (50.0, {}),
+    )
+    result = diagnose_index(
+        _CtxWithEvents(),
+        index_type="SP500",
+        start_date=date(2015, 1, 1),
+        end_date=date(2015, 12, 31),
+        initial_cash=1_000_000.0,
+        score_ma=200,
+    )
+    assert result["summary"]["large_drop_candidate_count"] >= 1
+    details = result["details"]
+    assert any(d["event_adjustment_reason"] == "risk_weighted_penalty_applied" for d in details)
+    assert any(d["event_adjustment_reason"] == "no_nearby_events" for d in details)
+    assert len({d["event_source_count"] for d in details}) >= 2
+    for d in details:
+        for ev in d["nearby_events"]:
+            assert not ev["event_date"].startswith("2026-04")

@@ -39,6 +39,22 @@ DEFAULT_INDEX_TYPES = [
 ]
 
 
+def _event_penalty_components(event_date: date, candidate_date: date, importance: int) -> tuple[float, float]:
+    days_diff = (event_date - candidate_date).days
+    if abs(days_diff) > 7:
+        return 0.0, float(days_diff)
+    if importance == 5:
+        w_imp = 1.0
+    elif importance == 4:
+        w_imp = 0.7
+    elif importance == 3:
+        w_imp = 0.4
+    else:
+        w_imp = 0.2
+    f_prox = 1 - abs(days_diff) / 7.0
+    return w_imp * f_prox, float(days_diff)
+
+
 @dataclass
 class DiagnoseContext:
     backtest_service: BacktestService
@@ -97,20 +113,36 @@ def _score_snapshot(
     macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
     events = svc.event_service.get_events_for_date(current_date)
     event_adjustment, event_debug = calculate_event_adjustment(current_date, events)
+    raw_events = event_debug.get("events", [])
     nearby_events = []
-    for ev in event_debug.get("events", [])[:5]:
-        nearby_events.append(
-            {
-                "date": ev.get("date").isoformat() if hasattr(ev.get("date"), "isoformat") else str(ev.get("date")),
-                "event": ev.get("event"),
-                "importance": ev.get("importance"),
-            }
-        )
+    far_event_count = 0
+    for ev in raw_events:
+        ev_date = ev.get("date")
+        if not isinstance(ev_date, date):
+            continue
+        risk, days_diff = _event_penalty_components(ev_date, current_date, int(ev.get("importance", 1)))
+        if abs(days_diff) <= 7:
+            nearby_events.append(
+                {
+                    "event_date": ev_date.isoformat(),
+                    "days_from_candidate_date": int(days_diff),
+                    "name": ev.get("event") or ev.get("name"),
+                    "importance": ev.get("importance"),
+                    "adjustment_effect": round(-7.0 * (risk ** 0.85), 4) if risk > 0 else 0.0,
+                }
+            )
+        else:
+            far_event_count += 1
+    nearby_events = nearby_events[:5]
     effective_event = event_debug.get("effective_event")
     event_adjustment_reason = "no_nearby_events"
-    if event_adjustment != 0:
+    if len(nearby_events) == 0:
+        event_adjustment_reason = "no_nearby_events"
+    elif event_adjustment != 0:
         event_adjustment_reason = "risk_weighted_penalty_applied"
     elif effective_event is not None:
+        event_adjustment_reason = "nearby_events_but_zero_risk"
+    else:
         event_adjustment_reason = "nearby_events_but_zero_risk"
     total_score = float(svc._calculate_scores(sub_history, macro_series, current_date, score_ma))
     return {
@@ -119,8 +151,9 @@ def _score_snapshot(
         "macro_score": float(macro_score),
         "event_adjustment": float(event_adjustment),
         "event_adjustment_reason": event_adjustment_reason,
-        "event_source_count": len(event_debug.get("events", [])),
+        "event_source_count": len(nearby_events),
         "nearby_events": nearby_events,
+        "far_event_count": far_event_count,
     }
 
 
@@ -251,6 +284,8 @@ def diagnose_index(
                     "event_adjustment_reason": snapshot["event_adjustment_reason"],
                     "event_source_count": snapshot["event_source_count"],
                     "nearby_events": snapshot["nearby_events"],
+                    "far_event_count": snapshot["far_event_count"],
+                    "event_date_mismatch": snapshot["far_event_count"] > 0,
                     "score_shortage_to_80": round(max(0.0, SELL_THRESHOLD - total_score), 2),
                     "sell_gate_open": sell_gate_open,
                     "blockers": blockers,
@@ -304,6 +339,7 @@ def diagnose_index(
         "index_type": index_type,
         "large_drop_candidate_count": len(details),
         "event_adjustment_nonzero_count": sum(1 for d in details if not d["event_adjustment_is_zero"]),
+        "event_date_mismatch_count": sum(1 for d in details if d.get("event_date_mismatch")),
         "overheat_event_inactive_count": sum(1 for d in details if "overheat_event_inactive" in d["blockers"]),
         "peakout_not_detected_count": sum(1 for d in details if "peakout_not_detected" in d["blockers"]),
         "confirmation_not_detected_count": sum(1 for d in details if "confirmation_not_detected" in d["blockers"]),
