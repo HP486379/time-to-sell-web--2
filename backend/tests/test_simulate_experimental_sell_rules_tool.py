@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    parse_index_types,
     run_comparison,
 )
 
@@ -56,6 +57,19 @@ class FakeContext:
     backtest_service = FakeBacktestService()
 
 
+def test_parse_index_types_defaults_and_custom():
+    assert parse_index_types(None) == [
+        "SP500",
+        "SP500_JPY",
+        "TOPIX",
+        "NIKKEI225",
+        "NIFTY50",
+        "ALLCOUNTRY",
+        "ALLCOUNTRY_JPY",
+    ]
+    assert parse_index_types("SP500, TOPIX") == ["SP500", "TOPIX"]
+
+
 def test_summarize_rule_result_contains_required_fields():
     result = FakeBacktestService().run_backtest(
         date(2020, 1, 1), date(2020, 12, 31), 1_000_000.0, 40.0, 80.0, "SP500_JPY", 200
@@ -95,6 +109,8 @@ def test_run_comparison_returns_current_logic_only(monkeypatch):
     assert [row["rule_name"] for row in rows] == [
         "current_logic",
     ]
+    assert "score_max" in rows[0]
+    assert "score_ge_80_count" in rows[0]
 
 class _MarketService:
     def get_price_history_range(self, start, end, allow_fallback, index_type):
@@ -197,6 +213,10 @@ def test_no_sell_case_keeps_final_equal_to_hold(monkeypatch):
     )
     assert result["trades"] == []
     assert result["final_value"] == result["buy_and_hold_final"]
+    assert result["score_max"] <= 80.0
+    assert "score_ge_80_count" in result
+    assert "score_ge_80_sell_gate_details" in result
+    assert "sell_loss_reasons" in result
 
 
 def test_no_buy_is_recorded_before_first_sell_even_if_initial_cash_cannot_buy_one_share(monkeypatch):

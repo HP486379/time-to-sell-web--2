@@ -45,6 +45,17 @@ class WeightAdjustConfig:
     scale: float = 1.0
 
 
+DEFAULT_INDEX_TYPES = [
+    "SP500",
+    "SP500_JPY",
+    "TOPIX",
+    "NIKKEI225",
+    "NIFTY50",
+    "ALLCOUNTRY",
+    "ALLCOUNTRY_JPY",
+]
+
+
 def _compute_max_drawdown(values: List[float]) -> float:
     peak = values[0]
     max_dd = 0.0
@@ -72,6 +83,13 @@ def _compute_trade_followup_metrics(trades: List[Dict], price_history: List[tupl
         if next_buy is not None:
             buyback_return_pct.append(round(((next_buy["price"] / trade["price"]) - 1) * 100, 4))
     return sell_post_return_20d_pct, buyback_return_pct
+
+
+def parse_index_types(raw: str | None) -> List[str]:
+    if not raw:
+        return list(DEFAULT_INDEX_TYPES)
+    parts = [p.strip() for p in raw.split(",")]
+    return [p for p in parts if p]
 
 
 def _summarize_rule_result(rule_name: str, index_type: str, result: Dict) -> Dict:
@@ -113,6 +131,16 @@ def _summarize_rule_result(rule_name: str, index_type: str, result: Dict) -> Dic
         "score_p95_after": result.get("score_p95_after"),
         "score_distribution_before": result.get("score_distribution_before"),
         "score_distribution_after": result.get("score_distribution_after"),
+        "score_max": result.get("score_max"),
+        "score_p95": result.get("score_p95"),
+        "score_p99": result.get("score_p99"),
+        "score_ge_80_count": result.get("score_ge_80_count"),
+        "score_ge_80_dates": result.get("score_ge_80_dates", []),
+        "score_ge_80_sell_gate_details": result.get("score_ge_80_sell_gate_details", []),
+        "score_ge_80_forward_20d_pct": result.get("score_ge_80_forward_20d_pct", []),
+        "score_ge_80_forward_60d_pct": result.get("score_ge_80_forward_60d_pct", []),
+        "actual_sell_dates": result.get("actual_sell_dates", []),
+        "sell_loss_reasons": result.get("sell_loss_reasons", []),
     }
 
 
@@ -250,6 +278,7 @@ def _run_simulation_core(
     buy_reason_counts = {"initial_threshold": 0, "pattern_a": 0, "pattern_b": 0, "both": 0, "day60": 0}
     score_before_values: List[float] = []
     score_after_values: List[float] = []
+    score_ge_80_events: List[Dict] = []
 
     hold_cash = initial_cash
     first_price = price_history[0][1]
@@ -310,6 +339,34 @@ def _run_simulation_core(
             confirmation_detected = close_below_ma20_2days or close_below_ma50
             overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
             sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
+
+            if total_score >= 80.0:
+                blockers: List[str] = []
+                if shares <= 0:
+                    blockers.append("no_shares")
+                if cooldown_active:
+                    blockers.append("cooldown_active")
+                if not overheat_event_active:
+                    blockers.append("overheat_event_inactive")
+                if not peakout_detected:
+                    blockers.append("peakout_not_detected")
+                if not confirmation_detected:
+                    blockers.append("confirmation_not_detected")
+                fwd20 = None
+                fwd60 = None
+                if idx + 20 < len(price_history):
+                    fwd20 = round(((price_history[idx + 20][1] / close) - 1) * 100, 4)
+                if idx + 60 < len(price_history):
+                    fwd60 = round(((price_history[idx + 60][1] / close) - 1) * 100, 4)
+                score_ge_80_events.append(
+                    {
+                        "date": date_str,
+                        "sell_gate_open": sell_gate_open and not cooldown_active and shares > 0,
+                        "blockers": blockers,
+                        "forward_20d_pct": fwd20,
+                        "forward_60d_pct": fwd60,
+                    }
+                )
 
             buy_reason = None
             if days_since_last_sell is None:
@@ -387,6 +444,27 @@ def _run_simulation_core(
     final_price = price_history[-1][1]
     final_value = cash + shares * final_price
     buy_and_hold_final = hold_cash + hold_shares * final_price
+    score_ge_80_dates = [e["date"] for e in score_ge_80_events]
+    score_ge_80_forward_20d_pct = [e["forward_20d_pct"] for e in score_ge_80_events if e["forward_20d_pct"] is not None]
+    score_ge_80_forward_60d_pct = [e["forward_60d_pct"] for e in score_ge_80_events if e["forward_60d_pct"] is not None]
+    actual_sell_dates = [t["date"] for t in trades if t["action"] == "SELL"]
+    index_by_date = {dt: i for i, (dt, _) in enumerate(price_history)}
+    sell_loss_reasons: List[Dict] = []
+    for t in trades:
+        if t["action"] != "SELL":
+            continue
+        i = index_by_date.get(t["date"])
+        if i is None or i + 20 >= len(price_history):
+            continue
+        post20 = round(((price_history[i + 20][1] / t["price"]) - 1) * 100, 4)
+        if post20 > 0:
+            sell_loss_reasons.append(
+                {
+                    "date": t["date"],
+                    "reason": "rebounded_after_sell_20d",
+                    "post20_return_pct": post20,
+                }
+            )
     return {
         "final_value": round(final_value, 2),
         "buy_and_hold_final": round(buy_and_hold_final, 2),
@@ -400,6 +478,16 @@ def _run_simulation_core(
         "score_p95_after": round(_percentile(score_after_values, 95), 2) if score_after_values else 0.0,
         "score_distribution_before": _score_distribution(score_before_values),
         "score_distribution_after": _score_distribution(score_after_values),
+        "score_max": round(max(score_after_values), 2) if score_after_values else 0.0,
+        "score_p95": round(_percentile(score_after_values, 95), 2) if score_after_values else 0.0,
+        "score_p99": round(_percentile(score_after_values, 99), 2) if score_after_values else 0.0,
+        "score_ge_80_count": len(score_ge_80_events),
+        "score_ge_80_dates": score_ge_80_dates,
+        "score_ge_80_sell_gate_details": score_ge_80_events,
+        "score_ge_80_forward_20d_pct": score_ge_80_forward_20d_pct,
+        "score_ge_80_forward_60d_pct": score_ge_80_forward_60d_pct,
+        "actual_sell_dates": actual_sell_dates,
+        "sell_loss_reasons": sell_loss_reasons,
     }
 
 
@@ -547,6 +635,12 @@ def _output(rows: List[Dict], output_format: str, output_path: str | None):
                 "buyback_return_pct",
                 "score_distribution_before",
                 "score_distribution_after",
+                "score_ge_80_dates",
+                "score_ge_80_sell_gate_details",
+                "score_ge_80_forward_20d_pct",
+                "score_ge_80_forward_60d_pct",
+                "actual_sell_dates",
+                "sell_loss_reasons",
             ):
                 serializable[key] = json.dumps(serializable.get(key, []), ensure_ascii=False)
             writer.writerow(serializable)
@@ -557,7 +651,8 @@ def _output(rows: List[Dict], output_format: str, output_path: str | None):
 
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
-    parser.add_argument("--index", default="SP500_JPY")
+    parser.add_argument("--index", default=None, help="Single index_type to diagnose")
+    parser.add_argument("--indices", default=None, help="Comma-separated index_type list")
     parser.add_argument("--start-date", default="2014-01-01")
     parser.add_argument("--end-date", default=date.today().isoformat())
     parser.add_argument("--initial-cash", type=float, default=1_000_000.0)
@@ -568,15 +663,23 @@ def main():
     args = parser.parse_args()
 
     ctx = _build_context()
-    rows = run_comparison(
-        ctx=ctx,
-        index_type=args.index,
-        start_date=date.fromisoformat(args.start_date),
-        end_date=date.fromisoformat(args.end_date),
-        initial_cash=args.initial_cash,
-        buy_threshold=args.buy_threshold,
-        score_ma=args.score_ma,
-    )
+    if args.index:
+        target_indices = [args.index]
+    else:
+        target_indices = parse_index_types(args.indices)
+    rows: List[Dict] = []
+    for index_type in target_indices:
+        rows.extend(
+            run_comparison(
+                ctx=ctx,
+                index_type=index_type,
+                start_date=date.fromisoformat(args.start_date),
+                end_date=date.fromisoformat(args.end_date),
+                initial_cash=args.initial_cash,
+                buy_threshold=args.buy_threshold,
+                score_ma=args.score_ma,
+            )
+        )
     _output(rows, args.output_format, args.output)
 
 
