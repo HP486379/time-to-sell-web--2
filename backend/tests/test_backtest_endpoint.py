@@ -5,7 +5,7 @@ from datetime import date
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import main
-from main import BacktestRequest
+from main import BacktestRequest, BacktestDiagnosticsSummaryRequest
 
 
 def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
@@ -29,6 +29,12 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
             "portfolio_history": [],
             "buy_hold_history": [],
             "price_history": [("2024-01-01", 100.0), ("2024-01-02", 101.0)],
+            "diagnostics": {
+                "trade_summary": {"trade_count": 7},
+                "initial_entry": {"starts_invested": True},
+                "initial_position": {"starts_invested": True, "initial_position_is_trade": False},
+                "exposure": {"total_trading_days": 2},
+            },
         }
 
     monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
@@ -56,3 +62,8 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
     assert body["total_return"] == 23.45
     assert body["max_drawdown"] == 10.5
     assert body["trade_count"] == 7
+    assert "diagnostics" in body
+    assert "trade_summary" in body["diagnostics"]
+    assert "initial_entry" in body["diagnostics"]
+    assert "initial_position" in body["diagnostics"]
+    assert "exposure" in body["diagnostics"]
