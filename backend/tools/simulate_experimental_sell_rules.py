@@ -415,6 +415,9 @@ def run_calibrated_rule(
     sell_threshold: float,
     score_ma: int,
 ) -> Dict:
+    # NOTE(deprecated):
+    # index別 multiplier/offset 補正は全指数共通方針としては採用しないため、
+    # 既定の比較フロー（run_comparison）では呼ばない。
     return _run_simulation_core(
         ctx,
         index_type=index_type,
@@ -442,6 +445,9 @@ def run_weight_adjusted_rule(
     sell_threshold: float,
     score_ma: int,
 ) -> Dict:
+    # NOTE(deprecated):
+    # index別 weight/scale 補正は全指数共通方針としては採用しないため、
+    # 既定の比較フロー（run_comparison）では呼ばない。
     return _run_simulation_core(
         ctx,
         index_type=index_type,
@@ -492,25 +498,6 @@ def run_comparison(
     buy_threshold: float,
     score_ma: int,
 ) -> List[Dict]:
-    svc = ctx.backtest_service
-    raw_history = svc.market_service.get_price_history_range(
-        start_date, end_date, allow_fallback=svc.allow_fallback, index_type=index_type
-    )
-    price_history = svc._prepare_price_history(raw_history, index_type)
-    macro_series = svc.macro_service.get_macro_series_range(start_date, end_date)
-    score_components: List[Dict[str, float]] = []
-    for idx, (date_str, _) in enumerate(price_history):
-        if idx < max(score_ma - 1, 199):
-            continue
-        score_components.append(
-            _calculate_score_snapshot(
-                svc, price_history[: idx + 1], macro_series, date.fromisoformat(date_str), score_ma
-            )
-        )
-    raw_scores = [s["total_score_raw"] for s in score_components]
-    calibration_config = _build_calibration_config(raw_scores)
-    weight_adjust_config = _build_weight_adjust_config(score_components)
-
     current = run_current_logic_rule(
         ctx,
         index_type=index_type,
@@ -521,32 +508,8 @@ def run_comparison(
         sell_threshold=80.0,
         score_ma=score_ma,
     )
-    calibrated = run_calibrated_rule(
-        ctx,
-        index_type=index_type,
-        calibration_config=calibration_config,
-        start_date=start_date,
-        end_date=end_date,
-        initial_cash=initial_cash,
-        buy_threshold=40.0,
-        sell_threshold=80.0,
-        score_ma=score_ma,
-    )
-    weight_adjusted = run_weight_adjusted_rule(
-        ctx,
-        index_type=index_type,
-        weight_adjust_config=weight_adjust_config,
-        start_date=start_date,
-        end_date=end_date,
-        initial_cash=initial_cash,
-        buy_threshold=40.0,
-        sell_threshold=80.0,
-        score_ma=score_ma,
-    )
     return [
         _summarize_rule_result("current_logic", index_type, current),
-        _summarize_rule_result("index_calibrated_score", index_type, calibrated),
-        _summarize_rule_result("index_weight_adjusted_score", index_type, weight_adjusted),
     ]
 
 

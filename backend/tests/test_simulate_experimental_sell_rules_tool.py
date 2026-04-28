@@ -72,41 +72,7 @@ def test_summarize_rule_result_contains_required_fields():
     assert row["buy_count"] == 1
 
 
-def test_run_comparison_runs_three_rules(monkeypatch):
-    class _MarketService:
-        def get_price_history_range(self, start, end, allow_fallback, index_type):
-            history = []
-            for i in range(220):
-                dt = start.fromordinal(start.toordinal() + i)
-                history.append((dt.isoformat(), 100.0))
-            return history
-
-    class _MacroService:
-        def get_macro_series_range(self, start, end):
-            return {"r_10y": [], "cpi": [], "vix": []}
-
-    class _BacktestService:
-        allow_fallback = False
-        market_service = _MarketService()
-        macro_service = _MacroService()
-
-        def _prepare_price_history(self, raw_history, index_type):
-            return raw_history
-
-    class _Ctx:
-        backtest_service = _BacktestService()
-
-    def _fake_snapshot(*args, **kwargs):
-        return {
-            "technical_score": 60.0,
-            "macro_score": 50.0,
-            "event_adjustment": 0.0,
-            "ma500": None,
-            "ma1000": None,
-            "current_price": 100.0,
-            "total_score_raw": 70.0,
-        }
-
+def test_run_comparison_returns_current_logic_only(monkeypatch):
     def _fake_current(*args, **kwargs):
         return {
             "final_value": 1000.0,
@@ -116,36 +82,9 @@ def test_run_comparison_runs_three_rules(monkeypatch):
             "price_history": [("2020-01-01", 100.0)],
         }
 
-    def _fake_calibrated(*args, **kwargs):
-        return {
-            "final_value": 1100.0,
-            "buy_and_hold_final": 1000.0,
-            "max_drawdown_pct": 8.0,
-            "trades": [],
-            "price_history": [("2020-01-01", 100.0)],
-        }
-
-    def _fake_weight_adjusted(*args, **kwargs):
-        return {
-            "final_value": 1200.0,
-            "buy_and_hold_final": 1000.0,
-            "max_drawdown_pct": 7.0,
-            "trades": [],
-            "price_history": [("2020-01-01", 100.0)],
-        }
-
-    monkeypatch.setattr("tools.simulate_experimental_sell_rules._calculate_score_snapshot", _fake_snapshot)
-    monkeypatch.setattr(
-        "tools.simulate_experimental_sell_rules._build_calibration_config", lambda values: object()
-    )
-    monkeypatch.setattr(
-        "tools.simulate_experimental_sell_rules._build_weight_adjust_config", lambda values: object()
-    )
     monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_current_logic_rule", _fake_current)
-    monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_calibrated_rule", _fake_calibrated)
-    monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_weight_adjusted_rule", _fake_weight_adjusted)
     rows = run_comparison(
-        ctx=_Ctx(),
+        ctx=FakeContext(),
         index_type="SP500_JPY",
         start_date=date(2020, 1, 1),
         end_date=date(2020, 12, 31),
@@ -155,8 +94,6 @@ def test_run_comparison_runs_three_rules(monkeypatch):
     )
     assert [row["rule_name"] for row in rows] == [
         "current_logic",
-        "index_calibrated_score",
-        "index_weight_adjusted_score",
     ]
 
 class _MarketService:
