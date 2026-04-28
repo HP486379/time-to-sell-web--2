@@ -254,9 +254,6 @@ def diagnose_index(
                     "score_shortage_to_80": round(max(0.0, SELL_THRESHOLD - total_score), 2),
                     "sell_gate_open": sell_gate_open,
                     "blockers": blockers,
-                    "overheat_event_raw_conditions": overheat_event_raw_conditions,
-                    "sell_gate_required_conditions": sell_gate_required_conditions,
-                    "sell_gate_failed_conditions": sell_gate_failed_conditions,
                     "overheat_event_active": overheat_event_active,
                     "peakout_detected": peakout_detected,
                     "confirmation_detected": confirmation_detected,
@@ -386,15 +383,7 @@ def _output(payload: Dict, output_format: str, output_path: str | None):
         writer.writeheader()
         for r in rows:
             obj = dict(r)
-            for k in (
-                "blockers",
-                "most_common_blockers",
-                "case_tags",
-                "nearby_events",
-                "overheat_event_raw_conditions",
-                "sell_gate_required_conditions",
-                "sell_gate_failed_conditions",
-            ):
+            for k in ("blockers", "most_common_blockers", "case_tags"):
                 if k in obj:
                     obj[k] = json.dumps(obj[k], ensure_ascii=False)
             writer.writerow(obj)

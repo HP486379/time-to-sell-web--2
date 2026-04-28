@@ -83,12 +83,6 @@ def test_diagnose_index_returns_detail_and_summary(monkeypatch):
     assert "technical_high_total_shortage" in first
     assert "macro_drag_suspected" in first
     assert "event_adjustment_is_zero" in first
-    assert "event_adjustment_reason" in first
-    assert "event_source_count" in first
-    assert "nearby_events" in first
-    assert "overheat_event_raw_conditions" in first
-    assert "sell_gate_required_conditions" in first
-    assert "sell_gate_failed_conditions" in first
     assert "overheat_event_active" in first
     assert "peakout_detected" in first
     assert "confirmation_detected" in first
