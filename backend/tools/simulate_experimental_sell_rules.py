@@ -72,6 +72,14 @@ PORTFOLIO_RULES: Dict[str, Dict[str, str]] = {
     "allcountry_jpy_only": {
         "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
     },
+    # aliases for decision-friendly plans
+    "safe_sp500jpy_only": {
+        "SP500_JPY": "ath_boost_8_score80_gate",
+    },
+    "aggressive_jpy_dual": {
+        "SP500_JPY": "ath_boost_8_score80_gate",
+        "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
+    },
 }
 
 

@@ -293,6 +293,8 @@ def test_build_portfolio_rule_comparison_from_json(tmp_path):
     assert summaries["jpy_aggressive"]["missing_count"] == 0
     assert summaries["sp500_jpy_only"]["missing_count"] == 0
     assert summaries["allcountry_jpy_only"]["missing_count"] == 0
+    assert summaries["safe_sp500jpy_only"]["missing_count"] == 0
+    assert summaries["aggressive_jpy_dual"]["missing_count"] == 0
 
     def _pick(portfolio_rule_name, index_type):
         return [x for x in out["details"] if x["portfolio_rule_name"] == portfolio_rule_name and x["index_type"] == index_type][0]
@@ -313,6 +315,11 @@ def test_build_portfolio_rule_comparison_from_json(tmp_path):
     # allcountry_jpy_only
     assert _pick("allcountry_jpy_only", "ALLCOUNTRY_JPY")["applied_rule_name"] == "no_ath_penalty_score80_gate"
     assert _pick("allcountry_jpy_only", "SP500_JPY")["applied_rule_name"] == "current_logic"
+    # aliases
+    assert _pick("safe_sp500jpy_only", "SP500_JPY")["applied_rule_name"] == "ath_boost_8_score80_gate"
+    assert _pick("safe_sp500jpy_only", "ALLCOUNTRY_JPY")["applied_rule_name"] == "current_logic"
+    assert _pick("aggressive_jpy_dual", "SP500_JPY")["applied_rule_name"] == "ath_boost_8_score80_gate"
+    assert _pick("aggressive_jpy_dual", "ALLCOUNTRY_JPY")["applied_rule_name"] == "no_ath_penalty_score80_gate"
 
 
 def test_build_portfolio_rule_comparison_reports_missing_items(tmp_path):
