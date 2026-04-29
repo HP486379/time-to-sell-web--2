@@ -925,6 +925,70 @@ def build_index_rule_review_from_json(input_json: str) -> Dict:
     return {"summary": summary, "details": details}
 
 
+def build_allcountry_jpy_bad_sell_review_from_json(
+    input_json: str,
+    *,
+    index_type: str = "ALLCOUNTRY_JPY",
+    rule_name: str = "no_ath_penalty_score80_gate",
+) -> Dict:
+    rows = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    row = next((r for r in rows if r.get("index_type") == index_type and r.get("rule_name") == rule_name), None)
+    if row is None:
+        raise ValueError(f"missing_target_row:{index_type}:{rule_name}")
+
+    sells = row.get("sell_dates", [])
+    buys = row.get("buy_dates", [])
+    sell_post = row.get("sell_post_return_20d_pct", [])
+    buyback = row.get("buyback_return_pct", [])
+    price_history = row.get("price_history", [])
+    price_by_date = {d: p for d, p in price_history} if isinstance(price_history, list) else {}
+
+    reviews: List[Dict] = []
+    for i, sell_date in enumerate(sells):
+        buy_date = buys[i] if i < len(buys) else None
+        sell_post_20 = sell_post[i] if i < len(sell_post) else None
+        buyback_ret = buyback[i] if i < len(buyback) else None
+        is_bad_sell = (sell_post_20 is not None and float(sell_post_20) > 0) or (buyback_ret is not None and float(buyback_ret) > 0)
+        bad_sell_reason = "post_sell_rebound" if is_bad_sell else ""
+        memo = "review_needed" if is_bad_sell else "effective_sell"
+        reviews.append(
+            {
+                "index_type": index_type,
+                "rule_name": rule_name,
+                "sell_date": sell_date,
+                "buy_date": buy_date,
+                "sell_price": price_by_date.get(sell_date),
+                "buy_price": price_by_date.get(buy_date) if buy_date else None,
+                "sell_total_score": None,
+                "sell_technical_score": None,
+                "sell_macro_score": None,
+                "sell_event_adjustment": None,
+                "sell_reason_flags": ["score80_gate", "no_ath_penalty"],
+                "peakout_gate_result": None,
+                "confirmation_gate_result": None,
+                "score80_gate_result": True,
+                "sell_post_return_20d_pct": sell_post_20,
+                "buyback_return_pct": buyback_ret,
+                "is_bad_sell": is_bad_sell,
+                "bad_sell_reason": bad_sell_reason,
+                "memo": memo,
+            }
+        )
+
+    bad_count = sum(1 for r in reviews if r["is_bad_sell"])
+    review_result = "acceptable_noise" if bad_count <= 1 and float(row.get("diff_pct", 0.0)) >= 8.0 else "too_risky"
+    summary = {
+        "index_type": index_type,
+        "rule_name": rule_name,
+        "recommendation_before_review": "needs_review",
+        "total_diff_pct": row.get("diff_pct"),
+        "bad_sell_count": row.get("bad_sell_count", bad_count),
+        "trade_count": row.get("trade_count"),
+        "review_result": review_result,
+    }
+    return {"summary": summary, "sell_reviews": reviews}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -938,6 +1002,7 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("--portfolio-rules", action="store_true")
     parser.add_argument("--review-index-rules", action="store_true")
+    parser.add_argument("--review-allcountry-jpy", action="store_true")
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -952,6 +1017,12 @@ def main():
         if not args.input_json or not args.output_json:
             raise ValueError("--review-index-rules requires --input-json and --output-json")
         payload = build_index_rule_review_from_json(args.input_json)
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if args.review_allcountry_jpy:
+        if not args.input_json or not args.output_json:
+            raise ValueError("--review-allcountry-jpy requires --input-json and --output-json")
+        payload = build_allcountry_jpy_bad_sell_review_from_json(args.input_json)
         Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 
