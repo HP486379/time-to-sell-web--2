@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    build_index_rule_review_from_json,
     build_portfolio_rule_comparison_from_json,
     parse_index_types,
     run_comparison,
@@ -337,3 +338,26 @@ def test_build_portfolio_rule_comparison_reports_missing_items(tmp_path):
     assert summaries["current_all"]["missing_count"] == 0
     assert summaries["jpy_aggressive"]["missing_count"] > 0
     assert len(summaries["jpy_aggressive"]["missing_items"]) > 0
+
+
+def test_build_index_rule_review_from_json(tmp_path):
+    rows = [
+        {"index_type": "SP500_JPY", "rule_name": "current_logic", "diff_pct": 1.0, "bad_sell_count": 0, "trade_count": 1},
+        {"index_type": "SP500_JPY", "rule_name": "ath_boost_8_score80_gate", "diff_pct": 5.0, "bad_sell_count": 0, "trade_count": 2, "sell_post_return_20d_pct": [-5.0]},
+        {"index_type": "ALLCOUNTRY_JPY", "rule_name": "current_logic", "diff_pct": 0.5, "bad_sell_count": 0, "trade_count": 1},
+        {"index_type": "ALLCOUNTRY_JPY", "rule_name": "no_ath_penalty_score80_gate", "diff_pct": 6.0, "bad_sell_count": 1, "trade_count": 2, "sell_post_return_20d_pct": [-2.0]},
+        {"index_type": "TOPIX", "rule_name": "current_logic", "diff_pct": 0.0, "bad_sell_count": 0, "trade_count": 0},
+        {"index_type": "TOPIX", "rule_name": "ath_boost_8_score80_gate", "diff_pct": 0.5, "bad_sell_count": 0, "trade_count": 3, "sell_post_return_20d_pct": [1.0]},
+        {"index_type": "NIKKEI225", "rule_name": "ath_boost_8_score80_gate", "diff_pct": 3.0, "bad_sell_count": 0, "trade_count": 1},
+    ]
+    p = tmp_path / "review.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_index_rule_review_from_json(str(p))
+    assert set(out.keys()) == {"summary", "details"}
+    s = {x["index_type"]: x for x in out["summary"]}
+    assert s["SP500_JPY"]["recommended_rule_name"] == "ath_boost_8_score80_gate"
+    assert s["SP500_JPY"]["recommendation"] == "adopt"
+    assert s["ALLCOUNTRY_JPY"]["recommended_rule_name"] == "no_ath_penalty_score80_gate"
+    assert s["ALLCOUNTRY_JPY"]["recommendation"] == "needs_review"
+    assert s["TOPIX"]["recommendation"] in {"keep_current", "needs_review"}
+    assert s["NIKKEI225"]["missing_items"] != []

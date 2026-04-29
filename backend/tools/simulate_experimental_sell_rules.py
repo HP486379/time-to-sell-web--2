@@ -75,6 +75,10 @@ PORTFOLIO_RULES: Dict[str, Dict[str, str]] = {
 }
 
 
+def _safe_avg(values: List[float]) -> float:
+    return float(sum(values) / len(values)) if values else 0.0
+
+
 def _compute_max_drawdown(values: List[float]) -> float:
     peak = values[0]
     max_dd = 0.0
@@ -802,6 +806,117 @@ def build_portfolio_rule_comparison_from_json(input_json: str) -> Dict:
     return {"summary": summaries, "details": details}
 
 
+def build_index_rule_review_from_json(input_json: str) -> Dict:
+    rows = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    by_index: Dict[str, List[Dict]] = {}
+    for r in rows:
+        by_index.setdefault(r["index_type"], []).append(r)
+
+    details: List[Dict] = []
+    summary: List[Dict] = []
+    for index_type, idx_rows in by_index.items():
+        ranked = sorted(idx_rows, key=lambda x: float(x.get("diff_pct", 0.0)), reverse=True)
+        rank_map = {id(row): i + 1 for i, row in enumerate(ranked)}
+        for row in idx_rows:
+            details.append(
+                {
+                    "index_type": index_type,
+                    "rule_name": row.get("rule_name"),
+                    "final_equity": row.get("final_equity"),
+                    "hold_equity": row.get("hold_equity"),
+                    "diff_pct": row.get("diff_pct"),
+                    "trade_count": row.get("trade_count"),
+                    "sell_count": row.get("sell_count"),
+                    "buy_count": row.get("buy_count"),
+                    "sell_dates": row.get("sell_dates", []),
+                    "buy_dates": row.get("buy_dates", []),
+                    "sell_post_return_20d_pct": row.get("sell_post_return_20d_pct", []),
+                    "buyback_return_pct": row.get("buyback_return_pct", []),
+                    "bad_sell_count": row.get("bad_sell_count", 0),
+                    "blocked_good_sell_candidate_count": row.get("blocked_good_sell_candidate_count", 0),
+                    "max_drawdown": row.get("max_drawdown"),
+                    "rank_by_diff_pct": rank_map[id(row)],
+                }
+            )
+
+        current = next((r for r in idx_rows if r.get("rule_name") == "current_logic"), None)
+        if current is None:
+            summary.append(
+                {
+                    "index_type": index_type,
+                    "current_rule_name": "current_logic",
+                    "recommended_rule_name": None,
+                    "recommendation": "needs_review",
+                    "reason": "current_logic_missing",
+                    "current_diff_pct": None,
+                    "best_diff_pct": float(ranked[0].get("diff_pct", 0.0)) if ranked else 0.0,
+                    "improvement_vs_current": None,
+                    "current_bad_sell_count": None,
+                    "best_bad_sell_count": int(ranked[0].get("bad_sell_count", 0)) if ranked else 0,
+                    "current_trade_count": None,
+                    "best_trade_count": int(ranked[0].get("trade_count", 0)) if ranked else 0,
+                    "missing_items": [{"index_type": index_type, "rule_name": "current_logic"}],
+                }
+            )
+            continue
+
+        current_diff = float(current.get("diff_pct", 0.0))
+        current_bad = int(current.get("bad_sell_count", 0))
+        current_trade = int(current.get("trade_count", 0))
+        best = ranked[0]
+        best_diff = float(best.get("diff_pct", 0.0))
+        best_bad = int(best.get("bad_sell_count", 0))
+        best_trade = int(best.get("trade_count", 0))
+        improvement = best_diff - current_diff
+        avg_sell_post = _safe_avg([float(x) for x in best.get("sell_post_return_20d_pct", [])])
+
+        recommendation = "keep_current"
+        reason = "no_material_improvement"
+        if best.get("rule_name") == "current_logic":
+            recommendation = "keep_current"
+            reason = "current_is_best"
+        elif improvement <= 0.2:
+            recommendation = "keep_current"
+            reason = "improvement_too_small"
+        elif best_bad > current_bad + 1 or best_trade > max(current_trade * 3, current_trade + 5):
+            recommendation = "needs_review"
+            reason = "risk_increase_too_large"
+        elif index_type in {"TOPIX", "NIKKEI225", "NIFTY50"} and "score80_gate" in str(best.get("rule_name")) and best_diff < current_diff + 2.0:
+            recommendation = "needs_review"
+            reason = "score80_gate_not_safe_enough_for_index"
+        elif avg_sell_post > 0.5:
+            recommendation = "needs_review"
+            reason = "post_sell_20d_not_favorable"
+        elif best_diff < 0:
+            recommendation = "reject_all"
+            reason = "all_rules_underperform_hold"
+        else:
+            recommendation = "adopt"
+            reason = "improved_diff_with_acceptable_risk"
+        if index_type == "ALLCOUNTRY_JPY" and best_bad > 0:
+            recommendation = "needs_review"
+            reason = "has_bad_sell_cases_needs_review"
+
+        summary.append(
+            {
+                "index_type": index_type,
+                "current_rule_name": "current_logic",
+                "recommended_rule_name": best.get("rule_name"),
+                "recommendation": recommendation,
+                "reason": reason,
+                "current_diff_pct": current_diff,
+                "best_diff_pct": best_diff,
+                "improvement_vs_current": round(improvement, 4),
+                "current_bad_sell_count": current_bad,
+                "best_bad_sell_count": best_bad,
+                "current_trade_count": current_trade,
+                "best_trade_count": best_trade,
+                "missing_items": [],
+            }
+        )
+    return {"summary": summary, "details": details}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -814,6 +929,7 @@ def main():
     parser.add_argument("--output-format", choices=["json", "csv"], default="json")
     parser.add_argument("--output", default=None)
     parser.add_argument("--portfolio-rules", action="store_true")
+    parser.add_argument("--review-index-rules", action="store_true")
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -822,6 +938,12 @@ def main():
         if not args.input_json or not args.output_json:
             raise ValueError("--portfolio-rules requires --input-json and --output-json")
         payload = build_portfolio_rule_comparison_from_json(args.input_json)
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if args.review_index_rules:
+        if not args.input_json or not args.output_json:
+            raise ValueError("--review-index-rules requires --input-json and --output-json")
+        payload = build_index_rule_review_from_json(args.input_json)
         Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 
