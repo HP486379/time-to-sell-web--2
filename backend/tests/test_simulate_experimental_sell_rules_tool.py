@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    build_allcountry_jpy_bad_sell_review_from_json,
     build_index_rule_review_from_json,
     build_portfolio_rule_comparison_from_json,
     parse_index_types,
@@ -368,3 +369,29 @@ def test_build_index_rule_review_from_json(tmp_path):
     assert s["ALLCOUNTRY_JPY"]["recommendation"] == "needs_review"
     assert s["TOPIX"]["recommendation"] in {"keep_current", "needs_review"}
     assert s["NIKKEI225"]["missing_items"] != []
+
+
+def test_build_allcountry_jpy_bad_sell_review_from_json(tmp_path):
+    rows = [
+        {
+            "index_type": "ALLCOUNTRY_JPY",
+            "rule_name": "no_ath_penalty_score80_gate",
+            "diff_pct": 12.76,
+            "bad_sell_count": 1,
+            "trade_count": 4,
+            "sell_dates": ["2024-07-05", "2025-11-03"],
+            "buy_dates": ["2024-08-09", "2025-12-02"],
+            "sell_post_return_20d_pct": [-11.1873, 0.4775],
+            "buyback_return_pct": [-11.78, 0.4775],
+            "price_history": [("2024-07-05", 100.0), ("2024-08-09", 88.2), ("2025-11-03", 110.0), ("2025-12-02", 110.5)],
+        }
+    ]
+    p = tmp_path / "allcountry.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_allcountry_jpy_bad_sell_review_from_json(str(p))
+    assert set(out.keys()) == {"summary", "sell_reviews"}
+    assert out["summary"]["review_result"] in {"acceptable_noise", "too_risky"}
+    assert len(out["sell_reviews"]) == 2
+    bad = [x for x in out["sell_reviews"] if x["sell_date"] == "2025-11-03"][0]
+    assert bad["is_bad_sell"] is True
+    assert bad["bad_sell_reason"] == "post_sell_rebound"
