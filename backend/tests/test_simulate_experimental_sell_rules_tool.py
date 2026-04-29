@@ -108,14 +108,18 @@ def test_run_comparison_returns_requested_technical_variants(monkeypatch):
     )
     assert [row["rule_name"] for row in rows] == [
         "current_logic",
-        "no_ath_penalty",
-        "ath_boost_6",
-        "ath_boost_8",
-        "no_uptrend_penalty",
-        "no_ath_penalty_plus_no_uptrend_penalty",
+        "no_ath_penalty_current_gate",
+        "ath_boost_8_current_gate",
+        "no_ath_penalty_score80_gate",
+        "ath_boost_8_score80_gate",
+        "no_ath_penalty_relaxed_gate",
+        "ath_boost_8_relaxed_gate",
     ]
     assert "score_max" in rows[0]
     assert "score_ge_80_count" in rows[0]
+    assert "sell_gate_blockers" in rows[0]
+    assert "blocked_good_sell_candidate_count" in rows[0]
+    assert "bad_sell_count" in rows[0]
 
 class _MarketService:
     def get_price_history_range(self, start, end, allow_fallback, index_type):

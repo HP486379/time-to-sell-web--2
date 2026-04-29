@@ -9,6 +9,7 @@ from datetime import date
 from math import floor
 from pathlib import Path
 from statistics import mean, median
+from collections import Counter
 from typing import Dict, List, Optional
 
 
@@ -141,6 +142,9 @@ def _summarize_rule_result(rule_name: str, index_type: str, result: Dict) -> Dic
         "score_ge_80_forward_60d_pct": result.get("score_ge_80_forward_60d_pct", []),
         "actual_sell_dates": result.get("actual_sell_dates", []),
         "sell_loss_reasons": result.get("sell_loss_reasons", []),
+        "sell_gate_blockers": result.get("sell_gate_blockers", {}),
+        "blocked_good_sell_candidate_count": result.get("blocked_good_sell_candidate_count", 0),
+        "bad_sell_count": result.get("bad_sell_count", 0),
     }
 
 
@@ -243,15 +247,22 @@ def _calculate_score_snapshot(
 
 def _apply_technical_variant(rule_name: str, technical_score: float, closes: List[float]) -> float:
     adjusted = technical_score
+    variant_base = rule_name
+    if "_current_gate" in rule_name:
+        variant_base = rule_name.replace("_current_gate", "")
+    if "_score80_gate" in rule_name:
+        variant_base = rule_name.replace("_score80_gate", "")
+    if "_relaxed_gate" in rule_name:
+        variant_base = rule_name.replace("_relaxed_gate", "")
     is_60d_high = len(closes) >= 60 and closes[-1] >= max(closes[-60:])
     is_strong_uptrend = len(closes) >= 20 and closes[-1] > closes[-20]
-    if rule_name in {"no_ath_penalty", "no_ath_penalty_plus_no_uptrend_penalty"} and is_60d_high:
+    if variant_base in {"no_ath_penalty", "no_ath_penalty_plus_no_uptrend_penalty"} and is_60d_high:
         adjusted += 12.0
-    if rule_name == "ath_boost_6" and is_60d_high:
+    if variant_base == "ath_boost_6" and is_60d_high:
         adjusted += 6.0
-    if rule_name == "ath_boost_8" and is_60d_high:
+    if variant_base == "ath_boost_8" and is_60d_high:
         adjusted += 8.0
-    if rule_name in {"no_uptrend_penalty", "no_ath_penalty_plus_no_uptrend_penalty"} and is_strong_uptrend:
+    if variant_base in {"no_uptrend_penalty", "no_ath_penalty_plus_no_uptrend_penalty"} and is_strong_uptrend:
         adjusted += 6.0
     return float(clip(adjusted))
 
@@ -294,6 +305,8 @@ def _run_simulation_core(
     score_before_values: List[float] = []
     score_after_values: List[float] = []
     score_ge_80_events: List[Dict] = []
+    sell_gate_blockers_counter: Counter[str] = Counter()
+    blocked_good_sell_candidate_count = 0
 
     hold_cash = initial_cash
     first_price = price_history[0][1]
@@ -315,14 +328,7 @@ def _run_simulation_core(
             total_score = raw_total_score
             technical_score = snapshot["technical_score"]
             closes = [p[1] for p in sub_history]
-            variant_rules = {
-                "no_ath_penalty",
-                "ath_boost_6",
-                "ath_boost_8",
-                "no_uptrend_penalty",
-                "no_ath_penalty_plus_no_uptrend_penalty",
-            }
-            if rule_name in variant_rules:
+            if any(x in rule_name for x in ("no_ath_penalty", "ath_boost_6", "ath_boost_8", "no_uptrend_penalty")):
                 technical_score = _apply_technical_variant(rule_name, technical_score, closes)
                 weighted_raw = (0.7 * technical_score) + (0.3 * snapshot["macro_score"]) + snapshot["event_adjustment"]
                 attenuation = calculate_ultra_long_attenuation(
@@ -368,6 +374,11 @@ def _run_simulation_core(
             confirmation_detected = close_below_ma20_2days or close_below_ma50
             overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
             sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
+            gate_mode = "current_gate"
+            if rule_name.endswith("_score80_gate"):
+                gate_mode = "score80_gate"
+            elif rule_name.endswith("_relaxed_gate"):
+                gate_mode = "relaxed_gate"
 
             if total_score >= 80.0:
                 blockers: List[str] = []
@@ -381,6 +392,8 @@ def _run_simulation_core(
                     blockers.append("peakout_not_detected")
                 if not confirmation_detected:
                     blockers.append("confirmation_not_detected")
+                for b in blockers:
+                    sell_gate_blockers_counter[b] += 1
                 fwd20 = None
                 fwd60 = None
                 if idx + 20 < len(price_history):
@@ -396,6 +409,8 @@ def _run_simulation_core(
                         "forward_60d_pct": fwd60,
                     }
                 )
+                if not (shares > 0 and not cooldown_active and sell_gate_open) and fwd20 is not None and fwd20 <= -5.0:
+                    blocked_good_sell_candidate_count += 1
 
             buy_reason = None
             if days_since_last_sell is None:
@@ -423,6 +438,15 @@ def _run_simulation_core(
                 buy_reason = "day60"
 
             current_logic_sell = shares > 0 and sell_gate_open and not cooldown_active
+            if gate_mode == "score80_gate":
+                current_logic_sell = shares > 0 and not cooldown_active and total_score >= sell_threshold
+            elif gate_mode == "relaxed_gate":
+                current_logic_sell = (
+                    shares > 0
+                    and not cooldown_active
+                    and total_score >= sell_threshold
+                    and (peakout_detected or confirmation_detected)
+                )
             experimental_sell = (
                 shares > 0
                 and not cooldown_active
@@ -479,6 +503,7 @@ def _run_simulation_core(
     actual_sell_dates = [t["date"] for t in trades if t["action"] == "SELL"]
     index_by_date = {dt: i for i, (dt, _) in enumerate(price_history)}
     sell_loss_reasons: List[Dict] = []
+    bad_sell_count = 0
     for t in trades:
         if t["action"] != "SELL":
             continue
@@ -487,6 +512,7 @@ def _run_simulation_core(
             continue
         post20 = round(((price_history[i + 20][1] / t["price"]) - 1) * 100, 4)
         if post20 > 0:
+            bad_sell_count += 1
             sell_loss_reasons.append(
                 {
                     "date": t["date"],
@@ -517,6 +543,9 @@ def _run_simulation_core(
         "score_ge_80_forward_60d_pct": score_ge_80_forward_60d_pct,
         "actual_sell_dates": actual_sell_dates,
         "sell_loss_reasons": sell_loss_reasons,
+        "sell_gate_blockers": dict(sell_gate_blockers_counter),
+        "blocked_good_sell_candidate_count": blocked_good_sell_candidate_count,
+        "bad_sell_count": bad_sell_count,
     }
 
 
@@ -617,11 +646,12 @@ def run_comparison(
 ) -> List[Dict]:
     rules = [
         "current_logic",
-        "no_ath_penalty",
-        "ath_boost_6",
-        "ath_boost_8",
-        "no_uptrend_penalty",
-        "no_ath_penalty_plus_no_uptrend_penalty",
+        "no_ath_penalty_current_gate",
+        "ath_boost_8_current_gate",
+        "no_ath_penalty_score80_gate",
+        "ath_boost_8_score80_gate",
+        "no_ath_penalty_relaxed_gate",
+        "ath_boost_8_relaxed_gate",
     ]
     rows: List[Dict] = []
     for rule_name in rules:
