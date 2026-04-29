@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    build_portfolio_rule_comparison_from_json,
     parse_index_types,
     run_comparison,
 )
@@ -255,3 +256,84 @@ def test_no_buy_is_recorded_before_first_sell_even_if_initial_cash_cannot_buy_on
     )
 
     assert result["trades"] == []
+
+
+def test_build_portfolio_rule_comparison_from_json(tmp_path):
+    rows = []
+    index_types = ["SP500", "SP500_JPY", "TOPIX", "NIKKEI225", "NIFTY50", "ALLCOUNTRY", "ALLCOUNTRY_JPY"]
+    for index_type in index_types:
+        for rule_name in ["current_logic", "no_ath_penalty_current_gate", "ath_boost_8_score80_gate", "no_ath_penalty_score80_gate"]:
+            rows.append(
+                {
+                    "index_type": index_type,
+                    "rule_name": rule_name,
+                    "final_equity": 100.0,
+                    "hold_equity": 100.0,
+                    "diff_pct": 1.0 if rule_name != "current_logic" else 0.0,
+                    "trade_count": 1,
+                    "sell_count": 1,
+                    "buy_count": 0,
+                    "sell_dates": [],
+                    "buy_dates": [],
+                    "sell_post_return_20d_pct": [],
+                    "buyback_return_pct": [],
+                    "bad_sell_count": 0,
+                    "blocked_good_sell_candidate_count": 0,
+                    "max_drawdown": 1.0,
+                }
+            )
+    p = tmp_path / "in.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_portfolio_rule_comparison_from_json(str(p))
+    assert set(out.keys()) == {"summary", "details"}
+    summaries = {s["portfolio_rule_name"]: s for s in out["summary"]}
+    assert summaries["current_all"]["missing_count"] == 0
+    assert summaries["jpy_conservative"]["missing_count"] == 0
+    assert summaries["jpy_aggressive"]["missing_count"] == 0
+    assert summaries["sp500_jpy_only"]["missing_count"] == 0
+    assert summaries["allcountry_jpy_only"]["missing_count"] == 0
+
+    def _pick(portfolio_rule_name, index_type):
+        return [x for x in out["details"] if x["portfolio_rule_name"] == portfolio_rule_name and x["index_type"] == index_type][0]
+
+    # current_all
+    assert _pick("current_all", "SP500")["applied_rule_name"] == "current_logic"
+    # jpy_conservative
+    assert _pick("jpy_conservative", "SP500_JPY")["applied_rule_name"] == "no_ath_penalty_current_gate"
+    assert _pick("jpy_conservative", "ALLCOUNTRY_JPY")["applied_rule_name"] == "no_ath_penalty_current_gate"
+    assert _pick("jpy_conservative", "SP500")["applied_rule_name"] == "current_logic"
+    # jpy_aggressive
+    assert _pick("jpy_aggressive", "SP500_JPY")["applied_rule_name"] == "ath_boost_8_score80_gate"
+    assert _pick("jpy_aggressive", "ALLCOUNTRY_JPY")["applied_rule_name"] == "no_ath_penalty_score80_gate"
+    assert _pick("jpy_aggressive", "TOPIX")["applied_rule_name"] == "current_logic"
+    # sp500_jpy_only
+    assert _pick("sp500_jpy_only", "SP500_JPY")["applied_rule_name"] == "ath_boost_8_score80_gate"
+    assert _pick("sp500_jpy_only", "ALLCOUNTRY_JPY")["applied_rule_name"] == "current_logic"
+    # allcountry_jpy_only
+    assert _pick("allcountry_jpy_only", "ALLCOUNTRY_JPY")["applied_rule_name"] == "no_ath_penalty_score80_gate"
+    assert _pick("allcountry_jpy_only", "SP500_JPY")["applied_rule_name"] == "current_logic"
+
+
+def test_build_portfolio_rule_comparison_reports_missing_items(tmp_path):
+    rows = []
+    for index_type in ["SP500", "SP500_JPY", "ALLCOUNTRY_JPY"]:
+        for rule_name in ["current_logic", "no_ath_penalty_current_gate"]:
+            rows.append(
+                {
+                    "index_type": index_type,
+                    "rule_name": rule_name,
+                    "final_equity": 100.0,
+                    "hold_equity": 100.0,
+                    "diff_pct": 0.0,
+                    "trade_count": 0,
+                    "sell_count": 0,
+                    "buy_count": 0,
+                }
+            )
+    p = tmp_path / "in_missing.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_portfolio_rule_comparison_from_json(str(p))
+    summaries = {s["portfolio_rule_name"]: s for s in out["summary"]}
+    assert summaries["current_all"]["missing_count"] == 0
+    assert summaries["jpy_aggressive"]["missing_count"] > 0
+    assert len(summaries["jpy_aggressive"]["missing_items"]) > 0

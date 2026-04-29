@@ -56,6 +56,24 @@ DEFAULT_INDEX_TYPES = [
     "ALLCOUNTRY_JPY",
 ]
 
+PORTFOLIO_RULES: Dict[str, Dict[str, str]] = {
+    "current_all": {},
+    "jpy_conservative": {
+        "SP500_JPY": "no_ath_penalty_current_gate",
+        "ALLCOUNTRY_JPY": "no_ath_penalty_current_gate",
+    },
+    "jpy_aggressive": {
+        "SP500_JPY": "ath_boost_8_score80_gate",
+        "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
+    },
+    "sp500_jpy_only": {
+        "SP500_JPY": "ath_boost_8_score80_gate",
+    },
+    "allcountry_jpy_only": {
+        "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
+    },
+}
+
 
 def _compute_max_drawdown(values: List[float]) -> float:
     peak = values[0]
@@ -719,6 +737,71 @@ def _output(rows: List[Dict], output_format: str, output_path: str | None):
             out.close()
 
 
+def build_portfolio_rule_comparison_from_json(input_json: str) -> Dict:
+    rows = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    by_key = {(r["index_type"], r["rule_name"]): r for r in rows}
+    index_types = sorted({r["index_type"] for r in rows})
+    details: List[Dict] = []
+    summaries: List[Dict] = []
+
+    for portfolio_rule_name, overrides in PORTFOLIO_RULES.items():
+        missing_items: List[Dict] = []
+        total_diff_pct = 0.0
+        win = lose = flat = 0
+        total_bad_sell_count = 0
+        total_trade_count = 0
+        for index_type in index_types:
+            applied_rule_name = overrides.get(index_type, "current_logic")
+            row = by_key.get((index_type, applied_rule_name))
+            if row is None:
+                missing_items.append({"index_type": index_type, "rule_name": applied_rule_name})
+                continue
+            diff_pct = float(row.get("diff_pct", 0.0))
+            total_diff_pct += diff_pct
+            if diff_pct > 0:
+                win += 1
+            elif diff_pct < 0:
+                lose += 1
+            else:
+                flat += 1
+            total_bad_sell_count += int(row.get("bad_sell_count", 0))
+            total_trade_count += int(row.get("trade_count", 0))
+            details.append(
+                {
+                    "portfolio_rule_name": portfolio_rule_name,
+                    "index_type": index_type,
+                    "applied_rule_name": applied_rule_name,
+                    "final_equity": row.get("final_equity"),
+                    "hold_equity": row.get("hold_equity"),
+                    "diff_pct": row.get("diff_pct"),
+                    "trade_count": row.get("trade_count"),
+                    "sell_count": row.get("sell_count"),
+                    "buy_count": row.get("buy_count"),
+                    "sell_dates": row.get("sell_dates", []),
+                    "buy_dates": row.get("buy_dates", []),
+                    "sell_post_return_20d_pct": row.get("sell_post_return_20d_pct", []),
+                    "buyback_return_pct": row.get("buyback_return_pct", []),
+                    "bad_sell_count": row.get("bad_sell_count", 0),
+                    "blocked_good_sell_candidate_count": row.get("blocked_good_sell_candidate_count", 0),
+                    "max_drawdown": row.get("max_drawdown"),
+                }
+            )
+        summaries.append(
+            {
+                "portfolio_rule_name": portfolio_rule_name,
+                "total_diff_pct": round(total_diff_pct, 4),
+                "win_index_count": win,
+                "lose_index_count": lose,
+                "flat_index_count": flat,
+                "total_bad_sell_count": total_bad_sell_count,
+                "total_trade_count": total_trade_count,
+                "missing_count": len(missing_items),
+                "missing_items": missing_items,
+            }
+        )
+    return {"summary": summaries, "details": details}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -730,7 +813,17 @@ def main():
     parser.add_argument("--score-ma", type=int, default=200)
     parser.add_argument("--output-format", choices=["json", "csv"], default="json")
     parser.add_argument("--output", default=None)
+    parser.add_argument("--portfolio-rules", action="store_true")
+    parser.add_argument("--input-json", default=None)
+    parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
+
+    if args.portfolio_rules:
+        if not args.input_json or not args.output_json:
+            raise ValueError("--portfolio-rules requires --input-json and --output-json")
+        payload = build_portfolio_rule_comparison_from_json(args.input_json)
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
 
     ctx = _build_context()
     if args.index:
