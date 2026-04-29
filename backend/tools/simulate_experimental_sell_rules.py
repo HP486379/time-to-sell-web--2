@@ -241,6 +241,21 @@ def _calculate_score_snapshot(
     }
 
 
+def _apply_technical_variant(rule_name: str, technical_score: float, closes: List[float]) -> float:
+    adjusted = technical_score
+    is_60d_high = len(closes) >= 60 and closes[-1] >= max(closes[-60:])
+    is_strong_uptrend = len(closes) >= 20 and closes[-1] > closes[-20]
+    if rule_name in {"no_ath_penalty", "no_ath_penalty_plus_no_uptrend_penalty"} and is_60d_high:
+        adjusted += 12.0
+    if rule_name == "ath_boost_6" and is_60d_high:
+        adjusted += 6.0
+    if rule_name == "ath_boost_8" and is_60d_high:
+        adjusted += 8.0
+    if rule_name in {"no_uptrend_penalty", "no_ath_penalty_plus_no_uptrend_penalty"} and is_strong_uptrend:
+        adjusted += 6.0
+    return float(clip(adjusted))
+
+
 def _run_simulation_core(
     ctx: SimulationContext,
     *,
@@ -299,6 +314,21 @@ def _run_simulation_core(
             raw_total_score = snapshot["total_score_raw"]
             total_score = raw_total_score
             technical_score = snapshot["technical_score"]
+            closes = [p[1] for p in sub_history]
+            variant_rules = {
+                "no_ath_penalty",
+                "ath_boost_6",
+                "ath_boost_8",
+                "no_uptrend_penalty",
+                "no_ath_penalty_plus_no_uptrend_penalty",
+            }
+            if rule_name in variant_rules:
+                technical_score = _apply_technical_variant(rule_name, technical_score, closes)
+                weighted_raw = (0.7 * technical_score) + (0.3 * snapshot["macro_score"]) + snapshot["event_adjustment"]
+                attenuation = calculate_ultra_long_attenuation(
+                    snapshot["current_price"], snapshot["ma500"], snapshot["ma1000"]
+                )
+                total_score = clip(weighted_raw * (attenuation if attenuation is not None else 1.0))
             if weight_adjust_config is not None:
                 weighted_raw = (
                     (weight_adjust_config.technical_weight * snapshot["technical_score"])
@@ -315,7 +345,6 @@ def _run_simulation_core(
             score_before_values.append(float(raw_total_score))
             score_after_values.append(float(total_score))
             recent_scores.append(total_score)
-            closes = [p[1] for p in sub_history]
             ma20_series = moving_average(closes, 20)
             ma50_series = moving_average(closes, 50)
             cooldown_active = sell_cooldown_days_remaining > 0
@@ -586,19 +615,30 @@ def run_comparison(
     buy_threshold: float,
     score_ma: int,
 ) -> List[Dict]:
-    current = run_current_logic_rule(
-        ctx,
-        index_type=index_type,
-        start_date=start_date,
-        end_date=end_date,
-        initial_cash=initial_cash,
-        buy_threshold=40.0,
-        sell_threshold=80.0,
-        score_ma=score_ma,
-    )
-    return [
-        _summarize_rule_result("current_logic", index_type, current),
+    rules = [
+        "current_logic",
+        "no_ath_penalty",
+        "ath_boost_6",
+        "ath_boost_8",
+        "no_uptrend_penalty",
+        "no_ath_penalty_plus_no_uptrend_penalty",
     ]
+    rows: List[Dict] = []
+    for rule_name in rules:
+        result = _run_simulation_core(
+            ctx,
+            index_type=index_type,
+            rule_name=rule_name,
+            sell_threshold=80.0,
+            technical_threshold=None,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            buy_threshold=40.0,
+            score_ma=score_ma,
+        )
+        rows.append(_summarize_rule_result(rule_name, index_type, result))
+    return rows
 
 
 def _build_context() -> SimulationContext:

@@ -86,8 +86,8 @@ def test_summarize_rule_result_contains_required_fields():
     assert row["buy_count"] == 1
 
 
-def test_run_comparison_returns_current_logic_only(monkeypatch):
-    def _fake_current(*args, **kwargs):
+def test_run_comparison_returns_requested_technical_variants(monkeypatch):
+    def _fake_core(*args, **kwargs):
         return {
             "final_value": 1000.0,
             "buy_and_hold_final": 1000.0,
@@ -96,7 +96,7 @@ def test_run_comparison_returns_current_logic_only(monkeypatch):
             "price_history": [("2020-01-01", 100.0)],
         }
 
-    monkeypatch.setattr("tools.simulate_experimental_sell_rules.run_current_logic_rule", _fake_current)
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_core)
     rows = run_comparison(
         ctx=FakeContext(),
         index_type="SP500_JPY",
@@ -108,6 +108,11 @@ def test_run_comparison_returns_current_logic_only(monkeypatch):
     )
     assert [row["rule_name"] for row in rows] == [
         "current_logic",
+        "no_ath_penalty",
+        "ath_boost_6",
+        "ath_boost_8",
+        "no_uptrend_penalty",
+        "no_ath_penalty_plus_no_uptrend_penalty",
     ]
     assert "score_max" in rows[0]
     assert "score_ge_80_count" in rows[0]
