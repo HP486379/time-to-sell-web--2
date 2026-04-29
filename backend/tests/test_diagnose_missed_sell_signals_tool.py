@@ -53,6 +53,7 @@ class _Ctx:
 def test_parse_index_types():
     assert parse_index_types(None)[0] == "SP500"
     assert "ALLCOUNTRY_JPY" in parse_index_types(None)
+    assert len(parse_index_types(None)) == 7
     assert parse_index_types("SP500,TOPIX") == ["SP500", "TOPIX"]
 
 
@@ -75,14 +76,27 @@ def test_diagnose_index_returns_detail_and_summary(monkeypatch):
     assert result["summary"]["index_type"] == "SP500"
     assert result["summary"]["large_drop_candidate_count"] >= 1
     assert "technical_ge70_total_lt80_count" in result["summary"]
+    assert "macro_ge60_total_lt80_count" in result["summary"]
+    assert "technical_shortage_count" in result["summary"]
+    assert "macro_shortage_count" in result["summary"]
+    assert "gate_shortage_count" in result["summary"]
     assert "macro_drag_suspected_count" in result["summary"]
+    assert "technical_score_distribution" in result["summary"]
+    assert "macro_score_distribution" in result["summary"]
+    assert "technical_high_total_lt80_dates" in result["summary"]
+    assert "macro_high_total_lt80_dates" in result["summary"]
+    assert "gate_closed_by_peakout_or_confirmation_count" in result["summary"]
     assert "event_date_mismatch_count" in result["summary"]
     first = result["details"][0]
     assert "score_shortage_to_80" in first
     assert "sell_gate_open" in first
     assert "blockers" in first
     assert "technical_high_total_shortage" in first
+    assert "macro_high_total_shortage" in first
     assert "macro_drag_suspected" in first
+    assert "technical_shortage" in first
+    assert "macro_shortage" in first
+    assert "gate_shortage" in first
     assert "event_adjustment_is_zero" in first
     assert "event_adjustment_reason" in first
     assert "event_source_count" in first
