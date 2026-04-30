@@ -1094,6 +1094,72 @@ def build_three_index_sell_diagnostic_from_json(input_json: str) -> Dict:
     return {"summary": summary, "details": details}
 
 
+def build_topix_ath_boost_review_from_json(
+    input_json: str,
+    *,
+    index_type: str = "TOPIX",
+    rule_name: str = "ath_boost_8_score80_gate",
+) -> Dict:
+    rows = _read_json_utf8(input_json)
+    by_key = {(r.get("index_type"), r.get("rule_name")): r for r in rows}
+    topix_rule = by_key.get((index_type, rule_name))
+    current = by_key.get((index_type, "current_logic"))
+    if topix_rule is None or current is None:
+        missing = []
+        if topix_rule is None:
+            missing.append({"index_type": index_type, "rule_name": rule_name})
+        if current is None:
+            missing.append({"index_type": index_type, "rule_name": "current_logic"})
+        return {"summary": {"index_type": index_type, "missing_items": missing}, "focus_sell": None, "near_80_days": []}
+
+    focus_date = "2026-02-12"
+    focus_sell_idx = -1
+    for i, d in enumerate(topix_rule.get("sell_dates", [])):
+        if d == focus_date:
+            focus_sell_idx = i
+            break
+    focus_sell = {
+        "index_type": index_type,
+        "rule_name": rule_name,
+        "sell_date": focus_date,
+        "sell_total_score": None,
+        "sell_technical_score": None,
+        "sell_macro_score": None,
+        "sell_event_adjustment": None,
+        "ath_adjustment_delta": 8.0,
+        "current_logic_sell_on_same_date": focus_date in current.get("sell_dates", []),
+        "current_logic_not_sell_reason": "score_below_80_or_gate_blocked",
+        "sell_post_return_20d_pct": topix_rule.get("sell_post_return_20d_pct", [None])[focus_sell_idx] if focus_sell_idx >= 0 and focus_sell_idx < len(topix_rule.get("sell_post_return_20d_pct", [])) else None,
+        "buyback_return_pct": topix_rule.get("buyback_return_pct", [None])[focus_sell_idx] if focus_sell_idx >= 0 and focus_sell_idx < len(topix_rule.get("buyback_return_pct", [])) else None,
+    }
+
+    near_80_days = []
+    for e in topix_rule.get("score_ge_80_sell_gate_details", []):
+        near_80_days.append(
+            {
+                "date": e.get("date"),
+                "forward_20d_pct": e.get("forward_20d_pct"),
+                "forward_60d_pct": e.get("forward_60d_pct"),
+                "sell_gate_open": e.get("sell_gate_open"),
+            }
+        )
+
+    summary = {
+        "index_type": index_type,
+        "rule_name": rule_name,
+        "diff_pct": topix_rule.get("diff_pct"),
+        "bad_sell_count": topix_rule.get("bad_sell_count"),
+        "trade_count": topix_rule.get("trade_count"),
+        "sell_count": topix_rule.get("sell_count"),
+        "buy_count": topix_rule.get("buy_count"),
+        "overfit_risk": "possible_single_cycle" if int(topix_rule.get("sell_count", 0)) <= 1 and int(topix_rule.get("buy_count", 0)) <= 1 else "not_single_cycle",
+        "nikkei225_policy": "keep_current",
+        "nifty50_policy": "keep_current",
+        "missing_items": [],
+    }
+    return {"summary": summary, "focus_sell": focus_sell, "near_80_days": near_80_days}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -1109,6 +1175,7 @@ def main():
     parser.add_argument("--review-index-rules", action="store_true")
     parser.add_argument("--review-allcountry-jpy", action="store_true")
     parser.add_argument("--diagnose-three-index", action="store_true")
+    parser.add_argument("--review-topix-ath-boost", action="store_true")
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -1135,6 +1202,12 @@ def main():
         if not args.input_json or not args.output_json:
             raise ValueError("--diagnose-three-index requires --input-json and --output-json")
         payload = build_three_index_sell_diagnostic_from_json(args.input_json)
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if args.review_topix_ath_boost:
+        if not args.input_json or not args.output_json:
+            raise ValueError("--review-topix-ath-boost requires --input-json and --output-json")
+        payload = build_topix_ath_boost_review_from_json(args.input_json)
         Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 

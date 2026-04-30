@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    build_topix_ath_boost_review_from_json,
     build_three_index_sell_diagnostic_from_json,
     build_allcountry_jpy_bad_sell_review_from_json,
     build_index_rule_review_from_json,
@@ -433,3 +434,58 @@ def test_build_three_index_sell_diagnostic_from_json(tmp_path):
     assert s["TOPIX"]["sell_not_firing_main_reason"] == "gate_blocking_good_candidates"
     assert s["TOPIX"]["bad_sell_main_reason"] == "post_sell_rebound_noise"
     assert s["NIFTY50"]["missing_items"] != []
+
+
+def test_build_topix_ath_boost_review_from_json(tmp_path):
+    rows = [
+        {
+            "index_type": "TOPIX",
+            "rule_name": "current_logic",
+            "sell_dates": ["2024-10-10"],
+            "trade_count": 1,
+            "sell_count": 1,
+            "buy_count": 0,
+        },
+        {
+            "index_type": "TOPIX",
+            "rule_name": "ath_boost_8_score80_gate",
+            "diff_pct": 4.27,
+            "bad_sell_count": 0,
+            "trade_count": 2,
+            "sell_count": 1,
+            "buy_count": 1,
+            "sell_dates": ["2026-02-12"],
+            "sell_post_return_20d_pct": [-3.2],
+            "buyback_return_pct": [-4.8],
+            "score_ge_80_sell_gate_details": [
+                {"date": "2026-02-12", "forward_20d_pct": -3.2, "forward_60d_pct": -6.1, "sell_gate_open": True},
+                {"date": "2025-11-03", "forward_20d_pct": 1.5, "forward_60d_pct": 0.2, "sell_gate_open": False},
+            ],
+        },
+    ]
+    p = tmp_path / "topix_review_in.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_topix_ath_boost_review_from_json(str(p))
+    assert set(out.keys()) == {"summary", "focus_sell", "near_80_days"}
+    assert out["summary"]["index_type"] == "TOPIX"
+    assert out["summary"]["rule_name"] == "ath_boost_8_score80_gate"
+    assert out["summary"]["diff_pct"] == 4.27
+    assert out["summary"]["bad_sell_count"] == 0
+    assert out["summary"]["nikkei225_policy"] == "keep_current"
+    assert out["summary"]["nifty50_policy"] == "keep_current"
+    assert out["focus_sell"]["sell_date"] == "2026-02-12"
+    assert out["focus_sell"]["ath_adjustment_delta"] == 8.0
+    assert out["focus_sell"]["current_logic_sell_on_same_date"] is False
+    assert out["focus_sell"]["sell_post_return_20d_pct"] == -3.2
+    assert out["focus_sell"]["buyback_return_pct"] == -4.8
+    assert len(out["near_80_days"]) == 2
+
+
+def test_build_topix_ath_boost_review_from_json_missing_items(tmp_path):
+    p = tmp_path / "topix_review_missing.json"
+    p.write_text(__import__("json").dumps([]), encoding="utf-8")
+    out = build_topix_ath_boost_review_from_json(str(p))
+    assert out["focus_sell"] is None
+    assert out["near_80_days"] == []
+    assert out["summary"]["index_type"] == "TOPIX"
+    assert len(out["summary"]["missing_items"]) == 2
