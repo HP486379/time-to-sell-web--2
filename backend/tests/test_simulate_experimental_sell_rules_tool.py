@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    build_three_index_sell_diagnostic_from_json,
     build_allcountry_jpy_bad_sell_review_from_json,
     build_index_rule_review_from_json,
     build_portfolio_rule_comparison_from_json,
@@ -395,3 +396,40 @@ def test_build_allcountry_jpy_bad_sell_review_from_json(tmp_path):
     bad = [x for x in out["sell_reviews"] if x["sell_date"] == "2025-11-03"][0]
     assert bad["is_bad_sell"] is True
     assert bad["bad_sell_reason"] == "post_sell_rebound"
+
+
+def test_build_three_index_sell_diagnostic_from_json(tmp_path):
+    rows = [
+        {
+            "index_type": "TOPIX",
+            "rule_name": "current_logic",
+            "trade_count": 1,
+            "sell_dates": ["2025-12-02"],
+            "buy_dates": ["2025-12-30"],
+            "buyback_return_pct": [2.1013],
+            "blocked_good_sell_candidate_count": 1,
+            "bad_sell_count": 1,
+            "sell_gate_blockers": {"peakout_not_detected": 3},
+            "score_ge_80_sell_gate_details": [{"date": "2024-07-05", "sell_gate_open": False, "blockers": ["peakout_not_detected"], "forward_20d_pct": -5.0, "forward_60d_pct": -8.0}],
+        },
+        {
+            "index_type": "NIKKEI225",
+            "rule_name": "current_logic",
+            "trade_count": 0,
+            "sell_dates": [],
+            "buy_dates": [],
+            "buyback_return_pct": [],
+            "blocked_good_sell_candidate_count": 0,
+            "bad_sell_count": 0,
+            "sell_gate_blockers": {},
+            "score_ge_80_sell_gate_details": [],
+        },
+    ]
+    p = tmp_path / "three_index.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_three_index_sell_diagnostic_from_json(str(p))
+    assert set(out.keys()) == {"summary", "details"}
+    s = {x["index_type"]: x for x in out["summary"]}
+    assert s["TOPIX"]["sell_not_firing_main_reason"] == "gate_blocking_good_candidates"
+    assert s["TOPIX"]["bad_sell_main_reason"] == "post_sell_rebound_noise"
+    assert s["NIFTY50"]["missing_items"] != []

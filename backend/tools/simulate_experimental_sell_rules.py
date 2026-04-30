@@ -989,6 +989,111 @@ def build_allcountry_jpy_bad_sell_review_from_json(
     return {"summary": summary, "sell_reviews": reviews}
 
 
+def _read_json_utf8(path: str) -> List[Dict]:
+    text = Path(path).read_text(encoding="utf-8")
+    return json.loads(text)
+
+
+def build_three_index_sell_diagnostic_from_json(input_json: str) -> Dict:
+    rows = _read_json_utf8(input_json)
+    targets = {"TOPIX", "NIKKEI225", "NIFTY50"}
+    details: List[Dict] = []
+    summary: List[Dict] = []
+    by_index: Dict[str, List[Dict]] = {}
+    for r in rows:
+        if r.get("index_type") in targets:
+            by_index.setdefault(r["index_type"], []).append(r)
+
+    for index_type in sorted(targets):
+        idx_rows = by_index.get(index_type, [])
+        current = next((r for r in idx_rows if r.get("rule_name") == "current_logic"), None)
+        if current is None:
+            summary.append(
+                {
+                    "index_type": index_type,
+                    "sell_not_firing_main_reason": "current_logic_missing",
+                    "bad_sell_main_reason": "unknown",
+                    "improvement_focus": "data_completion_required",
+                    "missing_items": [{"index_type": index_type, "rule_name": "current_logic"}],
+                }
+            )
+            continue
+
+        sell_dates = current.get("sell_dates", [])
+        buy_dates = current.get("buy_dates", [])
+        buyback = current.get("buyback_return_pct", [])
+        sell_scores = current.get("score_ge_80_sell_gate_details", [])
+        blockers = current.get("sell_gate_blockers", {})
+        blocked_good = int(current.get("blocked_good_sell_candidate_count", 0))
+        bad_sell_count = int(current.get("bad_sell_count", 0))
+
+        for i, sd in enumerate(sell_dates):
+            details.append(
+                {
+                    "index_type": index_type,
+                    "section": "sell_buy_history",
+                    "sell_date": sd,
+                    "buy_date": buy_dates[i] if i < len(buy_dates) else None,
+                    "sell_score": None,
+                    "buy_score": None,
+                    "buyback_return_pct": buyback[i] if i < len(buyback) else None,
+                    "good_sell": not ((i < len(buyback)) and float(buyback[i]) > 0),
+                    "bad_sell": (i < len(buyback)) and float(buyback[i]) > 0,
+                }
+            )
+
+        for e in sell_scores:
+            details.append(
+                {
+                    "index_type": index_type,
+                    "section": "blocked_by_gate",
+                    "date": e.get("date"),
+                    "total_score": 80.0,
+                    "technical_score": None,
+                    "macro_score": None,
+                    "event_adjustment": None,
+                    "ath_penalty_applied": None,
+                    "strong_uptrend_penalty_applied": None,
+                    "gate_passed": bool(e.get("sell_gate_open")),
+                    "gate_blockers": e.get("blockers", []),
+                    "forward_20d_pct": e.get("forward_20d_pct"),
+                    "forward_60d_pct": e.get("forward_60d_pct"),
+                }
+            )
+
+        for b, cnt in blockers.items():
+            details.append(
+                {
+                    "index_type": index_type,
+                    "section": "gate_blocker_stats",
+                    "blocker": b,
+                    "count": cnt,
+                }
+            )
+
+        sell_not_firing_reason = "score_not_reaching_80"
+        if blocked_good > 0:
+            sell_not_firing_reason = "gate_blocking_good_candidates"
+        bad_sell_reason = "none"
+        if bad_sell_count > 0:
+            bad_sell_reason = "post_sell_rebound_noise"
+        improvement_focus = "inspect_technical_components_and_gate" if blocked_good > 0 else "inspect_technical_macro_balance"
+        summary.append(
+            {
+                "index_type": index_type,
+                "sell_not_firing_main_reason": sell_not_firing_reason,
+                "bad_sell_main_reason": bad_sell_reason,
+                "improvement_focus": improvement_focus,
+                "blocked_good_sell_candidate_count": blocked_good,
+                "bad_sell_count": bad_sell_count,
+                "trade_count": current.get("trade_count", 0),
+                "missing_items": [],
+            }
+        )
+
+    return {"summary": summary, "details": details}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -1003,6 +1108,7 @@ def main():
     parser.add_argument("--portfolio-rules", action="store_true")
     parser.add_argument("--review-index-rules", action="store_true")
     parser.add_argument("--review-allcountry-jpy", action="store_true")
+    parser.add_argument("--diagnose-three-index", action="store_true")
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -1023,6 +1129,12 @@ def main():
         if not args.input_json or not args.output_json:
             raise ValueError("--review-allcountry-jpy requires --input-json and --output-json")
         payload = build_allcountry_jpy_bad_sell_review_from_json(args.input_json)
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if args.diagnose_three_index:
+        if not args.input_json or not args.output_json:
+            raise ValueError("--diagnose-three-index requires --input-json and --output-json")
+        payload = build_three_index_sell_diagnostic_from_json(args.input_json)
         Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 
