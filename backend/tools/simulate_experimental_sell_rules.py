@@ -314,10 +314,67 @@ def _run_simulation_core(
     include_daily_trace: bool = False,
 ) -> Dict:
     svc = ctx.backtest_service
-    raw_history = svc.market_service.get_price_history_range(
-        start_date, end_date, allow_fallback=svc.allow_fallback, index_type=index_type
-    )
-    price_history = svc._prepare_price_history(raw_history, index_type)
+    raw_history = []
+    fetch_error = None
+    try:
+        raw_history = svc.market_service.get_price_history_range(
+            start_date, end_date, allow_fallback=svc.allow_fallback, index_type=index_type
+        )
+    except Exception as exc:
+        fetch_error = str(exc)
+    price_history = []
+    if raw_history:
+        price_history = svc._prepare_price_history(raw_history, index_type)
+    debug_info = {
+        "requested_index_type": index_type,
+        "rows_before_index_filter": len(raw_history),
+        "rows_after_index_filter": len(raw_history),
+        "rows_before_date_filter": len(raw_history),
+        "rows_after_date_filter": len(price_history),
+        "score_input_row_count": len(price_history),
+        "simulation_loop_row_count": 0,
+        "daily_trace_append_count": 0,
+        "skipped_row_reasons": [],
+        "fetch_error": fetch_error,
+    }
+    if fetch_error:
+        debug_info["skipped_row_reasons"].append("local_price_file_not_found")
+    if not raw_history:
+        debug_info["skipped_row_reasons"].append("local_price_file_empty")
+    if not price_history:
+        debug_info["skipped_row_reasons"].append("score_input_empty")
+    if not include_daily_trace:
+        debug_info["skipped_row_reasons"].append("daily_trace_not_enabled")
+    if len(price_history) == 0:
+        return {
+            "final_value": round(initial_cash, 2),
+            "buy_and_hold_final": round(initial_cash, 2),
+            "max_drawdown_pct": 0.0,
+            "trades": [],
+            "price_history": [],
+            "buy_reason_counts": {"initial_threshold": 0, "pattern_a": 0, "pattern_b": 0, "both": 0, "day60": 0},
+            "score_max_before": 0.0,
+            "score_max_after": 0.0,
+            "score_p95_before": 0.0,
+            "score_p95_after": 0.0,
+            "score_distribution_before": {},
+            "score_distribution_after": {},
+            "score_max": 0.0,
+            "score_p95": 0.0,
+            "score_p99": 0.0,
+            "score_ge_80_count": 0,
+            "score_ge_80_dates": [],
+            "score_ge_80_sell_gate_details": [],
+            "score_ge_80_forward_20d_pct": [],
+            "score_ge_80_forward_60d_pct": [],
+            "actual_sell_dates": [],
+            "sell_loss_reasons": [],
+            "sell_gate_blockers": {},
+            "blocked_good_sell_candidate_count": 0,
+            "bad_sell_count": 0,
+            "daily_trace": [],
+            "debug": debug_info,
+        }
     macro_series = svc.macro_service.get_macro_series_range(start_date, end_date)
 
     first_price = price_history[0][1]
@@ -346,6 +403,7 @@ def _run_simulation_core(
     hold_cash -= hold_shares * first_price
 
     for idx, (date_str, close) in enumerate(price_history):
+        debug_info["simulation_loop_row_count"] += 1
         if sell_cooldown_days_remaining > 0:
             sell_cooldown_days_remaining -= 1
         if days_since_last_sell is not None:
@@ -521,6 +579,7 @@ def _run_simulation_core(
                         "forward_60d_pct": fwd60,
                     }
                 )
+                debug_info["daily_trace_append_count"] += 1
             if should_sell:
                 trades.append(
                     {
@@ -613,6 +672,7 @@ def _run_simulation_core(
         "blocked_good_sell_candidate_count": blocked_good_sell_candidate_count,
         "bad_sell_count": bad_sell_count,
         "daily_trace": daily_trace if include_daily_trace else [],
+        "debug": debug_info,
     }
 
 
@@ -1301,6 +1361,8 @@ def build_topix_daily_score_breakdown_review(
     )
     current_trace = current.get("daily_trace", [])
     ath_trace = ath.get("daily_trace", [])
+    current_debug = current.get("debug", {})
+    ath_debug = ath.get("debug", {})
     cur_map = {x["date"]: x for x in current_trace}
     ath_map = {x["date"]: x for x in ath_trace}
     all_dates = sorted(set(cur_map.keys()) | set(ath_map.keys()))
@@ -1351,8 +1413,24 @@ def build_topix_daily_score_breakdown_review(
         base = date.fromisoformat(focus_date)
         focus_window_dates = [d for d in all_dates if abs((date.fromisoformat(d) - base).days) <= 14]
 
+    backtest_service = getattr(ctx, "backtest_service", None)
+    market_service = getattr(backtest_service, "market_service", None)
+    cache_dir = getattr(market_service, "_cache_dir", None)
+    symbol_map = getattr(market_service, "symbol_map", {}) if market_service is not None else {}
     debug = {
-        "available_index_types": ["TOPIX"],
+        "local_price_data_path": str(cache_dir) if cache_dir else None,
+        "local_price_data_exists": bool(cache_dir and cache_dir.exists()),
+        "local_price_row_count": int(current_debug.get("rows_before_date_filter", 0)),
+        "local_price_date_min": current_trace[0]["date"] if current_trace else None,
+        "local_price_date_max": current_trace[-1]["date"] if current_trace else None,
+        "loaded_index_type_candidates": sorted(list(symbol_map.keys())),
+        "requested_index_type": "TOPIX",
+        "rows_before_index_filter": current_debug.get("rows_before_index_filter"),
+        "rows_after_index_filter": current_debug.get("rows_after_index_filter"),
+        "rows_before_date_filter": current_debug.get("rows_before_date_filter"),
+        "rows_after_date_filter": current_debug.get("rows_after_date_filter"),
+        "score_input_row_count": current_debug.get("score_input_row_count"),
+        "available_index_types": sorted(list(symbol_map.keys())),
         "topix_row_count": len(all_dates),
         "topix_date_min": all_dates[0] if all_dates else None,
         "topix_date_max": all_dates[-1] if all_dates else None,
@@ -1362,6 +1440,9 @@ def build_topix_daily_score_breakdown_review(
         "simulation_trace_row_count": len(all_dates),
         "current_logic_trace_row_count": len(current_trace),
         "ath_boost_8_score80_gate_trace_row_count": len(ath_trace),
+        "simulation_loop_row_count": current_debug.get("simulation_loop_row_count"),
+        "daily_trace_append_count": current_debug.get("daily_trace_append_count"),
+        "skipped_row_reasons": sorted(list(set(list(current_debug.get("skipped_row_reasons", [])) + list(ath_debug.get("skipped_row_reasons", []))))),
     }
     summary = {
         "index_type": "TOPIX",

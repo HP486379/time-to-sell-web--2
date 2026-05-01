@@ -593,5 +593,31 @@ def test_build_topix_daily_score_breakdown_review_with_missing_focus_date(monkey
     assert out["debug"]["topix_row_count"] == 2
     assert out["debug"]["topix_date_min"] == "2026-02-10"
     assert out["debug"]["topix_date_max"] == "2026-02-13"
-    assert out["debug"]["available_index_types"] == ["TOPIX"]
+    assert out["debug"]["available_index_types"] == []
+    assert out["debug"]["daily_trace_append_count"] == out["debug"]["simulation_loop_row_count"]
     assert len(out["daily_rows"]) == 2
+
+
+def test_build_topix_daily_score_breakdown_review_empty_trace_debug(monkeypatch):
+    class _M:
+        symbol_map = {"SP500": "^GSPC", "TOPIX": "1306.T"}
+        _cache_dir = __import__("pathlib").Path(".")
+
+    class _B:
+        market_service = _M()
+
+    def _fake_build_context():
+        return type("C", (), {"backtest_service": _B()})()
+
+    def _fake_run(ctx, **kwargs):
+        return {"daily_trace": [], "debug": {"rows_before_date_filter": 0, "rows_before_index_filter": 0, "rows_after_index_filter": 0, "rows_after_date_filter": 0, "score_input_row_count": 0, "simulation_loop_row_count": 0, "daily_trace_append_count": 0, "skipped_row_reasons": ["score_input_empty"]}}
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._build_context", _fake_build_context)
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_run)
+    out = build_topix_daily_score_breakdown_review()
+    assert out["summary"]["data_last_date"] is None
+    assert "simulation trace produced zero rows" in out["summary"]["missing_items"]
+    assert out["debug"]["local_price_row_count"] == 0
+    assert out["debug"]["available_index_types"] == ["SP500", "TOPIX"]
+    assert out["debug"]["simulation_loop_row_count"] == 0
+    assert out["debug"]["daily_trace_append_count"] == 0
