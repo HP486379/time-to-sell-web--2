@@ -445,6 +445,17 @@ def test_build_topix_ath_boost_review_from_json(tmp_path):
             "trade_count": 1,
             "sell_count": 1,
             "buy_count": 0,
+            "score_ge_80_sell_gate_details": [
+                {
+                    "date": "2026-02-12",
+                    "total_score": 79.2,
+                    "technical_score": 70.0,
+                    "macro_score": 84.0,
+                    "event_adjustment": 0.5,
+                    "sell_gate_open": False,
+                    "blockers": ["peakout_not_detected"],
+                }
+            ],
         },
         {
             "index_type": "TOPIX",
@@ -458,7 +469,17 @@ def test_build_topix_ath_boost_review_from_json(tmp_path):
             "sell_post_return_20d_pct": [-3.2],
             "buyback_return_pct": [-4.8],
             "score_ge_80_sell_gate_details": [
-                {"date": "2026-02-12", "forward_20d_pct": -3.2, "forward_60d_pct": -6.1, "sell_gate_open": True},
+                {
+                    "date": "2026-02-12",
+                    "total_score": 84.8,
+                    "technical_score": 78.0,
+                    "macro_score": 84.0,
+                    "event_adjustment": 0.5,
+                    "forward_20d_pct": -3.2,
+                    "forward_60d_pct": -6.1,
+                    "sell_gate_open": True,
+                    "blockers": [],
+                },
                 {"date": "2025-11-03", "forward_20d_pct": 1.5, "forward_60d_pct": 0.2, "sell_gate_open": False},
             ],
         },
@@ -476,8 +497,20 @@ def test_build_topix_ath_boost_review_from_json(tmp_path):
     assert out["focus_sell"]["sell_date"] == "2026-02-12"
     assert out["focus_sell"]["ath_adjustment_delta"] == 8.0
     assert out["focus_sell"]["current_logic_sell_on_same_date"] is False
+    assert out["focus_sell"]["sell_total_score"] is not None
+    assert out["focus_sell"]["sell_technical_score"] is not None
+    assert out["focus_sell"]["sell_macro_score"] is not None
+    assert out["focus_sell"]["sell_event_adjustment"] is not None
+    assert out["focus_sell"]["current_logic_not_sell_reason"] in {
+        "score_below_80",
+        "gate_blocked",
+        "score_below_80_and_gate_blocked",
+        "unknown_missing_data",
+    }
+    assert out["focus_sell"]["current_logic_not_sell_reason"] != "score_below_80_or_gate_blocked"
     assert out["focus_sell"]["sell_post_return_20d_pct"] == -3.2
     assert out["focus_sell"]["buyback_return_pct"] == -4.8
+    assert out["summary"]["missing_items"] == []
     assert len(out["near_80_days"]) == 2
 
 
@@ -489,3 +522,17 @@ def test_build_topix_ath_boost_review_from_json_missing_items(tmp_path):
     assert out["near_80_days"] == []
     assert out["summary"]["index_type"] == "TOPIX"
     assert len(out["summary"]["missing_items"]) == 2
+
+
+def test_build_topix_ath_boost_review_from_json_reports_breakdown_missing(tmp_path):
+    rows = [
+        {"index_type": "TOPIX", "rule_name": "current_logic", "sell_dates": [], "score_ge_80_sell_gate_details": [{"date": "2026-02-12", "sell_gate_open": False}]},
+        {"index_type": "TOPIX", "rule_name": "ath_boost_8_score80_gate", "sell_dates": ["2026-02-12"], "score_ge_80_sell_gate_details": [{"date": "2026-02-12", "sell_gate_open": True}]},
+    ]
+    p = tmp_path / "topix_review_missing_breakdown.json"
+    p.write_text(__import__("json").dumps(rows), encoding="utf-8")
+    out = build_topix_ath_boost_review_from_json(str(p))
+    assert out["focus_sell"]["sell_total_score"] is None
+    assert "daily score breakdown is not present in input json" in out["summary"]["missing_items"]
+    assert "technical_score is unavailable from gate_variants_80_40_all.json" in out["summary"]["missing_items"]
+    assert "macro_score is unavailable from gate_variants_80_40_all.json" in out["summary"]["missing_items"]

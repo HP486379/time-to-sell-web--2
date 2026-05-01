@@ -1118,17 +1118,79 @@ def build_topix_ath_boost_review_from_json(
         if d == focus_date:
             focus_sell_idx = i
             break
+    missing_items: List[str] = []
+
+    def _score_entry(rule_row: Dict, target_date: str) -> Dict | None:
+        for x in rule_row.get("score_ge_80_sell_gate_details", []):
+            if x.get("date") == target_date:
+                return x
+        return None
+
+    current_focus = _score_entry(current, focus_date)
+    ath_focus = _score_entry(topix_rule, focus_date)
+
+    def _read_score(entry: Dict | None, key: str, missing_msg: str):
+        if entry is None:
+            if missing_msg not in missing_items:
+                missing_items.append(missing_msg)
+            return None
+        if key not in entry:
+            if missing_msg not in missing_items:
+                missing_items.append(missing_msg)
+            return None
+        return entry.get(key)
+
+    current_total = _read_score(current_focus, "total_score", "daily score breakdown is not present in input json")
+    current_technical = _read_score(current_focus, "technical_score", "technical_score is unavailable from gate_variants_80_40_all.json")
+    current_macro = _read_score(current_focus, "macro_score", "macro_score is unavailable from gate_variants_80_40_all.json")
+    current_event = _read_score(current_focus, "event_adjustment", "event_adjustment is unavailable from gate_variants_80_40_all.json")
+    ath_total = _read_score(ath_focus, "total_score", "daily score breakdown is not present in input json")
+    ath_technical = _read_score(ath_focus, "technical_score", "technical_score is unavailable from gate_variants_80_40_all.json")
+    ath_macro = _read_score(ath_focus, "macro_score", "macro_score is unavailable from gate_variants_80_40_all.json")
+    ath_event = _read_score(ath_focus, "event_adjustment", "event_adjustment is unavailable from gate_variants_80_40_all.json")
+
+    current_gate_open = current_focus.get("sell_gate_open") if current_focus else None
+    current_gate_blockers = current_focus.get("blockers", []) if current_focus else []
+    ath_gate_open = ath_focus.get("sell_gate_open") if ath_focus else None
+    ath_gate_blockers = ath_focus.get("blockers", []) if ath_focus else []
+
+    if current_total is None or current_gate_open is None:
+        current_reason = "unknown_missing_data"
+    else:
+        below = float(current_total) < 80.0
+        blocked = not bool(current_gate_open)
+        if below and blocked:
+            current_reason = "score_below_80_and_gate_blocked"
+        elif below:
+            current_reason = "score_below_80"
+        elif blocked:
+            current_reason = "gate_blocked"
+        else:
+            current_reason = "unknown_missing_data"
+
     focus_sell = {
         "index_type": index_type,
         "rule_name": rule_name,
         "sell_date": focus_date,
-        "sell_total_score": None,
-        "sell_technical_score": None,
-        "sell_macro_score": None,
-        "sell_event_adjustment": None,
+        "sell_total_score": ath_total,
+        "sell_technical_score": ath_technical,
+        "sell_macro_score": ath_macro,
+        "sell_event_adjustment": ath_event,
+        "current_logic_total_score": current_total,
+        "current_logic_technical_score": current_technical,
+        "current_logic_macro_score": current_macro,
+        "current_logic_event_adjustment": current_event,
+        "current_logic_sell_gate_open": current_gate_open,
+        "current_logic_gate_blockers": current_gate_blockers,
+        "ath_boost_total_score": ath_total,
+        "ath_boost_technical_score": ath_technical,
+        "ath_boost_macro_score": ath_macro,
+        "ath_boost_event_adjustment": ath_event,
+        "ath_boost_sell_gate_open": ath_gate_open,
+        "ath_boost_gate_blockers": ath_gate_blockers,
         "ath_adjustment_delta": 8.0,
         "current_logic_sell_on_same_date": focus_date in current.get("sell_dates", []),
-        "current_logic_not_sell_reason": "score_below_80_or_gate_blocked",
+        "current_logic_not_sell_reason": current_reason,
         "sell_post_return_20d_pct": topix_rule.get("sell_post_return_20d_pct", [None])[focus_sell_idx] if focus_sell_idx >= 0 and focus_sell_idx < len(topix_rule.get("sell_post_return_20d_pct", [])) else None,
         "buyback_return_pct": topix_rule.get("buyback_return_pct", [None])[focus_sell_idx] if focus_sell_idx >= 0 and focus_sell_idx < len(topix_rule.get("buyback_return_pct", [])) else None,
     }
@@ -1138,9 +1200,16 @@ def build_topix_ath_boost_review_from_json(
         near_80_days.append(
             {
                 "date": e.get("date"),
+                "total_score": e.get("total_score"),
+                "technical_score": e.get("technical_score"),
+                "macro_score": e.get("macro_score"),
+                "event_adjustment": e.get("event_adjustment"),
+                "current_logic_score": current_total if e.get("date") == focus_date else None,
+                "ath_boost_score": ath_total if e.get("date") == focus_date else e.get("total_score"),
                 "forward_20d_pct": e.get("forward_20d_pct"),
                 "forward_60d_pct": e.get("forward_60d_pct"),
                 "sell_gate_open": e.get("sell_gate_open"),
+                "gate_blockers": e.get("blockers", []),
             }
         )
 
@@ -1155,7 +1224,7 @@ def build_topix_ath_boost_review_from_json(
         "overfit_risk": "possible_single_cycle" if int(topix_rule.get("sell_count", 0)) <= 1 and int(topix_rule.get("buy_count", 0)) <= 1 else "not_single_cycle",
         "nikkei225_policy": "keep_current",
         "nifty50_policy": "keep_current",
-        "missing_items": [],
+        "missing_items": missing_items,
     }
     return {"summary": summary, "focus_sell": focus_sell, "near_80_days": near_80_days}
 
