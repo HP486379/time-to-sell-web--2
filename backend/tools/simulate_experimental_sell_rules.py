@@ -1299,8 +1299,10 @@ def build_topix_daily_score_breakdown_review(
         score_ma=200,
         include_daily_trace=True,
     )
-    cur_map = {x["date"]: x for x in current.get("daily_trace", [])}
-    ath_map = {x["date"]: x for x in ath.get("daily_trace", [])}
+    current_trace = current.get("daily_trace", [])
+    ath_trace = ath.get("daily_trace", [])
+    cur_map = {x["date"]: x for x in current_trace}
+    ath_map = {x["date"]: x for x in ath_trace}
     all_dates = sorted(set(cur_map.keys()) | set(ath_map.keys()))
     daily_rows = []
     for d in all_dates:
@@ -1324,25 +1326,59 @@ def build_topix_daily_score_breakdown_review(
                 "forward_60d_pct": c.get("forward_60d_pct"),
             }
         )
-    focus_cur = cur_map.get(focus_date, {})
-    focus_ath = ath_map.get(focus_date, {})
+    focus_exact = focus_date in cur_map and focus_date in ath_map
+    used_nearest_date = None
+    if all_dates:
+        nearest = min(all_dates, key=lambda d: abs((date.fromisoformat(d) - date.fromisoformat(focus_date)).days))
+        used_nearest_date = nearest
+    lookup_date = focus_date if focus_exact else used_nearest_date
+    focus_cur = cur_map.get(lookup_date, {}) if lookup_date else {}
+    focus_ath = ath_map.get(lookup_date, {}) if lookup_date else {}
     missing_items = []
-    if not focus_cur or not focus_ath:
-        missing_items.append("focus date row is unavailable from local simulation trace")
+    if not current_trace and not ath_trace:
+        missing_items.append("simulation trace produced zero rows")
+        missing_items.append("topix_trace_not_generated")
+    if not all_dates:
+        missing_items.append("local_data_does_not_include_focus_date")
+    elif not focus_exact:
+        if date.fromisoformat(focus_date) < date.fromisoformat(all_dates[0]) or date.fromisoformat(focus_date) > date.fromisoformat(all_dates[-1]):
+            missing_items.append("focus_date_out_of_range")
+        else:
+            missing_items.append("local_data_does_not_include_focus_date")
+
+    focus_window_dates = []
+    if all_dates:
+        base = date.fromisoformat(focus_date)
+        focus_window_dates = [d for d in all_dates if abs((date.fromisoformat(d) - base).days) <= 14]
+
+    debug = {
+        "available_index_types": ["TOPIX"],
+        "topix_row_count": len(all_dates),
+        "topix_date_min": all_dates[0] if all_dates else None,
+        "topix_date_max": all_dates[-1] if all_dates else None,
+        "data_last_date": all_dates[-1] if all_dates else None,
+        "focus_date_exists": focus_exact,
+        "available_dates_around_focus": focus_window_dates,
+        "simulation_trace_row_count": len(all_dates),
+        "current_logic_trace_row_count": len(current_trace),
+        "ath_boost_8_score80_gate_trace_row_count": len(ath_trace),
+    }
     summary = {
         "index_type": "TOPIX",
         "focus_rule": "ath_boost_8_score80_gate",
         "focus_date": focus_date,
         "data_source": "local_backtest_services_and_local_files",
-        "data_last_date": all_dates[-1] if all_dates else None,
+        "data_last_date": debug["data_last_date"],
         "comparable_with_baseline": False,
         "missing_items": missing_items,
+        "focus_date_exact_match": focus_exact,
+        "used_nearest_date": used_nearest_date if not focus_exact else focus_date,
         "warnings": [
             "baseline-approved JSON and regenerated JSON were reported as non-identical; this output is derived from local simulation path."
         ],
     }
     focus_date_comparison = {
-        "date": focus_date,
+        "date": lookup_date,
         "current_logic_total_score": focus_cur.get("total_score"),
         "current_logic_technical_score": focus_cur.get("technical_score"),
         "current_logic_macro_score": focus_cur.get("macro_score"),
@@ -1361,7 +1397,7 @@ def build_topix_daily_score_breakdown_review(
         "forward_20d_pct": focus_cur.get("forward_20d_pct"),
         "forward_60d_pct": focus_cur.get("forward_60d_pct"),
     }
-    return {"summary": summary, "focus_date_comparison": focus_date_comparison, "daily_rows": daily_rows}
+    return {"summary": summary, "focus_date_comparison": focus_date_comparison, "daily_rows": daily_rows, "debug": debug}
 
 
 def main():

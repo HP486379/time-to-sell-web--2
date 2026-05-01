@@ -559,12 +559,39 @@ def test_build_topix_daily_score_breakdown_review(monkeypatch):
     monkeypatch.setattr("tools.simulate_experimental_sell_rules._build_context", _fake_build_context)
     monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_run)
     out = build_topix_daily_score_breakdown_review()
-    assert set(out.keys()) == {"summary", "focus_date_comparison", "daily_rows"}
+    assert set(out.keys()) == {"summary", "focus_date_comparison", "daily_rows", "debug"}
     assert out["summary"]["index_type"] == "TOPIX"
     assert out["summary"]["focus_rule"] == "ath_boost_8_score80_gate"
     assert out["summary"]["comparable_with_baseline"] is False
+    assert out["summary"]["focus_date_exact_match"] is True
     assert out["focus_date_comparison"]["date"] == "2026-02-12"
     assert out["focus_date_comparison"]["current_logic_total_score"] == 79.0
     assert out["focus_date_comparison"]["ath_boost_total_score"] == 84.0
     assert out["focus_date_comparison"]["ath_adjustment_delta"] == 8.0
     assert len(out["daily_rows"]) == 1
+
+
+def test_build_topix_daily_score_breakdown_review_with_missing_focus_date(monkeypatch):
+    def _fake_build_context():
+        return object()
+
+    def _fake_run(ctx, **kwargs):
+        return {
+            "daily_trace": [
+                {"date": "2026-02-10", "close": 100.0, "total_score": 78.0, "technical_score": 69.0, "macro_score": 84.0, "event_adjustment": 0.0, "sell_signal": False, "sell_gate_open": False, "gate_blockers": ["peakout_not_detected"], "forward_20d_pct": -1.0, "forward_60d_pct": -2.0},
+                {"date": "2026-02-13", "close": 101.0, "total_score": 81.0, "technical_score": 72.0, "macro_score": 85.0, "event_adjustment": 0.0, "sell_signal": True, "sell_gate_open": True, "gate_blockers": [], "forward_20d_pct": -2.0, "forward_60d_pct": -3.0},
+            ]
+        }
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._build_context", _fake_build_context)
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_run)
+    out = build_topix_daily_score_breakdown_review()
+    assert out["summary"]["data_last_date"] == "2026-02-13"
+    assert out["summary"]["focus_date_exact_match"] is False
+    assert out["summary"]["used_nearest_date"] in {"2026-02-10", "2026-02-13"}
+    assert "local_data_does_not_include_focus_date" in out["summary"]["missing_items"]
+    assert out["debug"]["topix_row_count"] == 2
+    assert out["debug"]["topix_date_min"] == "2026-02-10"
+    assert out["debug"]["topix_date_max"] == "2026-02-13"
+    assert out["debug"]["available_index_types"] == ["TOPIX"]
+    assert len(out["daily_rows"]) == 2
