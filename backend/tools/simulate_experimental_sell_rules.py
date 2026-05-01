@@ -311,6 +311,7 @@ def _run_simulation_core(
     score_ma: int,
     calibration_config: CalibrationConfig | None = None,
     weight_adjust_config: WeightAdjustConfig | None = None,
+    include_daily_trace: bool = False,
 ) -> Dict:
     svc = ctx.backtest_service
     raw_history = svc.market_service.get_price_history_range(
@@ -337,6 +338,7 @@ def _run_simulation_core(
     score_ge_80_events: List[Dict] = []
     sell_gate_blockers_counter: Counter[str] = Counter()
     blocked_good_sell_candidate_count = 0
+    daily_trace: List[Dict] = []
 
     hold_cash = initial_cash
     first_price = price_history[0][1]
@@ -485,6 +487,40 @@ def _run_simulation_core(
                 and float(technical_score) >= technical_threshold
             )
             should_sell = current_logic_sell if technical_threshold is None else experimental_sell
+            if include_daily_trace:
+                fwd20 = None
+                fwd60 = None
+                if idx + 20 < len(price_history):
+                    fwd20 = round(((price_history[idx + 20][1] / close) - 1) * 100, 4)
+                if idx + 60 < len(price_history):
+                    fwd60 = round(((price_history[idx + 60][1] / close) - 1) * 100, 4)
+                blockers_snapshot: List[str] = []
+                if not sell_gate_open:
+                    if not overheat_event_active:
+                        blockers_snapshot.append("overheat_event_inactive")
+                    if not peakout_detected:
+                        blockers_snapshot.append("peakout_not_detected")
+                    if not confirmation_detected:
+                        blockers_snapshot.append("confirmation_not_detected")
+                if cooldown_active:
+                    blockers_snapshot.append("cooldown_active")
+                if shares <= 0:
+                    blockers_snapshot.append("no_shares")
+                daily_trace.append(
+                    {
+                        "date": date_str,
+                        "close": close,
+                        "total_score": float(total_score),
+                        "technical_score": float(technical_score),
+                        "macro_score": float(snapshot["macro_score"]),
+                        "event_adjustment": float(snapshot["event_adjustment"]),
+                        "sell_signal": bool(should_sell),
+                        "sell_gate_open": bool(sell_gate_open and not cooldown_active and shares > 0),
+                        "gate_blockers": blockers_snapshot,
+                        "forward_20d_pct": fwd20,
+                        "forward_60d_pct": fwd60,
+                    }
+                )
             if should_sell:
                 trades.append(
                     {
@@ -576,6 +612,7 @@ def _run_simulation_core(
         "sell_gate_blockers": dict(sell_gate_blockers_counter),
         "blocked_good_sell_candidate_count": blocked_good_sell_candidate_count,
         "bad_sell_count": bad_sell_count,
+        "daily_trace": daily_trace if include_daily_trace else [],
     }
 
 
@@ -1229,6 +1266,104 @@ def build_topix_ath_boost_review_from_json(
     return {"summary": summary, "focus_sell": focus_sell, "near_80_days": near_80_days}
 
 
+def build_topix_daily_score_breakdown_review(
+    *,
+    start_date: date = date(2026, 2, 1),
+    end_date: date = date(2026, 3, 18),
+    focus_date: str = "2026-02-12",
+) -> Dict:
+    ctx = _build_context()
+    current = _run_simulation_core(
+        ctx,
+        index_type="TOPIX",
+        rule_name="current_logic",
+        sell_threshold=80.0,
+        technical_threshold=None,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=200,
+        include_daily_trace=True,
+    )
+    ath = _run_simulation_core(
+        ctx,
+        index_type="TOPIX",
+        rule_name="ath_boost_8_score80_gate",
+        sell_threshold=80.0,
+        technical_threshold=None,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=200,
+        include_daily_trace=True,
+    )
+    cur_map = {x["date"]: x for x in current.get("daily_trace", [])}
+    ath_map = {x["date"]: x for x in ath.get("daily_trace", [])}
+    all_dates = sorted(set(cur_map.keys()) | set(ath_map.keys()))
+    daily_rows = []
+    for d in all_dates:
+        c = cur_map.get(d, {})
+        a = ath_map.get(d, {})
+        daily_rows.append(
+            {
+                "date": d,
+                "close": c.get("close", a.get("close")),
+                "current_logic_total_score": c.get("total_score"),
+                "ath_boost_total_score": a.get("total_score"),
+                "technical_score": c.get("technical_score"),
+                "macro_score": c.get("macro_score"),
+                "event_adjustment": c.get("event_adjustment"),
+                "ath_adjustment_delta": (a.get("technical_score") - c.get("technical_score")) if c.get("technical_score") is not None and a.get("technical_score") is not None else None,
+                "sell_signal_current_logic": c.get("sell_signal"),
+                "sell_signal_ath_boost_8_score80_gate": a.get("sell_signal"),
+                "sell_gate_open": c.get("sell_gate_open"),
+                "gate_blockers": c.get("gate_blockers", []),
+                "forward_20d_pct": c.get("forward_20d_pct"),
+                "forward_60d_pct": c.get("forward_60d_pct"),
+            }
+        )
+    focus_cur = cur_map.get(focus_date, {})
+    focus_ath = ath_map.get(focus_date, {})
+    missing_items = []
+    if not focus_cur or not focus_ath:
+        missing_items.append("focus date row is unavailable from local simulation trace")
+    summary = {
+        "index_type": "TOPIX",
+        "focus_rule": "ath_boost_8_score80_gate",
+        "focus_date": focus_date,
+        "data_source": "local_backtest_services_and_local_files",
+        "data_last_date": all_dates[-1] if all_dates else None,
+        "comparable_with_baseline": False,
+        "missing_items": missing_items,
+        "warnings": [
+            "baseline-approved JSON and regenerated JSON were reported as non-identical; this output is derived from local simulation path."
+        ],
+    }
+    focus_date_comparison = {
+        "date": focus_date,
+        "current_logic_total_score": focus_cur.get("total_score"),
+        "current_logic_technical_score": focus_cur.get("technical_score"),
+        "current_logic_macro_score": focus_cur.get("macro_score"),
+        "current_logic_event_adjustment": focus_cur.get("event_adjustment"),
+        "current_logic_sell_signal": focus_cur.get("sell_signal"),
+        "current_logic_sell_gate_open": focus_cur.get("sell_gate_open"),
+        "current_logic_gate_blockers": focus_cur.get("gate_blockers", []),
+        "ath_boost_total_score": focus_ath.get("total_score"),
+        "ath_boost_technical_score": focus_ath.get("technical_score"),
+        "ath_boost_macro_score": focus_ath.get("macro_score"),
+        "ath_boost_event_adjustment": focus_ath.get("event_adjustment"),
+        "ath_boost_sell_signal": focus_ath.get("sell_signal"),
+        "ath_boost_sell_gate_open": focus_ath.get("sell_gate_open"),
+        "ath_boost_gate_blockers": focus_ath.get("gate_blockers", []),
+        "ath_adjustment_delta": (focus_ath.get("technical_score") - focus_cur.get("technical_score")) if focus_cur.get("technical_score") is not None and focus_ath.get("technical_score") is not None else None,
+        "forward_20d_pct": focus_cur.get("forward_20d_pct"),
+        "forward_60d_pct": focus_cur.get("forward_60d_pct"),
+    }
+    return {"summary": summary, "focus_date_comparison": focus_date_comparison, "daily_rows": daily_rows}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -1245,6 +1380,7 @@ def main():
     parser.add_argument("--review-allcountry-jpy", action="store_true")
     parser.add_argument("--diagnose-three-index", action="store_true")
     parser.add_argument("--review-topix-ath-boost", action="store_true")
+    parser.add_argument("--review-topix-daily-breakdown", action="store_true")
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -1277,6 +1413,12 @@ def main():
         if not args.input_json or not args.output_json:
             raise ValueError("--review-topix-ath-boost requires --input-json and --output-json")
         payload = build_topix_ath_boost_review_from_json(args.input_json)
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if args.review_topix_daily_breakdown:
+        if not args.output_json:
+            raise ValueError("--review-topix-daily-breakdown requires --output-json")
+        payload = build_topix_daily_score_breakdown_review()
         Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 

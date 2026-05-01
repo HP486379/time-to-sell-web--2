@@ -3,6 +3,7 @@ from datetime import date
 from tools.simulate_experimental_sell_rules import (
     _run_simulation_core,
     _summarize_rule_result,
+    build_topix_daily_score_breakdown_review,
     build_topix_ath_boost_review_from_json,
     build_three_index_sell_diagnostic_from_json,
     build_allcountry_jpy_bad_sell_review_from_json,
@@ -536,3 +537,34 @@ def test_build_topix_ath_boost_review_from_json_reports_breakdown_missing(tmp_pa
     assert "daily score breakdown is not present in input json" in out["summary"]["missing_items"]
     assert "technical_score is unavailable from gate_variants_80_40_all.json" in out["summary"]["missing_items"]
     assert "macro_score is unavailable from gate_variants_80_40_all.json" in out["summary"]["missing_items"]
+
+
+def test_build_topix_daily_score_breakdown_review(monkeypatch):
+    def _fake_build_context():
+        return object()
+
+    def _fake_run(ctx, **kwargs):
+        if kwargs["rule_name"] == "current_logic":
+            return {
+                "daily_trace": [
+                    {"date": "2026-02-12", "close": 100.0, "total_score": 79.0, "technical_score": 70.0, "macro_score": 84.0, "event_adjustment": 0.5, "sell_signal": False, "sell_gate_open": False, "gate_blockers": ["peakout_not_detected"], "forward_20d_pct": -2.0, "forward_60d_pct": -4.0},
+                ]
+            }
+        return {
+            "daily_trace": [
+                {"date": "2026-02-12", "close": 100.0, "total_score": 84.0, "technical_score": 78.0, "macro_score": 84.0, "event_adjustment": 0.5, "sell_signal": True, "sell_gate_open": True, "gate_blockers": [], "forward_20d_pct": -2.0, "forward_60d_pct": -4.0},
+            ]
+        }
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._build_context", _fake_build_context)
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_run)
+    out = build_topix_daily_score_breakdown_review()
+    assert set(out.keys()) == {"summary", "focus_date_comparison", "daily_rows"}
+    assert out["summary"]["index_type"] == "TOPIX"
+    assert out["summary"]["focus_rule"] == "ath_boost_8_score80_gate"
+    assert out["summary"]["comparable_with_baseline"] is False
+    assert out["focus_date_comparison"]["date"] == "2026-02-12"
+    assert out["focus_date_comparison"]["current_logic_total_score"] == 79.0
+    assert out["focus_date_comparison"]["ath_boost_total_score"] == 84.0
+    assert out["focus_date_comparison"]["ath_adjustment_delta"] == 8.0
+    assert len(out["daily_rows"]) == 1
