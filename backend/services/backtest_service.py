@@ -14,6 +14,11 @@ from scoring.total_score import calculate_total_score
 
 logger = logging.getLogger(__name__)
 
+INDEX_SELL_RULE_MAP = {
+    "SP500_JPY": "ath_boost_8_score80_gate",
+    "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
+}
+
 
 class BacktestService:
     def __init__(self, market_service, macro_service, event_service):
@@ -41,6 +46,18 @@ class BacktestService:
         if not math.isfinite(number):
             raise ValueError(f"invalid_{field_name}:non_finite({value!r})")
         return number
+
+    def _get_sell_rule_name(self, index_type: str) -> str:
+        return INDEX_SELL_RULE_MAP.get(index_type, "current_logic")
+
+    def _apply_technical_sell_variant(self, rule_name: str, technical_score: float, closes: List[float]) -> float:
+        adjusted = technical_score
+        is_60d_high = len(closes) >= 60 and closes[-1] >= max(closes[-60:])
+        if rule_name == "ath_boost_8_score80_gate" and is_60d_high:
+            adjusted += 8.0
+        if rule_name == "no_ath_penalty_score80_gate" and is_60d_high:
+            adjusted += 12.0
+        return max(0.0, min(100.0, float(adjusted)))
 
     def _prepare_price_history(
         self, raw_history: List[Tuple[str, float]], index_type: str
@@ -243,6 +260,25 @@ class BacktestService:
                 score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
                 score = self._safe_float(score, field_name="score")
                 closes = [p[1] for p in sub_history]
+                sell_rule_name = self._get_sell_rule_name(index_type)
+                if sell_rule_name != "current_logic":
+                    technical_score, _ = calculate_technical_score(sub_history, base_window=score_ma)
+                    technical_score = self._apply_technical_sell_variant(sell_rule_name, technical_score, closes)
+                    r_hist, r_cur = self._history_and_current(macro_series["r_10y"], current_dt)
+                    cpi_hist, cpi_cur = self._history_and_current(macro_series["cpi"], current_dt)
+                    vix_hist, vix_cur = self._history_and_current(macro_series["vix"], current_dt)
+                    macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
+                    events = self.event_service.get_events_for_date(current_dt)
+                    event_adjustment, _ = calculate_event_adjustment(current_dt, events)
+                    ma500, ma1000 = calculate_ultra_long_mas(sub_history)
+                    score = calculate_total_score(
+                        technical_score,
+                        macro_score,
+                        event_adjustment,
+                        current_price=close,
+                        ma500=ma500,
+                        ma1000=ma1000,
+                    )
                 ma20_series = moving_average(closes, 20)
                 ma50_series = moving_average(closes, 50)
 
@@ -270,6 +306,8 @@ class BacktestService:
 
                 overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
                 sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
+                if sell_rule_name in {"ath_boost_8_score80_gate", "no_ath_penalty_score80_gate"}:
+                    sell_gate_open = shares > 0 and score >= sell_threshold_safe
                 cooldown_active = sell_cooldown_days_remaining > 0
                 score_t2 = recent_scores[-3] if len(recent_scores) >= 3 else None
                 score_t1 = recent_scores[-2] if len(recent_scores) >= 2 else None
