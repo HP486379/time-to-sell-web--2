@@ -336,6 +336,22 @@ def _run_simulation_core(
         "daily_trace_append_count": 0,
         "skipped_row_reasons": [],
         "fetch_error": fetch_error,
+        "detected_date_columns": ["date"] if raw_history else [],
+        "first_row_keys": ["date", "close"] if raw_history else [],
+        "first_row_sample": raw_history[0] if raw_history else None,
+        "date_parse_success_count": 0,
+        "date_parse_failed_count": 0,
+        "date_parse_failed_examples": [],
+        "detected_index_columns": [],
+        "index_filter_column_used": None,
+        "index_filter_values_sample": [],
+        "topix_match_count": len(raw_history) if index_type == "TOPIX" else 0,
+        "first_topix_row_sample": raw_history[0] if raw_history and index_type == "TOPIX" else None,
+        "local_price_loaded_file_names": [],
+        "loaded_file_row_counts": {},
+        "loaded_file_columns": {},
+        "loaded_file_date_min_max": {},
+        "loaded_file_index_values": {},
     }
     if fetch_error:
         debug_info["skipped_row_reasons"].append("local_price_file_not_found")
@@ -404,6 +420,16 @@ def _run_simulation_core(
 
     for idx, (date_str, close) in enumerate(price_history):
         debug_info["simulation_loop_row_count"] += 1
+        try:
+            date.fromisoformat(date_str)
+            debug_info["date_parse_success_count"] += 1
+        except Exception:
+            debug_info["date_parse_failed_count"] += 1
+            if len(debug_info["date_parse_failed_examples"]) < 3:
+                debug_info["date_parse_failed_examples"].append(date_str)
+            if include_daily_trace:
+                debug_info["skipped_row_reasons"].append("invalid_date")
+            continue
         if sell_cooldown_days_remaining > 0:
             sell_cooldown_days_remaining -= 1
         if days_since_last_sell is not None:
@@ -616,6 +642,27 @@ def _run_simulation_core(
                             "reason": buy_reason,
                         }
                     )
+        elif include_daily_trace:
+            # still emit a row for diagnostics even when score window is not ready
+            fwd20 = round(((price_history[idx + 20][1] / close) - 1) * 100, 4) if idx + 20 < len(price_history) else None
+            fwd60 = round(((price_history[idx + 60][1] / close) - 1) * 100, 4) if idx + 60 < len(price_history) else None
+            daily_trace.append(
+                {
+                    "date": date_str,
+                    "close": close,
+                    "total_score": None,
+                    "technical_score": None,
+                    "macro_score": None,
+                    "event_adjustment": None,
+                    "sell_signal": False,
+                    "sell_gate_open": False,
+                    "gate_blockers": ["append_condition_not_met"],
+                    "forward_20d_pct": fwd20,
+                    "forward_60d_pct": fwd60,
+                }
+            )
+            debug_info["daily_trace_append_count"] += 1
+            debug_info["skipped_row_reasons"].append("append_condition_not_met")
 
         portfolio_values.append(cash + shares * close)
 
@@ -645,6 +692,8 @@ def _run_simulation_core(
                     "post20_return_pct": post20,
                 }
             )
+    if include_daily_trace and debug_info["simulation_loop_row_count"] > 0 and debug_info["daily_trace_append_count"] == 0:
+        debug_info["skipped_row_reasons"].append("daily_trace_append_never_called")
     return {
         "final_value": round(final_value, 2),
         "buy_and_hold_final": round(buy_and_hold_final, 2),

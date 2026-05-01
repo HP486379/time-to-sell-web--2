@@ -621,3 +621,78 @@ def test_build_topix_daily_score_breakdown_review_empty_trace_debug(monkeypatch)
     assert out["debug"]["available_index_types"] == ["SP500", "TOPIX"]
     assert out["debug"]["simulation_loop_row_count"] == 0
     assert out["debug"]["daily_trace_append_count"] == 0
+
+
+def test_run_simulation_core_appends_daily_trace_even_when_score_window_not_ready():
+    class _MS:
+        def get_price_history_range(self, start, end, allow_fallback, index_type):
+            rows = []
+            base = date(2026, 2, 1)
+            for i in range(31):
+                d = base.fromordinal(base.toordinal() + i)
+                rows.append((d.isoformat(), 100.0 + i))
+            return rows
+
+    class _Macro:
+        def get_macro_series_range(self, start, end):
+            return {"r_10y": [], "cpi": [], "vix": []}
+
+    class _Svc:
+        allow_fallback = False
+        market_service = _MS()
+        macro_service = _Macro()
+        def _prepare_price_history(self, raw, index_type):
+            return raw
+
+    ctx = type("C", (), {"backtest_service": _Svc()})()
+    out = _run_simulation_core(
+        ctx,
+        index_type="TOPIX",
+        rule_name="current_logic",
+        sell_threshold=80.0,
+        technical_threshold=None,
+        start_date=date(2026, 2, 1),
+        end_date=date(2026, 3, 18),
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=200,
+        include_daily_trace=True,
+    )
+    assert out["debug"]["simulation_loop_row_count"] == 31
+    assert out["debug"]["daily_trace_append_count"] == 31
+    assert len(out["daily_trace"]) == 31
+    assert "append_condition_not_met" in out["debug"]["skipped_row_reasons"]
+
+
+def test_run_simulation_core_reports_invalid_date_parse_failures():
+    class _MS:
+        def get_price_history_range(self, start, end, allow_fallback, index_type):
+            return [("bad-date", 100.0), ("2026-02-02", 101.0)]
+
+    class _Macro:
+        def get_macro_series_range(self, start, end):
+            return {"r_10y": [], "cpi": [], "vix": []}
+
+    class _Svc:
+        allow_fallback = False
+        market_service = _MS()
+        macro_service = _Macro()
+        def _prepare_price_history(self, raw, index_type):
+            return raw
+
+    ctx = type("C", (), {"backtest_service": _Svc()})()
+    out = _run_simulation_core(
+        ctx,
+        index_type="TOPIX",
+        rule_name="current_logic",
+        sell_threshold=80.0,
+        technical_threshold=None,
+        start_date=date(2026, 2, 1),
+        end_date=date(2026, 3, 18),
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=200,
+        include_daily_trace=True,
+    )
+    assert out["debug"]["date_parse_failed_count"] == 1
+    assert "invalid_date" in out["debug"]["skipped_row_reasons"]
