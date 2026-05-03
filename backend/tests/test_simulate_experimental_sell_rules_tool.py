@@ -564,6 +564,7 @@ def test_build_topix_daily_score_breakdown_review(monkeypatch):
     assert out["summary"]["focus_rule"] == "ath_boost_8_score80_gate"
     assert out["summary"]["comparable_with_baseline"] is False
     assert out["summary"]["focus_date_exact_match"] is True
+    assert out["summary"]["adoption_judgement"] == "reviewable"
     assert out["focus_date_comparison"]["date"] == "2026-02-12"
     assert out["focus_date_comparison"]["current_logic_total_score"] == 79.0
     assert out["focus_date_comparison"]["ath_boost_total_score"] == 84.0
@@ -596,6 +597,7 @@ def test_build_topix_daily_score_breakdown_review_with_missing_focus_date(monkey
     assert out["debug"]["available_index_types"] == []
     assert out["debug"]["daily_trace_append_count"] == out["debug"]["simulation_loop_row_count"]
     assert len(out["daily_rows"]) == 2
+    assert out["summary"]["adoption_judgement"] == "reviewable"
 
 
 def test_build_topix_daily_score_breakdown_review_empty_trace_debug(monkeypatch):
@@ -621,6 +623,31 @@ def test_build_topix_daily_score_breakdown_review_empty_trace_debug(monkeypatch)
     assert out["debug"]["available_index_types"] == ["SP500", "TOPIX"]
     assert out["debug"]["simulation_loop_row_count"] == 0
     assert out["debug"]["daily_trace_append_count"] == 0
+
+
+def test_build_topix_daily_score_breakdown_review_marks_insufficient_history(monkeypatch):
+    class _M:
+        symbol_map = {"TOPIX": "1306.T"}
+        _cache_dir = __import__("pathlib").Path(".")
+
+    class _B:
+        market_service = _M()
+
+    def _fake_build_context():
+        return type("C", (), {"backtest_service": _B()})()
+
+    small_trace = [{"date": "2026-02-12", "close": 100.0, "total_score": None, "technical_score": None, "macro_score": None, "event_adjustment": None, "sell_signal": False, "sell_gate_open": False, "gate_blockers": ["append_condition_not_met"], "forward_20d_pct": None, "forward_60d_pct": None}]
+    def _fake_run(ctx, **kwargs):
+        return {"daily_trace": small_trace, "debug": {"score_input_row_count": 31, "rows_before_date_filter": 31, "rows_before_index_filter": 31, "rows_after_index_filter": 31, "rows_after_date_filter": 31, "simulation_loop_row_count": 31, "daily_trace_append_count": 31, "skipped_row_reasons": ["append_condition_not_met"]}}
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._build_context", _fake_build_context)
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_run)
+    out = build_topix_daily_score_breakdown_review()
+    assert "insufficient_history_for_score_calculation" in out["summary"]["missing_items"]
+    assert out["debug"]["required_score_min_rows"] == 200
+    assert out["debug"]["actual_score_input_row_count"] == 31
+    assert out["debug"]["score_calculation_start_index"] == 199
+    assert out["summary"]["adoption_judgement"] == "not_available_due_to_insufficient_history"
 
 
 def test_run_simulation_core_appends_daily_trace_even_when_score_window_not_ready():

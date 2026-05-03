@@ -1381,6 +1381,8 @@ def build_topix_daily_score_breakdown_review(
     end_date: date = date(2026, 3, 18),
     focus_date: str = "2026-02-12",
 ) -> Dict:
+    required_score_min_rows = max(200 - 1, 199) + 1
+    score_calculation_start_index = max(200 - 1, 199)
     ctx = _build_context()
     current = _run_simulation_core(
         ctx,
@@ -1456,6 +1458,16 @@ def build_topix_daily_score_breakdown_review(
             missing_items.append("focus_date_out_of_range")
         else:
             missing_items.append("local_data_does_not_include_focus_date")
+    actual_score_input_row_count = int(current_debug.get("score_input_row_count", 0) or 0)
+    if actual_score_input_row_count < required_score_min_rows:
+        missing_items.extend(
+            [
+                "insufficient_history_for_score_calculation",
+                "score_window_requires_more_rows",
+                "score_components_unavailable",
+                f"local_topix_history_only_{actual_score_input_row_count}_rows",
+            ]
+        )
 
     focus_window_dates = []
     if all_dates:
@@ -1479,6 +1491,9 @@ def build_topix_daily_score_breakdown_review(
         "rows_before_date_filter": current_debug.get("rows_before_date_filter"),
         "rows_after_date_filter": current_debug.get("rows_after_date_filter"),
         "score_input_row_count": current_debug.get("score_input_row_count"),
+        "required_score_min_rows": required_score_min_rows,
+        "actual_score_input_row_count": actual_score_input_row_count,
+        "score_calculation_start_index": score_calculation_start_index,
         "available_index_types": sorted(list(symbol_map.keys())),
         "topix_row_count": len(all_dates),
         "topix_date_min": all_dates[0] if all_dates else None,
@@ -1506,6 +1521,11 @@ def build_topix_daily_score_breakdown_review(
         "warnings": [
             "baseline-approved JSON and regenerated JSON were reported as non-identical; this output is derived from local simulation path."
         ],
+        "adoption_judgement": (
+            "not_available_due_to_insufficient_history"
+            if (focus_cur.get("total_score") is None or focus_ath.get("total_score") is None)
+            else "reviewable"
+        ),
     }
     focus_date_comparison = {
         "date": lookup_date,
