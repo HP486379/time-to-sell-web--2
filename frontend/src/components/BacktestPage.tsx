@@ -10,6 +10,7 @@ import {
   Button,
   Typography,
   Alert,
+  Divider,
   FormControl,
   InputLabel,
   Select,
@@ -20,6 +21,7 @@ import dayjs from 'dayjs'
 import { runBacktest } from '../apis'
 import type { BacktestRequest, BacktestResult } from '../types/apis'
 import { INDEX_LABELS, type IndexType } from '../types/index'
+import { getBacktestViewStatus } from '../domain/backtestInterpretation'
 
 const DEFAULT_REQUEST: BacktestRequest = {
   start_date: '2014-01-01',
@@ -64,6 +66,8 @@ export function BacktestPage() {
     }
   }
 
+
+  const noClearSellStatus = getBacktestViewStatus(params.index_type, result?.summary.trade_count)
   const chartData = (result?.equity_curve || []).map((point) => ({
     date: point.date,
     close: point.close,
@@ -195,6 +199,19 @@ export function BacktestPage() {
                 <Typography variant="body2">
                   売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
                 </Typography>
+                {noClearSellStatus && (
+                  <>
+                    <Divider sx={{ my: 1 }} />
+                    <Typography variant="body2" fontWeight={700} color="success.main">
+                      {noClearSellStatus.title}
+                    </Typography>
+                    <Typography variant="body2">{noClearSellStatus.judgement}</Typography>
+                    <Typography variant="body2">{noClearSellStatus.policy}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {noClearSellStatus.note}
+                    </Typography>
+                  </>
+                )}
               </Stack>
             ) : (
               <Typography variant="body2" color="text.secondary">

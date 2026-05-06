@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
-import { Card, CardContent, CardHeader, Button, Typography, Stack } from '@mui/material'
+import { Card, CardContent, CardHeader, Button, Typography, Stack, Divider } from '@mui/material'
 import { runBacktest } from '../apis'
 import type { BacktestResult } from '../types/apis'
 import type { IndexType } from '../types/index'
+import { getBacktestViewStatus } from '../domain/backtestInterpretation'
 
 const DEFAULT_REQUEST = {
   start_date: '2014-01-01',
@@ -34,6 +35,8 @@ export const BacktestSummaryCard: React.FC<{ indexType: IndexType }> = ({ indexT
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const noClearSellStatus = getBacktestViewStatus(indexType, result?.summary.trade_count)
 
   const handleRun = async () => {
     try {
@@ -84,6 +87,19 @@ export const BacktestSummaryCard: React.FC<{ indexType: IndexType }> = ({ indexT
             <Typography variant="body2">
               売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
             </Typography>
+            {noClearSellStatus && (
+              <>
+                <Divider sx={{ my: 1 }} />
+                <Typography variant="body2" fontWeight={700} color="success.main">
+                  {noClearSellStatus.title}
+                </Typography>
+                <Typography variant="body2">{noClearSellStatus.judgement}</Typography>
+                <Typography variant="body2">{noClearSellStatus.policy}</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {noClearSellStatus.note}
+                </Typography>
+              </>
+            )}
           </Stack>
         ) : (
           <Typography variant="body2" color="text.secondary">
