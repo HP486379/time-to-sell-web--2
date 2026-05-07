@@ -10,6 +10,7 @@ import {
   Button,
   Typography,
   Alert,
+  Divider,
   FormControl,
   InputLabel,
   Select,
@@ -65,6 +66,8 @@ export function BacktestPage() {
     }
   }
 
+
+  const noClearSellStatus = getBacktestViewStatus(params.index_type, result?.summary.trade_count)
   const chartData = (result?.equity_curve || []).map((point) => ({
     date: point.date,
     close: point.close,
