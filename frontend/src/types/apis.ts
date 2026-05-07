@@ -6,7 +6,7 @@ export interface BacktestRequest {
   initial_cash: number
   sell_threshold: number
   buy_threshold: number
-  index_type: IndexType
+  index_type: IndexType | string
   score_ma: number
 }
 
