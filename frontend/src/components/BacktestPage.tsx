@@ -21,7 +21,7 @@ import dayjs from 'dayjs'
 import { runBacktest } from '../apis'
 import type { BacktestRequest, BacktestResult } from '../types/apis'
 import { INDEX_LABELS, type IndexType } from '../types/index'
-import { NO_CLEAR_SELL_MESSAGE, toBacktestIndexType } from '../utils/indexTypeMap'
+import { getBacktestViewStatus, toBacktestIndexType } from '../utils/indexTypeMap'
 
 const DEFAULT_REQUEST: BacktestRequest = {
   start_date: '2014-01-01',
@@ -199,9 +199,9 @@ export function BacktestPage() {
                 <Typography variant="body2">
                   売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
                 </Typography>
-                {result.summary.trade_count === 0 && (
+                {getBacktestViewStatus(result.summary.trade_count) && (
                   <Typography variant="body2" color="text.secondary">
-                    {NO_CLEAR_SELL_MESSAGE}
+                    {getBacktestViewStatus(result.summary.trade_count)}
                   </Typography>
                 )}
               </Stack>

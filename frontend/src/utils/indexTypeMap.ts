@@ -9,3 +9,7 @@ export const toBacktestIndexType = (indexType: IndexType): string => {
 }
 
 export const NO_CLEAR_SELL_MESSAGE = '明確な売り時シグナルは出ていません。長期保有継続が優勢です。'
+
+export const getBacktestViewStatus = (tradeCount: number | null | undefined): string | null => {
+  return tradeCount === 0 ? NO_CLEAR_SELL_MESSAGE : null
+}
