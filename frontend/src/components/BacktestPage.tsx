@@ -21,7 +21,7 @@ import dayjs from 'dayjs'
 import { runBacktest } from '../apis'
 import type { BacktestRequest, BacktestResult } from '../types/apis'
 import { INDEX_LABELS, type IndexType } from '../types/index'
-import { getBacktestViewStatus } from '../domain/backtestInterpretation'
+import { NO_CLEAR_SELL_MESSAGE, toBacktestIndexType } from '../utils/indexTypeMap'
 
 const DEFAULT_REQUEST: BacktestRequest = {
   start_date: '2014-01-01',
@@ -57,7 +57,7 @@ export function BacktestPage() {
     try {
       setLoading(true)
       setError(null)
-      const res = await runBacktest(params)
+      const res = await runBacktest({ ...params, index_type: toBacktestIndexType(params.index_type) })
       setResult(res)
     } catch (e: any) {
       setError(e.message ?? 'バックテストに失敗しました')
@@ -199,18 +199,10 @@ export function BacktestPage() {
                 <Typography variant="body2">
                   売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
                 </Typography>
-                {noClearSellStatus && (
-                  <>
-                    <Divider sx={{ my: 1 }} />
-                    <Typography variant="body2" fontWeight={700} color="success.main">
-                      {noClearSellStatus.title}
-                    </Typography>
-                    <Typography variant="body2">{noClearSellStatus.judgement}</Typography>
-                    <Typography variant="body2">{noClearSellStatus.policy}</Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      {noClearSellStatus.note}
-                    </Typography>
-                  </>
+                {result.summary.trade_count === 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    {NO_CLEAR_SELL_MESSAGE}
+                  </Typography>
                 )}
               </Stack>
             ) : (
