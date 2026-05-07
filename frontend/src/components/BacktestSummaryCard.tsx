@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, Button, Typography, Stack } from '@mui/m
 import { runBacktest } from '../apis'
 import type { BacktestResult } from '../types/apis'
 import type { IndexType } from '../types/index'
+import { getBacktestViewStatus, toBacktestIndexType } from '../utils/indexTypeMap'
 
 const DEFAULT_REQUEST = {
   start_date: '2014-01-01',
@@ -39,7 +40,7 @@ export const BacktestSummaryCard: React.FC<{ indexType: IndexType }> = ({ indexT
     try {
       setLoading(true)
       setError(null)
-      const res = await runBacktest({ ...DEFAULT_REQUEST, index_type: indexType })
+      const res = await runBacktest({ ...DEFAULT_REQUEST, index_type: toBacktestIndexType(indexType) })
       setResult(res)
     } catch (e: any) {
       console.error(e)
@@ -84,6 +85,11 @@ export const BacktestSummaryCard: React.FC<{ indexType: IndexType }> = ({ indexT
             <Typography variant="body2">
               売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
             </Typography>
+            {getBacktestViewStatus(result.summary.trade_count) && (
+              <Typography variant="body2" color="text.secondary">
+                {getBacktestViewStatus(result.summary.trade_count)}
+              </Typography>
+            )}
           </Stack>
         ) : (
           <Typography variant="body2" color="text.secondary">
