@@ -344,19 +344,21 @@ def _run_simulation_core(
     calibration_config: CalibrationConfig | None = None,
     weight_adjust_config: WeightAdjustConfig | None = None,
     include_daily_trace: bool = False,
+    override_price_history: Optional[List[tuple[str, float]]] = None,
 ) -> Dict:
     svc = ctx.backtest_service
     raw_history = []
     fetch_error = None
-    try:
-        raw_history = svc.market_service.get_price_history_range(
-            start_date, end_date, allow_fallback=svc.allow_fallback, index_type=index_type
-        )
-    except Exception as exc:
-        fetch_error = str(exc)
-    price_history = []
-    if raw_history:
-        price_history = svc._prepare_price_history(raw_history, index_type)
+    price_history = list(override_price_history or [])
+    if not price_history:
+        try:
+            raw_history = svc.market_service.get_price_history_range(
+                start_date, end_date, allow_fallback=svc.allow_fallback, index_type=index_type
+            )
+        except Exception as exc:
+            fetch_error = str(exc)
+        if raw_history:
+            price_history = svc._prepare_price_history(raw_history, index_type)
     debug_info = {
         "requested_index_type": index_type,
         "rows_before_index_filter": len(raw_history),
@@ -865,6 +867,7 @@ def run_comparison(
     initial_cash: float,
     buy_threshold: float,
     score_ma: int,
+    override_price_history: Optional[List[tuple[str, float]]] = None,
 ) -> List[Dict]:
     rules = [
         "current_logic",
@@ -917,9 +920,28 @@ def run_comparison(
             initial_cash=initial_cash,
             buy_threshold=40.0,
             score_ma=score_ma,
+            override_price_history=override_price_history,
         )
         rows.append(_summarize_rule_result(rule_name, index_type, result))
     return rows
+
+
+def _load_price_history_from_backtest_response_json(path: str) -> List[tuple[str, float]]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    eq = payload.get("equity_curve", []) if isinstance(payload, dict) else []
+    out: List[tuple[str, float]] = []
+    for row in eq:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("date")
+        c = row.get("close")
+        if isinstance(d, str) and c is not None:
+            try:
+                out.append((d, float(c)))
+            except (TypeError, ValueError):
+                continue
+    out.sort(key=lambda x: x[0])
+    return out
 
 
 def _build_context() -> SimulationContext:
@@ -1696,6 +1718,7 @@ def main():
     parser.add_argument("--review-topix-ath-boost", action="store_true")
     parser.add_argument("--review-topix-daily-breakdown", action="store_true")
     parser.add_argument("--debug-index-data-source", action="store_true")
+    parser.add_argument("--input-backtest-response-json", default=None)
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -1752,6 +1775,11 @@ def main():
         return
 
     ctx = _build_context()
+    override_price_history = (
+        _load_price_history_from_backtest_response_json(args.input_backtest_response_json)
+        if args.input_backtest_response_json
+        else None
+    )
     if args.index:
         target_indices = [args.index]
     else:
@@ -1767,6 +1795,7 @@ def main():
                 initial_cash=args.initial_cash,
                 buy_threshold=args.buy_threshold,
                 score_ma=args.score_ma,
+                override_price_history=override_price_history,
             )
         )
     _output(rows, args.output_format, args.output)
