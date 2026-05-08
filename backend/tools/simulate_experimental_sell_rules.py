@@ -25,6 +25,7 @@ from services.backtest_service import BacktestService
 from services.event_service import EventService
 from services.macro_data_service import MacroDataService
 from services.sp500_market_service import SP500MarketService
+from domain.index_type import normalize_index_type
 
 
 @dataclass
@@ -1624,6 +1625,59 @@ def build_topix_daily_score_breakdown_review(
     return {"summary": summary, "focus_date_comparison": focus_date_comparison, "daily_rows": daily_rows, "debug": debug}
 
 
+def build_index_data_source_debug(
+    *,
+    index_type: str,
+    start_date: date,
+    end_date: date,
+    score_ma: int = 200,
+) -> Dict:
+    ctx = _build_context()
+    svc = ctx.backtest_service
+    resolved_index_type = normalize_index_type(index_type, default="SP500")
+    warnings: List[str] = []
+    missing_items: List[str] = []
+    raw_history: List = []
+    fetch_error: str | None = None
+    try:
+        raw_history = svc.market_service.get_price_history_range(
+            start_date, end_date, allow_fallback=svc.allow_fallback, index_type=resolved_index_type
+        )
+    except Exception as exc:
+        fetch_error = str(exc)
+        warnings.append("topix_long_history_not_available")
+    prepared_history = svc._prepare_price_history(raw_history, resolved_index_type) if raw_history else []
+    debug = svc.market_service.get_last_debug(resolved_index_type) or {}
+    required_score_min_rows = max(200, score_ma)
+    row_count = len(prepared_history)
+    score_ready = row_count >= required_score_min_rows
+    if row_count < required_score_min_rows:
+        missing_items.append("insufficient_history_for_score_calculation")
+        warnings.append("offline_tool_uses_short_cache_only" if row_count > 0 else "topix_long_history_not_available")
+    return {
+        "index_type": index_type,
+        "requested_start_date": start_date.isoformat(),
+        "requested_end_date": end_date.isoformat(),
+        "resolved_index_type": resolved_index_type,
+        "api_endpoint_handler": "/api/backtest -> run_backtest",
+        "called_service": "BacktestService.run_backtest",
+        "production_backtest_data_source": "BacktestService.run_backtest -> SP500MarketService.get_price_history_range",
+        "offline_tool_data_source": "_run_simulation_core -> SP500MarketService.get_price_history_range",
+        "local_price_data_path": str(ROOT_DIR / "data"),
+        "loaded_file_names": debug.get("local_price_loaded_file_names", []),
+        "row_count": row_count,
+        "date_min": prepared_history[0][0] if prepared_history else None,
+        "date_max": prepared_history[-1][0] if prepared_history else None,
+        "required_score_min_rows": required_score_min_rows,
+        "score_ready": score_ready,
+        "first_row_sample": {"date": prepared_history[0][0], "close": prepared_history[0][1]} if prepared_history else None,
+        "last_row_sample": {"date": prepared_history[-1][0], "close": prepared_history[-1][1]} if prepared_history else None,
+        "fetch_error": fetch_error,
+        "missing_items": sorted(set(missing_items)),
+        "warnings": sorted(set(warnings)),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -1641,6 +1695,7 @@ def main():
     parser.add_argument("--diagnose-three-index", action="store_true")
     parser.add_argument("--review-topix-ath-boost", action="store_true")
     parser.add_argument("--review-topix-daily-breakdown", action="store_true")
+    parser.add_argument("--debug-index-data-source", action="store_true")
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
     args = parser.parse_args()
@@ -1680,6 +1735,20 @@ def main():
             raise ValueError("--review-topix-daily-breakdown requires --output-json")
         payload = build_topix_daily_score_breakdown_review()
         Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if args.debug_index_data_source:
+        payload = build_index_data_source_debug(
+            index_type=args.index or "TOPIX",
+            start_date=date.fromisoformat(args.start_date),
+            end_date=date.fromisoformat(args.end_date),
+            score_ma=args.score_ma,
+        )
+        if args.output_json:
+            Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if not payload.get("score_ready", False):
+            raise RuntimeError("insufficient_history_for_score_calculation")
         return
 
     ctx = _build_context()
