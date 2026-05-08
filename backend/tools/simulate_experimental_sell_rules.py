@@ -944,6 +944,128 @@ def _load_price_history_from_backtest_response_json(path: str) -> List[tuple[str
     return out
 
 
+def build_topix_missed_sell_diagnostic_from_backtest_response_json(
+    input_json: str,
+    *,
+    start_date: date,
+    end_date: date,
+    score_ma: int = 200,
+) -> Dict:
+    peaks = [
+        "2015-08-10",
+        "2018-10-02",
+        "2020-02-06",
+        "2021-09-14",
+        "2022-01-05",
+        "2024-07-11",
+        "2025-03-26",
+    ]
+    ctx = _build_context()
+    price_history = _load_price_history_from_backtest_response_json(input_json)
+    result = _run_simulation_core(
+        ctx,
+        index_type="TOPIX",
+        rule_name="current_logic",
+        sell_threshold=80.0,
+        technical_threshold=None,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=1_000_000.0,
+        buy_threshold=40.0,
+        score_ma=score_ma,
+        include_daily_trace=True,
+        override_price_history=price_history,
+    )
+    trace = result.get("daily_trace", [])
+    idx_by_date = {d: i for i, (d, _) in enumerate(price_history)}
+    closes = [c for _, c in price_history]
+    ma20 = moving_average(closes, 20)
+    ma60 = moving_average(closes, 60)
+    ma200 = moving_average(closes, 200)
+    trace_by_date = {str(r.get("date")): r for r in trace if isinstance(r, dict)}
+
+    def _is_near_high(i: int, window: int) -> bool:
+        if i < 0:
+            return False
+        lo = max(0, i - window + 1)
+        segment = closes[lo : i + 1]
+        return bool(segment) and closes[i] >= (max(segment) * 0.992)
+
+    def _ret_before(i: int, n: int) -> Optional[float]:
+        if i - n < 0 or closes[i - n] == 0:
+            return None
+        return round(((closes[i] / closes[i - n]) - 1) * 100, 4)
+
+    windows = []
+    summaries = []
+    for peak in peaks:
+        i = idx_by_date.get(peak)
+        if i is None:
+            summaries.append({"peak_date": peak, "missing_reason": "peak_date_not_found_in_input"})
+            continue
+        lo = max(0, i - 10)
+        hi = min(len(price_history) - 1, i + 10)
+        rows = []
+        for j in range(lo, hi + 1):
+            d, c = price_history[j]
+            t = trace_by_date.get(d, {})
+            m20, m60, m200 = ma20[j], ma60[j], ma200[j]
+            dev20 = round(((c / m20) - 1) * 100, 4) if m20 else None
+            dev60 = round(((c / m60) - 1) * 100, 4) if m60 else None
+            rows.append({
+                "date": d,
+                "close": c,
+                "total_score": t.get("total_score"),
+                "technical_score": t.get("technical_score"),
+                "macro_score": t.get("macro_score"),
+                "event_adjustment": t.get("event_adjustment"),
+                "ma20": m20,
+                "ma60": m60,
+                "ma200": m200,
+                "return_20d_before": _ret_before(j, 20),
+                "return_60d_before": _ret_before(j, 60),
+                "deviation_from_ma20_pct": dev20,
+                "deviation_from_ma60_pct": dev60,
+                "is_near_60d_high": _is_near_high(j, 60),
+                "is_near_120d_high": _is_near_high(j, 120),
+                "peakout_detected": "peakout_not_detected" not in (t.get("gate_blockers") or []),
+                "confirmation_detected": "confirmation_not_detected" not in (t.get("gate_blockers") or []),
+                "sell_gate_open": t.get("sell_gate_open"),
+                "sell_gate_blockers": t.get("gate_blockers", []),
+                "forward_20d_pct": t.get("forward_20d_pct"),
+                "forward_60d_pct": t.get("forward_60d_pct"),
+            })
+        peak_row = next((r for r in rows if r["date"] == peak), rows[len(rows)//2])
+        summaries.append({
+            "peak_date": peak,
+            "current_logic_sell": bool(peak_row.get("sell_gate_open")),
+            "score_shortage_to_80": None if peak_row.get("total_score") is None else round(max(0.0, 80.0 - float(peak_row["total_score"])), 4),
+            "technical_shortage_to_70": None if peak_row.get("technical_score") is None else round(max(0.0, 70.0 - float(peak_row["technical_score"])), 4),
+            "macro_drag_suspected": bool((peak_row.get("macro_score") or 0) < 55 if peak_row.get("macro_score") is not None else False),
+            "gate_blockers": peak_row.get("sell_gate_blockers", []),
+            "overheat_features_detected": {
+                "near_60d_high": peak_row.get("is_near_60d_high"),
+                "near_120d_high": peak_row.get("is_near_120d_high"),
+                "ma20_deviation_pct": peak_row.get("deviation_from_ma20_pct"),
+                "ma60_deviation_pct": peak_row.get("deviation_from_ma60_pct"),
+                "return_20d_before": peak_row.get("return_20d_before"),
+                "return_60d_before": peak_row.get("return_60d_before"),
+            },
+        })
+        windows.append({"peak_date": peak, "window_rows": rows})
+    return {
+        "index_type": "TOPIX",
+        "requested_start_date": start_date.isoformat(),
+        "requested_end_date": end_date.isoformat(),
+        "input_backtest_response_json": input_json,
+        "required_score_min_rows": max(200, score_ma),
+        "row_count": len(price_history),
+        "score_ready": len(price_history) >= max(200, score_ma),
+        "peak_windows": windows,
+        "peak_summaries": summaries,
+    }
+
+
 def _build_context() -> SimulationContext:
     market_service = SP500MarketService()
     macro_service = MacroDataService()
@@ -1718,6 +1840,7 @@ def main():
     parser.add_argument("--review-topix-ath-boost", action="store_true")
     parser.add_argument("--review-topix-daily-breakdown", action="store_true")
     parser.add_argument("--debug-index-data-source", action="store_true")
+    parser.add_argument("--diagnose-topix-missed-sell", action="store_true")
     parser.add_argument("--input-backtest-response-json", default=None)
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
@@ -1772,6 +1895,17 @@ def main():
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         if not payload.get("score_ready", False):
             raise RuntimeError("insufficient_history_for_score_calculation")
+        return
+    if args.diagnose_topix_missed_sell:
+        if not args.input_backtest_response_json or not args.output_json:
+            raise ValueError("--diagnose-topix-missed-sell requires --input-backtest-response-json and --output-json")
+        payload = build_topix_missed_sell_diagnostic_from_backtest_response_json(
+            args.input_backtest_response_json,
+            start_date=date.fromisoformat(args.start_date),
+            end_date=date.fromisoformat(args.end_date),
+            score_ma=args.score_ma,
+        )
+        Path(args.output_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 
     ctx = _build_context()
