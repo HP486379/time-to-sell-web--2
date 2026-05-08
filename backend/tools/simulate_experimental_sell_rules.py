@@ -944,6 +944,34 @@ def _load_price_history_from_backtest_response_json(path: str) -> List[tuple[str
     return out
 
 
+def _load_equity_curve_rows_from_backtest_response_json(path: str) -> List[Dict]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    eq = payload.get("equity_curve", []) if isinstance(payload, dict) else []
+    rows: List[Dict] = []
+    for row in eq:
+        if not isinstance(row, dict):
+            continue
+        d = row.get("date")
+        c = row.get("close")
+        if not isinstance(d, str) or c is None:
+            continue
+        try:
+            close = float(c)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "date": d,
+                "close": close,
+                "ma20": row.get("ma20"),
+                "ma60": row.get("ma60"),
+                "ma200": row.get("ma200"),
+            }
+        )
+    rows.sort(key=lambda x: x["date"])
+    return rows
+
+
 def build_topix_missed_sell_diagnostic_from_backtest_response_json(
     input_json: str,
     *,
@@ -961,7 +989,8 @@ def build_topix_missed_sell_diagnostic_from_backtest_response_json(
         "2025-03-26",
     ]
     ctx = _build_context()
-    price_history = _load_price_history_from_backtest_response_json(input_json)
+    eq_rows = _load_equity_curve_rows_from_backtest_response_json(input_json)
+    price_history = [(str(r["date"]), float(r["close"])) for r in eq_rows]
     result = _run_simulation_core(
         ctx,
         index_type="TOPIX",
@@ -978,10 +1007,7 @@ def build_topix_missed_sell_diagnostic_from_backtest_response_json(
     )
     trace = result.get("daily_trace", [])
     idx_by_date = {d: i for i, (d, _) in enumerate(price_history)}
-    closes = [c for _, c in price_history]
-    ma20 = moving_average(closes, 20)
-    ma60 = moving_average(closes, 60)
-    ma200 = moving_average(closes, 200)
+    eq_by_date = {str(r["date"]): r for r in eq_rows}
     trace_by_date = {str(r.get("date")): r for r in trace if isinstance(r, dict)}
 
     def _is_near_high(i: int, window: int) -> bool:
@@ -1009,7 +1035,10 @@ def build_topix_missed_sell_diagnostic_from_backtest_response_json(
         for j in range(lo, hi + 1):
             d, c = price_history[j]
             t = trace_by_date.get(d, {})
-            m20, m60, m200 = ma20[j], ma60[j], ma200[j]
+            eq_row = eq_by_date.get(d, {})
+            m20 = eq_row.get("ma20")
+            m60 = eq_row.get("ma60")
+            m200 = eq_row.get("ma200")
             dev20 = round(((c / m20) - 1) * 100, 4) if m20 else None
             dev60 = round(((c / m60) - 1) * 100, 4) if m60 else None
             rows.append({
