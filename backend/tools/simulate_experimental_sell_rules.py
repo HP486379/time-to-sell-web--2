@@ -298,6 +298,37 @@ def _apply_technical_variant(rule_name: str, technical_score: float, closes: Lis
     return float(clip(adjusted))
 
 
+def _is_topix_range_sell_gate_open(rule_name: str, closes: List[float], recent_scores: List[float]) -> bool:
+    if len(closes) < 60 or len(recent_scores) < 3:
+        return False
+    close = closes[-1]
+    ma20 = moving_average(closes, 20)[-1]
+    ma60 = moving_average(closes, 60)[-1]
+    recent_20 = closes[-20:]
+    highest_20 = max(recent_20)
+    mean_20 = sum(recent_20) / len(recent_20)
+    std_20 = (sum((x - mean_20) ** 2 for x in recent_20) / len(recent_20)) ** 0.5
+    upper_band_20 = mean_20 + (2.0 * std_20)
+    up_10d_pct = ((close / closes[-11]) - 1.0) * 100.0 if closes[-11] > 0 else 0.0
+    ma20_dev_pct = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+    ma60_dev_pct = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+
+    high_zone = close >= highest_20 * 0.992
+    short_overheat = up_10d_pct >= 4.0
+    upper_band_touch = close >= upper_band_20
+    strong_ma_deviation = ma20_dev_pct >= 3.5 or ma60_dev_pct >= 7.0
+    peakout = recent_scores[-1] < recent_scores[-2]
+    confirmation = close < closes[-2] or close < ma20
+
+    if rule_name == "topix_range_overheat_score80_gate":
+        return high_zone and short_overheat and (upper_band_touch or strong_ma_deviation) and peakout and confirmation
+    if rule_name == "topix_upper_band_reversal_score80_gate":
+        return high_zone and upper_band_touch and peakout and confirmation
+    if rule_name == "topix_ma_deviation_score80_gate":
+        return high_zone and strong_ma_deviation and peakout and confirmation
+    return False
+
+
 def _run_simulation_core(
     ctx: SimulationContext,
     *,
@@ -565,6 +596,20 @@ def _run_simulation_core(
                     and not cooldown_active
                     and total_score >= sell_threshold
                     and (peakout_detected or confirmation_detected)
+                )
+            if (
+                index_type == "TOPIX"
+                and rule_name in {
+                    "topix_range_overheat_score80_gate",
+                    "topix_upper_band_reversal_score80_gate",
+                    "topix_ma_deviation_score80_gate",
+                }
+            ):
+                current_logic_sell = (
+                    shares > 0
+                    and not cooldown_active
+                    and total_score >= sell_threshold
+                    and _is_topix_range_sell_gate_open(rule_name, closes, recent_scores)
                 )
             experimental_sell = (
                 shares > 0
@@ -842,8 +887,29 @@ def run_comparison(
             ]
         )
     rows: List[Dict] = []
+    precheck = _run_simulation_core(
+        ctx,
+        index_type=index_type,
+        rule_name="current_logic",
+        sell_threshold=80.0,
+        technical_threshold=None,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        buy_threshold=40.0,
+        score_ma=score_ma,
+    )
+    if index_type == "TOPIX":
+        score_rows = int(precheck.get("debug", {}).get("score_input_row_count", 0))
+        required_rows = max(score_ma, 200)
+        if score_rows < required_rows:
+            loaded_files = precheck.get("debug", {}).get("local_price_loaded_file_names", [])
+            raise RuntimeError(
+                f"TOPIX検証不能: score_input_row_count={score_rows}, required_rows>={required_rows}, "
+                f"reason=score_window_not_ready, local_price_loaded_file_names={loaded_files}"
+            )
     for rule_name in rules:
-        result = _run_simulation_core(
+        result = precheck if rule_name == "current_logic" else _run_simulation_core(
             ctx,
             index_type=index_type,
             rule_name=rule_name,
