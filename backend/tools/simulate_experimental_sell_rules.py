@@ -1008,19 +1008,25 @@ def build_topix_missed_sell_diagnostic_from_backtest_response_json(
     trace = result.get("daily_trace", [])
     idx_by_date = {d: i for i, (d, _) in enumerate(price_history)}
     eq_by_date = {str(r["date"]): r for r in eq_rows}
+    ordered_closes = [float(r["close"]) if r.get("close") is not None else None for r in eq_rows]
     trace_by_date = {str(r.get("date")): r for r in trace if isinstance(r, dict)}
 
     def _is_near_high(i: int, window: int) -> bool:
         if i < 0:
             return False
         lo = max(0, i - window + 1)
-        segment = closes[lo : i + 1]
-        return bool(segment) and closes[i] >= (max(segment) * 0.992)
+        segment = [x for x in ordered_closes[lo : i + 1] if isinstance(x, (int, float))]
+        cur = ordered_closes[i] if i < len(ordered_closes) else None
+        return bool(segment) and isinstance(cur, (int, float)) and cur >= (max(segment) * 0.992)
 
     def _ret_before(i: int, n: int) -> Optional[float]:
-        if i - n < 0 or closes[i - n] == 0:
+        if i - n < 0:
             return None
-        return round(((closes[i] / closes[i - n]) - 1) * 100, 4)
+        cur = ordered_closes[i] if i < len(ordered_closes) else None
+        prev = ordered_closes[i - n] if (i - n) < len(ordered_closes) else None
+        if not isinstance(cur, (int, float)) or not isinstance(prev, (int, float)) or prev == 0:
+            return None
+        return round(((cur / prev) - 1) * 100, 4)
 
     windows = []
     summaries = []
