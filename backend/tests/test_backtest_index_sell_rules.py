@@ -36,6 +36,16 @@ def test_technical_variant_boost_behaves_as_expected():
     assert svc._apply_technical_sell_variant("current_logic", base, closes) == 60.0
 
 
+def test_topix_overheat_guard_stall_confirmation_conditions():
+    svc = _svc()
+    # 条件を2つ満たす: 前日比マイナス + 5日高値から0.5%以上反落
+    closes_ok = [100.0, 102.0, 104.0, 106.0, 108.0, 107.0]
+    assert svc._topix_overheat_guard_stall_confirmed(closes_ok) is True
+    # 条件を満たさない（上昇継続）
+    closes_ng = [100.0, 102.0, 104.0, 106.0, 108.0, 109.0]
+    assert svc._topix_overheat_guard_stall_confirmed(closes_ng) is False
+
+
 def test_jpy_indices_use_score80_gate_sell_and_existing_buy_flow(monkeypatch):
     class _Market:
         def get_price_history_range(self, start_date, end_date, allow_fallback, index_type):

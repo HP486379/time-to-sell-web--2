@@ -91,6 +91,20 @@ class BacktestService:
             boost += 15.0
         return boost
 
+    def _topix_overheat_guard_stall_confirmed(self, closes: List[float]) -> bool:
+        if len(closes) < 6:
+            return False
+        close = closes[-1]
+        prev_close = closes[-2]
+        recent_5d_high = max(closes[-5:])
+        ret_3d = ((close / closes[-4]) - 1.0) * 100.0 if closes[-4] > 0 else 0.0
+        conditions = [
+            close < prev_close,
+            close <= recent_5d_high * 0.995,
+            ret_3d <= 0.5,
+        ]
+        return sum(1 for x in conditions if x) >= 2
+
     def _prepare_price_history(
         self, raw_history: List[Tuple[str, float]], index_type: str
     ) -> List[Tuple[str, float]]:
@@ -352,7 +366,9 @@ class BacktestService:
                     boost = self._topix_overheat_guard_boost(closes, ma20_series[-1], ma60_series[-1], ma200_series[-1])
                     if shares > 0 and boost > 0:
                         score = max(0.0, min(100.0, score + boost))
-                        topix_overheat_guard_active = score >= sell_threshold_safe
+                        topix_overheat_guard_active = (
+                            score >= sell_threshold_safe and self._topix_overheat_guard_stall_confirmed(closes)
+                        )
                         if topix_overheat_guard_active:
                             sell_gate_open = True
                 cooldown_active = sell_cooldown_days_remaining > 0
@@ -423,8 +439,8 @@ class BacktestService:
                             "reason": (
                                 "topix_overheat_guard_bypass_peakout_confirmation"
                                 if topix_overheat_guard_active
-                                else "topix_overheat_guard_score80_gate"
-                                if sell_rule_name == "topix_overheat_guard_score80_gate"
+                                else "topix_overheat_guard_blocked_no_stall"
+                                if sell_rule_name == "topix_overheat_guard_score80_gate" and not topix_overheat_guard_active
                                 else "current_logic_sell"
                             ),
                         }
