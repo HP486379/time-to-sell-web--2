@@ -22,7 +22,8 @@ def test_index_sell_rule_map_selection():
     svc = _svc()
     assert svc._get_sell_rule_name("SP500_JPY") == "ath_boost_8_score80_gate"
     assert svc._get_sell_rule_name("ALLCOUNTRY_JPY") == "no_ath_penalty_score80_gate"
-    for index_type in ["SP500", "TOPIX", "NIKKEI225", "NIFTY50", "ALLCOUNTRY"]:
+    assert svc._get_sell_rule_name("TOPIX") == "topix_overheat_guard_score80_gate"
+    for index_type in ["SP500", "NIKKEI225", "NIFTY50", "ALLCOUNTRY"]:
         assert svc._get_sell_rule_name(index_type) == "current_logic"
 
 
@@ -63,11 +64,11 @@ def test_jpy_indices_use_score80_gate_sell_and_existing_buy_flow(monkeypatch):
     sell_buy_map = {
         "SP500_JPY": {
             "sell": {"2025-11-03"},
-            "buy": {"2024-08-09"},
+            "buy": {"2026-01-02"},
         },
         "ALLCOUNTRY_JPY": {
             "sell": {"2025-11-03"},
-            "buy": {"2024-08-09"},
+            "buy": {"2026-01-02"},
         },
     }
 
