@@ -22,7 +22,8 @@ def test_index_sell_rule_map_selection():
     svc = _svc()
     assert svc._get_sell_rule_name("SP500_JPY") == "ath_boost_8_score80_gate"
     assert svc._get_sell_rule_name("ALLCOUNTRY_JPY") == "no_ath_penalty_score80_gate"
-    for index_type in ["SP500", "TOPIX", "NIKKEI225", "NIFTY50", "ALLCOUNTRY"]:
+    assert svc._get_sell_rule_name("TOPIX") == "topix_overheat_guard_score80_gate"
+    for index_type in ["SP500", "NIKKEI225", "NIFTY50", "ALLCOUNTRY"]:
         assert svc._get_sell_rule_name(index_type) == "current_logic"
 
 
@@ -33,6 +34,16 @@ def test_technical_variant_boost_behaves_as_expected():
     assert svc._apply_technical_sell_variant("ath_boost_8_score80_gate", base, closes) == 68.0
     assert svc._apply_technical_sell_variant("no_ath_penalty_score80_gate", base, closes) == 72.0
     assert svc._apply_technical_sell_variant("current_logic", base, closes) == 60.0
+
+
+def test_topix_overheat_guard_stall_confirmation_conditions():
+    svc = _svc()
+    # 条件を2つ満たす: 前日比マイナス + 5日高値から0.5%以上反落
+    closes_ok = [100.0, 102.0, 104.0, 106.0, 108.0, 107.0]
+    assert svc._topix_overheat_guard_stall_confirmed(closes_ok) is True
+    # 条件を満たさない（上昇継続）
+    closes_ng = [100.0, 102.0, 104.0, 106.0, 108.0, 109.0]
+    assert svc._topix_overheat_guard_stall_confirmed(closes_ng) is False
 
 
 def test_jpy_indices_use_score80_gate_sell_and_existing_buy_flow(monkeypatch):
@@ -63,11 +74,11 @@ def test_jpy_indices_use_score80_gate_sell_and_existing_buy_flow(monkeypatch):
     sell_buy_map = {
         "SP500_JPY": {
             "sell": {"2025-11-03"},
-            "buy": {"2024-08-09"},
+            "buy": {"2026-01-02"},
         },
         "ALLCOUNTRY_JPY": {
             "sell": {"2025-11-03"},
-            "buy": {"2024-08-09"},
+            "buy": {"2026-01-02"},
         },
     }
 
