@@ -329,6 +329,66 @@ def _is_topix_range_sell_gate_open(rule_name: str, closes: List[float], recent_s
     return False
 
 
+
+
+def _nikkei225_overheat_guard_boost(closes: List[float], ma20: float, ma60: float, ma200: float) -> float:
+    if len(closes) < 120:
+        return 0.0
+    close = closes[-1]
+    if not (close > ma20 and close > ma60 and close > ma200):
+        return 0.0
+    max_60 = max(closes[-60:])
+    max_120 = max(closes[-120:])
+    is_near_60d_high = close >= max_60 * 0.992
+    is_near_120d_high = close >= max_120 * 0.992
+    prev20 = closes[-21] if len(closes) >= 21 else None
+    prev60 = closes[-61] if len(closes) >= 61 else None
+    if prev20 is None or prev60 is None or prev20 <= 0 or prev60 <= 0:
+        return 0.0
+    ret20 = ((close / prev20) - 1.0) * 100.0
+    ret60 = ((close / prev60) - 1.0) * 100.0
+    dev20 = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+    dev60 = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+    if not (is_near_60d_high and is_near_120d_high and ret20 >= 6.0 and ret60 >= 5.0):
+        return 0.0
+    boost = 20.0
+    if dev20 >= 4.0 and dev60 >= 5.0:
+        boost += 15.0
+    return boost
+
+
+def _nikkei225_spike_reversal_guard_boost(closes: List[float], ma20: float, ma60: float, ma200: float) -> float:
+    if len(closes) < 120:
+        return 0.0
+    close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else close
+    if not (close > ma20 and close > ma60 and close > ma200):
+        return 0.0
+    max_60 = max(closes[-60:])
+    max_120 = max(closes[-120:])
+    is_near_60d_high = close >= max_60 * 0.992
+    is_near_120d_high = close >= max_120 * 0.992
+    prev20 = closes[-21] if len(closes) >= 21 else None
+    prev60 = closes[-61] if len(closes) >= 61 else None
+    prev3 = closes[-4] if len(closes) >= 4 else None
+    if prev20 is None or prev60 is None or prev3 is None or prev20 <= 0 or prev60 <= 0 or prev3 <= 0:
+        return 0.0
+    ret20 = ((close / prev20) - 1.0) * 100.0
+    ret60 = ((close / prev60) - 1.0) * 100.0
+    ret3 = ((close / prev3) - 1.0) * 100.0
+    dev20 = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+    dev60 = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+    recent_5d_high = max(closes[-5:]) if len(closes) >= 5 else close
+    base_ok = is_near_60d_high and is_near_120d_high
+    spike_ok = ret20 >= 8.0 or dev20 >= 6.0
+    support_ok = ret60 >= 5.0 or dev60 >= 5.0
+    reversal_ok = close < prev_close or close <= recent_5d_high * 0.99 or ret3 <= 0.0
+    if not (base_ok and spike_ok and support_ok and reversal_ok):
+        return 0.0
+    boost = 20.0
+    if dev60 >= 5.0:
+        boost += 10.0
+    return boost
 def _run_simulation_core(
     ctx: SimulationContext,
     *,
@@ -503,6 +563,8 @@ def _run_simulation_core(
             recent_scores.append(total_score)
             ma20_series = moving_average(closes, 20)
             ma50_series = moving_average(closes, 50)
+            ma60_series = moving_average(closes, 60)
+            ma200_series = moving_average(closes, 200)
             cooldown_active = sell_cooldown_days_remaining > 0
             is_overheat_today = total_score >= sell_threshold
             if is_overheat_today and not prev_overheat_state:
@@ -611,6 +673,16 @@ def _run_simulation_core(
                     and total_score >= sell_threshold
                     and _is_topix_range_sell_gate_open(rule_name, closes, recent_scores)
                 )
+            if index_type == "NIKKEI225" and rule_name == "nikkei225_overheat_guard_score80_gate":
+                boost = _nikkei225_overheat_guard_boost(closes, ma20_series[-1], ma60_series[-1], ma200_series[-1])
+                if shares > 0 and boost > 0:
+                    total_score = clip(total_score + boost)
+                    current_logic_sell = shares > 0 and not cooldown_active and total_score >= sell_threshold
+            if index_type == "NIKKEI225" and rule_name == "nikkei225_spike_reversal_guard_score80_gate":
+                boost = _nikkei225_spike_reversal_guard_boost(closes, ma20_series[-1], ma60_series[-1], ma200_series[-1])
+                if shares > 0 and boost > 0:
+                    total_score = clip(total_score + boost)
+                    current_logic_sell = shares > 0 and not cooldown_active and total_score >= sell_threshold
             experimental_sell = (
                 shares > 0
                 and not cooldown_active
