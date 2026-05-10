@@ -18,6 +18,7 @@ INDEX_SELL_RULE_MAP = {
     "SP500_JPY": "ath_boost_8_score80_gate",
     "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
     "TOPIX": "topix_overheat_guard_score80_gate",
+    "NIKKEI225": "nikkei225_trend_break_guard_score80_gate",
 }
 
 
@@ -91,6 +92,61 @@ class BacktestService:
             boost += 15.0
         return boost
 
+
+
+    def _nikkei225_trend_break_guard_boost(self, closes: List[float], ma20: float, ma60: float, ma200: float) -> tuple[float, bool]:
+        if len(closes) < 120:
+            return 0.0, False
+        close = closes[-1]
+        if not (close > ma60 and close > ma200):
+            return 0.0, False
+        max_60 = max(closes[-60:])
+        max_120 = max(closes[-120:])
+        is_near_60d_high = close >= max_60 * 0.992
+        is_near_120d_high = close >= max_120 * 0.992
+        if not (is_near_60d_high and is_near_120d_high):
+            return 0.0, False
+
+        prev20 = closes[-21] if len(closes) >= 21 else None
+        prev60 = closes[-61] if len(closes) >= 61 else None
+        prev5 = closes[-6] if len(closes) >= 6 else None
+        prev3 = closes[-4] if len(closes) >= 4 else None
+        if any(v is None or v <= 0 for v in [prev20, prev60, prev5, prev3]):
+            return 0.0, False
+
+        return_20d_before = ((close / prev20) - 1.0) * 100.0
+        return_60d_before = ((close / prev60) - 1.0) * 100.0
+        return_5d = ((close / prev5) - 1.0) * 100.0
+        return_3d = ((close / prev3) - 1.0) * 100.0
+        deviation_from_ma20_pct = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+        deviation_from_ma60_pct = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+        recent_10d_high = max(closes[-10:]) if len(closes) >= 10 else close
+        recent_3d_high = max(closes[-3:]) if len(closes) >= 3 else close
+
+        overheat_count = sum([
+            return_20d_before >= 6.0,
+            return_60d_before >= 5.0,
+            deviation_from_ma20_pct >= 4.0,
+            deviation_from_ma60_pct >= 5.0,
+        ])
+        trend_break_count = sum([
+            close < ma20,
+            close <= recent_10d_high * 0.97,
+            return_5d <= -2.0,
+            close < recent_3d_high,
+            return_3d <= -1.0,
+        ])
+
+        if overheat_count < 2:
+            return 0.0, False
+        trend_break_ok = trend_break_count >= 2
+        if not trend_break_ok:
+            return 0.0, False
+
+        boost = 30.0
+        if close < ma20 and return_5d <= -2.0 and close <= recent_10d_high * 0.97:
+            boost += 10.0
+        return boost, True
     def _prepare_price_history(
         self, raw_history: List[Tuple[str, float]], index_type: str
     ) -> List[Tuple[str, float]]:
@@ -346,6 +402,8 @@ class BacktestService:
                 overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
                 sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
                 topix_overheat_guard_active = False
+                nikkei225_trend_break_guard_active = False
+                nikkei225_trend_break_guard_blocked_no_trend_break = False
                 if sell_rule_name in {"ath_boost_8_score80_gate", "no_ath_penalty_score80_gate"}:
                     sell_gate_open = shares > 0 and score >= sell_threshold_safe
                 elif sell_rule_name == "topix_overheat_guard_score80_gate":
@@ -355,6 +413,21 @@ class BacktestService:
                         topix_overheat_guard_active = score >= sell_threshold_safe
                         if topix_overheat_guard_active:
                             sell_gate_open = True
+                elif sell_rule_name == "nikkei225_trend_break_guard_score80_gate":
+                    boost, trend_break_ok = self._nikkei225_trend_break_guard_boost(
+                        closes,
+                        ma20_series[-1],
+                        ma60_series[-1],
+                        ma200_series[-1],
+                    )
+                    if shares > 0:
+                        if boost > 0:
+                            score = max(0.0, min(100.0, score + boost))
+                            nikkei225_trend_break_guard_active = score >= sell_threshold_safe and trend_break_ok
+                            if nikkei225_trend_break_guard_active:
+                                sell_gate_open = True
+                        elif score >= sell_threshold_safe:
+                            nikkei225_trend_break_guard_blocked_no_trend_break = True
                 cooldown_active = sell_cooldown_days_remaining > 0
                 score_t2 = recent_scores[-3] if len(recent_scores) >= 3 else None
                 score_t1 = recent_scores[-2] if len(recent_scores) >= 2 else None
@@ -425,6 +498,12 @@ class BacktestService:
                                 if topix_overheat_guard_active
                                 else "topix_overheat_guard_score80_gate"
                                 if sell_rule_name == "topix_overheat_guard_score80_gate"
+                                else "nikkei225_trend_break_guard_bypass_peakout_confirmation"
+                                if nikkei225_trend_break_guard_active
+                                else "nikkei225_trend_break_guard_blocked_no_trend_break"
+                                if nikkei225_trend_break_guard_blocked_no_trend_break
+                                else "nikkei225_trend_break_guard_score80_gate"
+                                if sell_rule_name == "nikkei225_trend_break_guard_score80_gate"
                                 else "current_logic_sell"
                             ),
                         }
