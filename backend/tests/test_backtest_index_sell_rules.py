@@ -23,8 +23,7 @@ def test_index_sell_rule_map_selection():
     assert svc._get_sell_rule_name("SP500_JPY") == "ath_boost_8_score80_gate"
     assert svc._get_sell_rule_name("ALLCOUNTRY_JPY") == "no_ath_penalty_score80_gate"
     assert svc._get_sell_rule_name("TOPIX") == "topix_overheat_guard_score80_gate"
-    assert svc._get_sell_rule_name("NIKKEI225") == "nikkei225_spike_reversal_guard_score80_gate"
-    for index_type in ["SP500", "NIFTY50", "ALLCOUNTRY"]:
+    for index_type in ["SP500", "NIKKEI225", "NIFTY50", "ALLCOUNTRY"]:
         assert svc._get_sell_rule_name(index_type) == "current_logic"
 
 
@@ -99,18 +98,3 @@ def test_jpy_indices_use_score80_gate_sell_and_existing_buy_flow(monkeypatch):
         buy_dates = {t["date"] for t in result["trades"] if t["action"] == "BUY"}
         assert expected["sell"].issubset(sell_dates)
         assert expected["buy"].issubset(buy_dates)
-
-
-def test_nikkei225_spike_reversal_guard_boost_only_for_matching_shape():
-    svc = _svc()
-    closes = [100.0] * 70 + [105.0] * 40 + [110.0 + i for i in range(19)] + [127.0]
-    ma20 = sum(closes[-20:]) / 20
-    ma60 = sum(closes[-60:]) / 60
-    ma200 = 100.0
-    boost = svc._nikkei225_spike_reversal_guard_boost(closes, ma20, ma60, ma200)
-    assert boost in {20.0, 30.0}
-
-    non_matching = [100.0] * 130
-    ma20_flat = sum(non_matching[-20:]) / 20
-    ma60_flat = sum(non_matching[-60:]) / 60
-    assert svc._nikkei225_spike_reversal_guard_boost(non_matching, ma20_flat, ma60_flat, 100.0) == 0.0

@@ -18,7 +18,6 @@ INDEX_SELL_RULE_MAP = {
     "SP500_JPY": "ath_boost_8_score80_gate",
     "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
     "TOPIX": "topix_overheat_guard_score80_gate",
-    "NIKKEI225": "nikkei225_spike_reversal_guard_score80_gate",
 }
 
 
@@ -90,49 +89,6 @@ class BacktestService:
         boost = 20.0
         if dev20 >= 4.0 and dev60 >= 5.0:
             boost += 15.0
-        return boost
-
-
-    def _nikkei225_spike_reversal_guard_boost(self, closes: List[float], ma20: float, ma60: float, ma200: float) -> float:
-        if len(closes) < 120:
-            return 0.0
-        close = closes[-1]
-        previous_close = closes[-2] if len(closes) >= 2 else close
-        if not (close > ma20 and close > ma60 and close > ma200):
-            return 0.0
-
-        max_60 = max(closes[-60:])
-        max_120 = max(closes[-120:])
-        is_near_60d_high = close >= max_60 * 0.992
-        is_near_120d_high = close >= max_120 * 0.992
-
-        prev20 = closes[-21] if len(closes) >= 21 else None
-        prev60 = closes[-61] if len(closes) >= 61 else None
-        prev3 = closes[-4] if len(closes) >= 4 else None
-        if prev20 is None or prev60 is None or prev3 is None or prev20 <= 0 or prev60 <= 0 or prev3 <= 0:
-            return 0.0
-
-        return_20d_before = ((close / prev20) - 1.0) * 100.0
-        return_60d_before = ((close / prev60) - 1.0) * 100.0
-        return_3d = ((close / prev3) - 1.0) * 100.0
-        deviation_from_ma20_pct = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
-        deviation_from_ma60_pct = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
-        recent_5d_high = max(closes[-5:]) if len(closes) >= 5 else close
-
-        base_ok = is_near_60d_high and is_near_120d_high
-        spike_ok = return_20d_before >= 8.0 or deviation_from_ma20_pct >= 6.0
-        support_ok = return_60d_before >= 5.0 or deviation_from_ma60_pct >= 5.0
-        reversal_ok = (
-            close < previous_close
-            or close <= recent_5d_high * 0.99
-            or return_3d <= 0.0
-        )
-        if not (base_ok and spike_ok and support_ok and reversal_ok):
-            return 0.0
-
-        boost = 20.0
-        if deviation_from_ma60_pct >= 5.0:
-            boost += 10.0
         return boost
 
     def _prepare_price_history(
@@ -390,8 +346,6 @@ class BacktestService:
                 overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
                 sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
                 topix_overheat_guard_active = False
-                nikkei225_spike_reversal_guard_active = False
-                nikkei225_spike_reversal_guard_blocked_no_reversal = False
                 if sell_rule_name in {"ath_boost_8_score80_gate", "no_ath_penalty_score80_gate"}:
                     sell_gate_open = shares > 0 and score >= sell_threshold_safe
                 elif sell_rule_name == "topix_overheat_guard_score80_gate":
@@ -401,16 +355,6 @@ class BacktestService:
                         topix_overheat_guard_active = score >= sell_threshold_safe
                         if topix_overheat_guard_active:
                             sell_gate_open = True
-                elif sell_rule_name == "nikkei225_spike_reversal_guard_score80_gate":
-                    boost = self._nikkei225_spike_reversal_guard_boost(closes, ma20_series[-1], ma60_series[-1], ma200_series[-1])
-                    if shares > 0:
-                        if boost > 0:
-                            score = max(0.0, min(100.0, score + boost))
-                            nikkei225_spike_reversal_guard_active = score >= sell_threshold_safe
-                            if nikkei225_spike_reversal_guard_active:
-                                sell_gate_open = True
-                        elif score >= sell_threshold_safe:
-                            nikkei225_spike_reversal_guard_blocked_no_reversal = True
                 cooldown_active = sell_cooldown_days_remaining > 0
                 score_t2 = recent_scores[-3] if len(recent_scores) >= 3 else None
                 score_t1 = recent_scores[-2] if len(recent_scores) >= 2 else None
@@ -479,14 +423,8 @@ class BacktestService:
                             "reason": (
                                 "topix_overheat_guard_bypass_peakout_confirmation"
                                 if topix_overheat_guard_active
-                                else "nikkei225_spike_reversal_guard_bypass_peakout_confirmation"
-                                if nikkei225_spike_reversal_guard_active
                                 else "topix_overheat_guard_score80_gate"
                                 if sell_rule_name == "topix_overheat_guard_score80_gate"
-                                else "nikkei225_spike_reversal_guard_blocked_no_reversal"
-                                if nikkei225_spike_reversal_guard_blocked_no_reversal
-                                else "nikkei225_spike_reversal_guard_score80_gate"
-                                if sell_rule_name == "nikkei225_spike_reversal_guard_score80_gate"
                                 else "current_logic_sell"
                             ),
                         }
