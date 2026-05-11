@@ -99,6 +99,7 @@ def test_jpy_indices_use_score80_gate_sell_and_existing_buy_flow(monkeypatch):
         buy_dates = {t["date"] for t in result["trades"] if t["action"] == "BUY"}
         assert expected["sell"].issubset(sell_dates)
         assert expected["buy"].issubset(buy_dates)
+        assert "trade_pair_diagnostics" in result
 
 
 

@@ -270,6 +270,81 @@ class BacktestService:
                 max_dd = dd
         return round(max_dd * 100, 2)
 
+
+    def _build_trade_pair_diagnostics(self, trades: List[Dict], price_history: List[Tuple[str, float]]) -> List[Dict]:
+        index_by_date = {dt: idx for idx, (dt, _) in enumerate(price_history)}
+        details: List[Dict] = []
+        sell_trades = [t for t in trades if t.get("action") == "SELL"]
+        for trade_no, sell in enumerate(sell_trades, start=1):
+            sell_idx = index_by_date.get(sell["date"])
+            if sell_idx is None:
+                continue
+            next_buy = next((t for t in trades[trades.index(sell) + 1 :] if t.get("action") == "BUY"), None)
+            buy_idx = index_by_date.get(next_buy["date"]) if next_buy else None
+            end_idx = buy_idx if buy_idx is not None else len(price_history) - 1
+            window = price_history[sell_idx : end_idx + 1]
+            min_row = min(window, key=lambda x: x[1]) if window else price_history[sell_idx]
+            min_idx = index_by_date.get(min_row[0], sell_idx)
+            sell_price = float(sell["price"])
+            buy_price = float(next_buy["price"]) if next_buy else None
+            days_out = (
+                (date.fromisoformat(next_buy["date"]) - date.fromisoformat(sell["date"])).days
+                if next_buy
+                else None
+            )
+            sell_to_buy_return_pct = (
+                round(((buy_price / sell_price) - 1.0) * 100.0, 4) if buy_price is not None and sell_price > 0 else None
+            )
+            max_dd_after_sell_pct = round(((min_row[1] / sell_price) - 1.0) * 100.0, 4) if sell_price > 0 else None
+            rebound_from_bottom_to_buy_pct = (
+                round(((buy_price / min_row[1]) - 1.0) * 100.0, 4)
+                if buy_price is not None and min_row[1] > 0
+                else None
+            )
+            timing_eval = "unclear"
+            if buy_idx is not None:
+                days_from_bottom = (date.fromisoformat(next_buy["date"]) - date.fromisoformat(min_row[0])).days
+                if days_from_bottom <= 5 and (rebound_from_bottom_to_buy_pct or 0.0) <= 3.0:
+                    timing_eval = "buy_early_or_good"
+                elif days_from_bottom >= 15 and (rebound_from_bottom_to_buy_pct or 0.0) >= 5.0:
+                    timing_eval = "buy_late"
+                else:
+                    timing_eval = "buy_neutral"
+
+            fwd = {}
+            for d in [5, 10, 20, 40]:
+                if sell_idx + d < len(price_history) and sell_price > 0:
+                    fwd[f"sell_forward_{d}d_return_pct"] = round(((price_history[sell_idx + d][1] / sell_price) - 1.0) * 100.0, 4)
+                else:
+                    fwd[f"sell_forward_{d}d_return_pct"] = None
+
+            contribution = "unknown"
+            if sell_to_buy_return_pct is not None:
+                contribution = "improved_vs_hold" if sell_to_buy_return_pct < 0 else "worsened_vs_hold"
+
+            details.append(
+                {
+                    "trade_no": trade_no,
+                    "sell_date": sell["date"],
+                    "sell_price": sell_price,
+                    "sell_reason": sell.get("reason"),
+                    "buy_date": next_buy["date"] if next_buy else None,
+                    "buy_price": buy_price,
+                    "buy_reason": next_buy.get("reason") if next_buy else None,
+                    "days_out_of_market": days_out,
+                    "sell_to_buy_return_pct": sell_to_buy_return_pct,
+                    **fwd,
+                    "min_after_sell_date": min_row[0],
+                    "min_after_sell_price": min_row[1],
+                    "max_drawdown_after_sell_pct": max_dd_after_sell_pct,
+                    "days_to_min_after_sell": (date.fromisoformat(min_row[0]) - date.fromisoformat(sell["date"])).days,
+                    "buy_timing_assessment": timing_eval,
+                    "trade_contribution_assessment": contribution,
+                    "rebound_from_bottom_to_buy_pct": rebound_from_bottom_to_buy_pct,
+                }
+            )
+        return details
+
     def run_backtest(
         self,
         start_date: date,
@@ -924,6 +999,7 @@ class BacktestService:
             "max_drawdown_pct": max_dd,
             "trade_count": len(trades),
             "trades": trades,
+            "trade_pair_diagnostics": self._build_trade_pair_diagnostics(trades, price_history),
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
             "price_history": price_history,
