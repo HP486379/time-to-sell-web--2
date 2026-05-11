@@ -367,6 +367,15 @@ class BacktestService:
             start_date, end_date, allow_fallback=self.allow_fallback, index_type=index_type
         )
         price_history = self._prepare_price_history(raw_price_history, index_type)
+        requested_start_iso = start_date.isoformat()
+        if price_history:
+            first_available = date.fromisoformat(price_history[0][0])
+            if first_available > start_date and (first_available - start_date).days > 10:
+                raise ValueError(
+                    "insufficient_history_for_requested_start:"
+                    f"requested_start={requested_start_iso},first_available={first_available.isoformat()}"
+                )
+
         required_points = max(200, score_ma)
         if len(price_history) < required_points:
             raise ValueError(
