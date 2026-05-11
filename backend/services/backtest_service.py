@@ -323,6 +323,7 @@ class BacktestService:
         sell_cooldown_days_remaining = 0
         days_since_last_sell: int | None = None
         recent_scores: List[float] = []
+        last_sell_reason: str | None = None
         buy_reason_counts = {
             "initial_threshold": 0,
             "pattern_a": 0,
@@ -442,7 +443,56 @@ class BacktestService:
                 pattern_b = False
                 day60_condition = False
                 score_threshold_condition = score < buy_threshold_safe
-                if days_since_last_sell is None:
+                nikkei_fast_buyback_enabled = (
+                    index_type == "NIKKEI225"
+                    and last_sell_reason is not None
+                    and str(last_sell_reason).startswith("nikkei225_trend_break_guard")
+                    and shares == 0
+                )
+                prev_close = closes[-2] if len(closes) >= 2 else close
+                prev3 = closes[-4] if len(closes) >= 4 and closes[-4] > 0 else None
+                prev5 = closes[-6] if len(closes) >= 6 and closes[-6] > 0 else None
+                return_3d = ((close / prev3) - 1.0) * 100.0 if prev3 is not None else None
+                return_5d = ((close / prev5) - 1.0) * 100.0 if prev5 is not None else None
+                recent_10d_low = min(closes[-10:]) if len(closes) >= 10 else close
+                rebound_from_10d_low = ((close / recent_10d_low) - 1.0) * 100.0 if recent_10d_low > 0 else 0.0
+                recent_5d_high = max(closes[-5:]) if len(closes) >= 5 else close
+                ma200_guard_ok = close >= (ma200_series[-1] * 0.97)
+
+                if nikkei_fast_buyback_enabled and days_since_last_sell is not None and days_since_last_sell < 3:
+                    buy_gate_open = False
+                    buy_reason = "nikkei225_fast_buyback_blocked_too_early"
+                elif nikkei_fast_buyback_enabled and days_since_last_sell is not None and not ma200_guard_ok:
+                    buy_gate_open = False
+                    buy_reason = "nikkei225_fast_buyback_blocked_below_ma200"
+                elif nikkei_fast_buyback_enabled and days_since_last_sell is not None:
+                    cond_a = close > ma20_series[-1] and (return_3d is not None and return_3d >= 0.0)
+                    cond_b = (return_3d is not None and return_3d >= 2.0) and (return_5d is not None and return_5d >= 0.0)
+                    cond_c = rebound_from_10d_low >= 4.0 and close > prev_close
+                    cond_d = close >= recent_5d_high and (return_3d is not None and return_3d >= 0.0)
+                    fast_buyback_open = cond_a or cond_b or cond_c or cond_d
+                    if score_threshold_condition:
+                        buy_gate_open = True
+                        buy_reason = "initial_threshold"
+                    elif days_since_last_sell >= 40 and fast_buyback_open:
+                        buy_gate_open = True
+                        buy_reason = (
+                            "nikkei225_fast_buyback_ma20_recovery" if cond_a else
+                            "nikkei225_fast_buyback_short_reversal" if cond_b else
+                            "nikkei225_fast_buyback_bottom_rebound" if cond_c else
+                            "nikkei225_fast_buyback_recent_high_recovery"
+                        )
+                    elif 3 <= days_since_last_sell < 40 and fast_buyback_open:
+                        buy_gate_open = True
+                        buy_reason = (
+                            "nikkei225_fast_buyback_ma20_recovery" if cond_a else
+                            "nikkei225_fast_buyback_short_reversal" if cond_b else
+                            "nikkei225_fast_buyback_bottom_rebound" if cond_c else
+                            "nikkei225_fast_buyback_recent_high_recovery"
+                        )
+                    else:
+                        buy_gate_open = False
+                elif days_since_last_sell is None:
                     # 初回エントリーは従来閾値を利用
                     buy_gate_open = score_threshold_condition
                     if buy_gate_open:
@@ -528,6 +578,7 @@ class BacktestService:
                     overheat_event_consumed = True
                     sell_cooldown_days_remaining = 30
                     days_since_last_sell = 0
+                    last_sell_reason = trades[-1]["reason"]
                 elif shares > 0 and (sell_gate_open and cooldown_active):
                     sell_gate_block_count += 1
                 elif shares > 0 and overheat_event_active and not sell_gate_open:
