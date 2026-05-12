@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
 from math import floor
 from typing import Dict, List, Tuple
 
@@ -363,13 +365,41 @@ class BacktestService:
         if score_ma < 2:
             raise ValueError("invalid_score_ma:must_be_at_least_2")
 
-        raw_price_history = self.market_service.get_price_history_range(
-            start_date, end_date, allow_fallback=self.allow_fallback, index_type=index_type
+        fetch_timeout_sec = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "120"))
+        t0_fetch = time.monotonic()
+        logger.info(
+            "[backtest] price_fetch_start index_type=%s requested_start=%s requested_end=%s timeout_sec=%s",
+            index_type,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            fetch_timeout_sec,
         )
+        try:
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(
+                    self.market_service.get_price_history_range,
+                    start_date,
+                    end_date,
+                    self.allow_fallback,
+                    index_type,
+                )
+                raw_price_history = fut.result(timeout=fetch_timeout_sec)
+        except FuturesTimeoutError as exc:
+            raise ValueError(
+                "price_history_fetch_timeout:"
+                f"index_type={index_type},requested_start={start_date.isoformat()},end_date={end_date.isoformat()}"
+            ) from exc
+        finally:
+            logger.info(
+                "[backtest] price_fetch_end index_type=%s elapsed_sec=%.3f",
+                index_type,
+                time.monotonic() - t0_fetch,
+            )
         price_history = self._prepare_price_history(raw_price_history, index_type)
         requested_start_iso = start_date.isoformat()
         if price_history:
             first_available = date.fromisoformat(price_history[0][0])
+            logger.info("[backtest] available_start index_type=%s requested_start=%s available_start=%s", index_type, requested_start_iso, first_available.isoformat())
             if first_available > start_date and (first_available - start_date).days > 10:
                 raise ValueError(
                     "insufficient_history_for_requested_start:"
