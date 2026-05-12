@@ -6,6 +6,9 @@ from typing import List, Optional
 import math
 import statistics
 import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query, Header, Request
@@ -843,16 +846,28 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
 
 @app.post("/api/backtest", response_model=BacktestResponse)
 def run_backtest(payload: BacktestRequest):
+    bt_timeout_sec = float(os.getenv("BACKTEST_EXEC_TIMEOUT_SEC", "60"))
+    bt_started = time.monotonic()
+    logger.info(
+        "[backtest] backtest_start index_type=%s requested_start_date=%s end_date=%s timeout_sec=%s",
+        payload.index_type.value,
+        payload.start_date.isoformat(),
+        payload.end_date.isoformat(),
+        bt_timeout_sec,
+    )
+    ex = ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(
+        backtest_service.run_backtest,
+        payload.start_date,
+        payload.end_date,
+        payload.initial_cash,
+        payload.buy_threshold,
+        payload.sell_threshold,
+        payload.index_type.value,
+        payload.score_ma,
+    )
     try:
-        result = backtest_service.run_backtest(
-            payload.start_date,
-            payload.end_date,
-            payload.initial_cash,
-            payload.buy_threshold,
-            payload.sell_threshold,
-            payload.index_type.value,
-            payload.score_ma,
-        )
+        result = fut.result(timeout=bt_timeout_sec)
         price_history = result.get("price_history", [])
         equity_curve = _build_equity_curve(price_history)
         summary = BacktestSummary(
@@ -864,6 +879,9 @@ def run_backtest(payload: BacktestRequest):
             final_asset=result["final_value"],
             buy_and_hold_asset=result["buy_and_hold_final"],
         )
+        elapsed = time.monotonic() - bt_started
+        logger.info("[backtest] backtest_elapsed_sec index_type=%s elapsed_sec=%.3f", payload.index_type.value, elapsed)
+        ex.shutdown(wait=False, cancel_futures=True)
         return BacktestResponse(
             summary=summary,
             equity_curve=equity_curve,
@@ -874,6 +892,27 @@ def run_backtest(payload: BacktestRequest):
             max_drawdown=result["max_drawdown_pct"],
             trade_count=result["trade_count"],
         )
+    except FuturesTimeoutError:
+        fut.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        elapsed = time.monotonic() - bt_started
+        logger.warning(
+            "[backtest] timeout_reason=backtest_timeout index_type=%s requested_start_date=%s end_date=%s backtest_elapsed_sec=%.3f",
+            payload.index_type.value,
+            payload.start_date.isoformat(),
+            payload.end_date.isoformat(),
+            elapsed,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "backtest_timeout",
+                "index_type": payload.index_type.value,
+                "requested_start_date": payload.start_date.isoformat(),
+                "end_date": payload.end_date.isoformat(),
+                "message": "Backtest exceeded server-side timeout before completion.",
+            },
+        )
     except ValueError as exc:
         reason = str(exc)
         logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, reason)
@@ -883,6 +922,7 @@ def run_backtest(payload: BacktestRequest):
                 if "=" in token:
                     k, v = token.split("=", 1)
                     pairs[k.strip()] = v.strip()
+            ex.shutdown(wait=False, cancel_futures=True)
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -899,6 +939,9 @@ def run_backtest(payload: BacktestRequest):
                 if "=" in token:
                     k, v = token.split("=", 1)
                     pairs[k.strip()] = v.strip()
+            elapsed = time.monotonic() - bt_started
+            logger.warning("[backtest] timeout_reason=price_history_fetch_timeout index_type=%s backtest_elapsed_sec=%.3f", payload.index_type.value, elapsed)
+            ex.shutdown(wait=False, cancel_futures=True)
             raise HTTPException(
                 status_code=504,
                 detail={
@@ -908,6 +951,7 @@ def run_backtest(payload: BacktestRequest):
                     "end_date": pairs.get("end_date", payload.end_date.isoformat()),
                 },
             )
+        ex.shutdown(wait=False, cancel_futures=True)
         raise HTTPException(
             status_code=400,
             detail={
@@ -917,6 +961,7 @@ def run_backtest(payload: BacktestRequest):
             },
         )
     except Exception:
+        ex.shutdown(wait=False, cancel_futures=True)
         logger.exception("Backtest failed", exc_info=True)
         raise HTTPException(
             status_code=502,
@@ -1192,6 +1237,7 @@ def create_purchase(
     user_id = x_user_id if x_user_id else payload.user_id
 
     if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
+        ex.shutdown(wait=False, cancel_futures=True)
         raise HTTPException(
             status_code=400,
             detail=(

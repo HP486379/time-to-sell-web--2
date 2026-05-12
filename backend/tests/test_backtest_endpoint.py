@@ -111,3 +111,26 @@ def test_backtest_fetch_timeout_returns_structured_json_error(monkeypatch):
         main.run_backtest(payload)
     assert excinfo.value.status_code == 504
     assert excinfo.value.detail["error"] == "price_history_fetch_timeout"
+
+
+def test_backtest_exec_timeout_returns_structured_json_error(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        import time
+        time.sleep(0.2)
+        return {}
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setenv("BACKTEST_EXEC_TIMEOUT_SEC", "0.01")
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 504
+    assert excinfo.value.detail["error"] == "backtest_timeout"

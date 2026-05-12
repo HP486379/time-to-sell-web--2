@@ -365,7 +365,7 @@ class BacktestService:
         if score_ma < 2:
             raise ValueError("invalid_score_ma:must_be_at_least_2")
 
-        fetch_timeout_sec = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "120"))
+        fetch_timeout_sec = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "25"))
         t0_fetch = time.monotonic()
         logger.info(
             "[backtest] price_fetch_start index_type=%s requested_start=%s requested_end=%s timeout_sec=%s",
@@ -374,33 +374,39 @@ class BacktestService:
             end_date.isoformat(),
             fetch_timeout_sec,
         )
+        ex = ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(
+            self.market_service.get_price_history_range,
+            start_date,
+            end_date,
+            self.allow_fallback,
+            index_type,
+        )
         try:
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(
-                    self.market_service.get_price_history_range,
-                    start_date,
-                    end_date,
-                    self.allow_fallback,
-                    index_type,
-                )
-                raw_price_history = fut.result(timeout=fetch_timeout_sec)
+            raw_price_history = fut.result(timeout=fetch_timeout_sec)
         except FuturesTimeoutError as exc:
+            fut.cancel()
+            ex.shutdown(wait=False, cancel_futures=True)
             raise ValueError(
                 "price_history_fetch_timeout:"
                 f"index_type={index_type},requested_start={start_date.isoformat()},end_date={end_date.isoformat()}"
             ) from exc
         finally:
+            ex.shutdown(wait=False, cancel_futures=True)
             logger.info(
                 "[backtest] price_fetch_end index_type=%s elapsed_sec=%.3f",
                 index_type,
                 time.monotonic() - t0_fetch,
             )
         price_history = self._prepare_price_history(raw_price_history, index_type)
+        logger.info("[backtest] price_rows_count index_type=%s rows=%d", index_type, len(price_history))
         requested_start_iso = start_date.isoformat()
         if price_history:
             first_available = date.fromisoformat(price_history[0][0])
             logger.info("[backtest] available_start index_type=%s requested_start=%s available_start=%s", index_type, requested_start_iso, first_available.isoformat())
-            if first_available > start_date and (first_available - start_date).days > 10:
+            history_ok = not (first_available > start_date and (first_available - start_date).days > 10)
+            logger.info("[backtest] history_validation_result index_type=%s ok=%s requested_start=%s available_start=%s available_end=%s", index_type, history_ok, requested_start_iso, first_available.isoformat(), price_history[-1][0])
+            if not history_ok:
                 raise ValueError(
                     "insufficient_history_for_requested_start:"
                     f"requested_start={requested_start_iso},first_available={first_available.isoformat()}"
