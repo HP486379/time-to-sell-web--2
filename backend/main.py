@@ -875,12 +875,44 @@ def run_backtest(payload: BacktestRequest):
             trade_count=result["trade_count"],
         )
     except ValueError as exc:
-        logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, str(exc))
+        reason = str(exc)
+        logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, reason)
+        if reason.startswith("insufficient_history_for_requested_start:"):
+            pairs = {}
+            for token in reason.split(":", 1)[1].split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "insufficient_history_for_requested_start",
+                    "index_type": payload.index_type.value,
+                    "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
+                    "available_start_date": pairs.get("first_available"),
+                    "message": "Requested start date is earlier than available price history.",
+                },
+            )
+        if reason.startswith("price_history_fetch_timeout:"):
+            pairs = {}
+            for token in reason.split(":", 1)[1].split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "error": "price_history_fetch_timeout",
+                    "index_type": pairs.get("index_type", payload.index_type.value),
+                    "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
+                    "end_date": pairs.get("end_date", payload.end_date.isoformat()),
+                },
+            )
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "BACKTEST_COMPUTATION_ERROR",
-                "reason": str(exc),
+                "reason": reason,
                 "index_type": payload.index_type.value,
             },
         )
