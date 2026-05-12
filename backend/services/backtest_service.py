@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import time
 from math import floor
 from typing import Dict, List, Tuple
 
@@ -18,6 +20,7 @@ INDEX_SELL_RULE_MAP = {
     "SP500_JPY": "ath_boost_8_score80_gate",
     "ALLCOUNTRY_JPY": "no_ath_penalty_score80_gate",
     "TOPIX": "topix_overheat_guard_score80_gate",
+    "NIKKEI225": "nikkei225_trend_break_guard_score80_gate",
 }
 
 
@@ -91,6 +94,61 @@ class BacktestService:
             boost += 15.0
         return boost
 
+
+
+    def _nikkei225_trend_break_guard_boost(self, closes: List[float], ma20: float, ma60: float, ma200: float) -> tuple[float, bool]:
+        if len(closes) < 120:
+            return 0.0, False
+        close = closes[-1]
+        if not (close > ma60 and close > ma200):
+            return 0.0, False
+        max_60 = max(closes[-60:])
+        max_120 = max(closes[-120:])
+        is_near_60d_high = close >= max_60 * 0.992
+        is_near_120d_high = close >= max_120 * 0.992
+        if not (is_near_60d_high and is_near_120d_high):
+            return 0.0, False
+
+        prev20 = closes[-21] if len(closes) >= 21 else None
+        prev60 = closes[-61] if len(closes) >= 61 else None
+        prev5 = closes[-6] if len(closes) >= 6 else None
+        prev3 = closes[-4] if len(closes) >= 4 else None
+        if any(v is None or v <= 0 for v in [prev20, prev60, prev5, prev3]):
+            return 0.0, False
+
+        return_20d_before = ((close / prev20) - 1.0) * 100.0
+        return_60d_before = ((close / prev60) - 1.0) * 100.0
+        return_5d = ((close / prev5) - 1.0) * 100.0
+        return_3d = ((close / prev3) - 1.0) * 100.0
+        deviation_from_ma20_pct = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+        deviation_from_ma60_pct = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+        recent_10d_high = max(closes[-10:]) if len(closes) >= 10 else close
+        recent_3d_high = max(closes[-3:]) if len(closes) >= 3 else close
+
+        overheat_count = sum([
+            return_20d_before >= 6.0,
+            return_60d_before >= 5.0,
+            deviation_from_ma20_pct >= 4.0,
+            deviation_from_ma60_pct >= 5.0,
+        ])
+        trend_break_count = sum([
+            close < ma20,
+            close <= recent_10d_high * 0.97,
+            return_5d <= -2.0,
+            close < recent_3d_high,
+            return_3d <= -1.0,
+        ])
+
+        if overheat_count < 2:
+            return 0.0, False
+        trend_break_ok = trend_break_count >= 2
+        if not trend_break_ok:
+            return 0.0, False
+
+        boost = 30.0
+        if close < ma20 and return_5d <= -2.0 and close <= recent_10d_high * 0.97:
+            boost += 10.0
+        return boost, True
     def _prepare_price_history(
         self, raw_history: List[Tuple[str, float]], index_type: str
     ) -> List[Tuple[str, float]]:
@@ -177,6 +235,7 @@ class BacktestService:
         macro_series: Dict[str, List[Tuple[date, float]]],
         current_date: date,
         score_ma: int,
+        events_cache: Dict[str, List[Dict]] | None = None,
     ):
         technical_score, _ = calculate_technical_score(price_history, base_window=score_ma)
 
@@ -188,7 +247,13 @@ class BacktestService:
             (r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur)
         )
 
-        events = self.event_service.get_events_for_date(current_date)
+        cache_key = current_date.isoformat()
+        if events_cache is not None and cache_key in events_cache:
+            events = events_cache[cache_key]
+        else:
+            events = self.event_service.get_events_for_date(current_date)
+            if events_cache is not None:
+                events_cache[cache_key] = events
         event_adjustment, _ = calculate_event_adjustment(current_date, events)
 
         ma500, ma1000 = calculate_ultra_long_mas(price_history)
@@ -214,6 +279,81 @@ class BacktestService:
                 max_dd = dd
         return round(max_dd * 100, 2)
 
+
+    def _build_trade_pair_diagnostics(self, trades: List[Dict], price_history: List[Tuple[str, float]]) -> List[Dict]:
+        index_by_date = {dt: idx for idx, (dt, _) in enumerate(price_history)}
+        details: List[Dict] = []
+        sell_trades = [t for t in trades if t.get("action") == "SELL"]
+        for trade_no, sell in enumerate(sell_trades, start=1):
+            sell_idx = index_by_date.get(sell["date"])
+            if sell_idx is None:
+                continue
+            next_buy = next((t for t in trades[trades.index(sell) + 1 :] if t.get("action") == "BUY"), None)
+            buy_idx = index_by_date.get(next_buy["date"]) if next_buy else None
+            end_idx = buy_idx if buy_idx is not None else len(price_history) - 1
+            window = price_history[sell_idx : end_idx + 1]
+            min_row = min(window, key=lambda x: x[1]) if window else price_history[sell_idx]
+            min_idx = index_by_date.get(min_row[0], sell_idx)
+            sell_price = float(sell["price"])
+            buy_price = float(next_buy["price"]) if next_buy else None
+            days_out = (
+                (date.fromisoformat(next_buy["date"]) - date.fromisoformat(sell["date"])).days
+                if next_buy
+                else None
+            )
+            sell_to_buy_return_pct = (
+                round(((buy_price / sell_price) - 1.0) * 100.0, 4) if buy_price is not None and sell_price > 0 else None
+            )
+            max_dd_after_sell_pct = round(((min_row[1] / sell_price) - 1.0) * 100.0, 4) if sell_price > 0 else None
+            rebound_from_bottom_to_buy_pct = (
+                round(((buy_price / min_row[1]) - 1.0) * 100.0, 4)
+                if buy_price is not None and min_row[1] > 0
+                else None
+            )
+            timing_eval = "unclear"
+            if buy_idx is not None:
+                days_from_bottom = (date.fromisoformat(next_buy["date"]) - date.fromisoformat(min_row[0])).days
+                if days_from_bottom <= 5 and (rebound_from_bottom_to_buy_pct or 0.0) <= 3.0:
+                    timing_eval = "buy_early_or_good"
+                elif days_from_bottom >= 15 and (rebound_from_bottom_to_buy_pct or 0.0) >= 5.0:
+                    timing_eval = "buy_late"
+                else:
+                    timing_eval = "buy_neutral"
+
+            fwd = {}
+            for d in [5, 10, 20, 40]:
+                if sell_idx + d < len(price_history) and sell_price > 0:
+                    fwd[f"sell_forward_{d}d_return_pct"] = round(((price_history[sell_idx + d][1] / sell_price) - 1.0) * 100.0, 4)
+                else:
+                    fwd[f"sell_forward_{d}d_return_pct"] = None
+
+            contribution = "unknown"
+            if sell_to_buy_return_pct is not None:
+                contribution = "improved_vs_hold" if sell_to_buy_return_pct < 0 else "worsened_vs_hold"
+
+            details.append(
+                {
+                    "trade_no": trade_no,
+                    "sell_date": sell["date"],
+                    "sell_price": sell_price,
+                    "sell_reason": sell.get("reason"),
+                    "buy_date": next_buy["date"] if next_buy else None,
+                    "buy_price": buy_price,
+                    "buy_reason": next_buy.get("reason") if next_buy else None,
+                    "days_out_of_market": days_out,
+                    "sell_to_buy_return_pct": sell_to_buy_return_pct,
+                    **fwd,
+                    "min_after_sell_date": min_row[0],
+                    "min_after_sell_price": min_row[1],
+                    "max_drawdown_after_sell_pct": max_dd_after_sell_pct,
+                    "days_to_min_after_sell": (date.fromisoformat(min_row[0]) - date.fromisoformat(sell["date"])).days,
+                    "buy_timing_assessment": timing_eval,
+                    "trade_contribution_assessment": contribution,
+                    "rebound_from_bottom_to_buy_pct": rebound_from_bottom_to_buy_pct,
+                }
+            )
+        return details
+
     def run_backtest(
         self,
         start_date: date,
@@ -232,10 +372,53 @@ class BacktestService:
         if score_ma < 2:
             raise ValueError("invalid_score_ma:must_be_at_least_2")
 
-        raw_price_history = self.market_service.get_price_history_range(
-            start_date, end_date, allow_fallback=self.allow_fallback, index_type=index_type
+        fetch_timeout_sec = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "25"))
+        t0_fetch = time.monotonic()
+        logger.info(
+            "[backtest] price_fetch_start index_type=%s requested_start=%s requested_end=%s timeout_sec=%s",
+            index_type,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            fetch_timeout_sec,
         )
+        ex = ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(
+            self.market_service.get_price_history_range,
+            start_date,
+            end_date,
+            self.allow_fallback,
+            index_type,
+        )
+        try:
+            raw_price_history = fut.result(timeout=fetch_timeout_sec)
+        except FuturesTimeoutError as exc:
+            fut.cancel()
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise ValueError(
+                "price_history_fetch_timeout:"
+                f"index_type={index_type},requested_start={start_date.isoformat()},end_date={end_date.isoformat()}"
+            ) from exc
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+            logger.info(
+                "[backtest] price_fetch_end index_type=%s elapsed_sec=%.3f",
+                index_type,
+                time.monotonic() - t0_fetch,
+            )
         price_history = self._prepare_price_history(raw_price_history, index_type)
+        logger.info("[backtest] price_rows_count index_type=%s rows=%d", index_type, len(price_history))
+        requested_start_iso = start_date.isoformat()
+        if price_history:
+            first_available = date.fromisoformat(price_history[0][0])
+            logger.info("[backtest] available_start index_type=%s requested_start=%s available_start=%s", index_type, requested_start_iso, first_available.isoformat())
+            history_ok = not (first_available > start_date and (first_available - start_date).days > 10)
+            logger.info("[backtest] history_validation_result index_type=%s ok=%s requested_start=%s available_start=%s available_end=%s", index_type, history_ok, requested_start_iso, first_available.isoformat(), price_history[-1][0])
+            if not history_ok:
+                raise ValueError(
+                    "insufficient_history_for_requested_start:"
+                    f"requested_start={requested_start_iso},first_available={first_available.isoformat()}"
+                )
+
         required_points = max(200, score_ma)
         if len(price_history) < required_points:
             raise ValueError(
@@ -244,6 +427,8 @@ class BacktestService:
 
         macro_series = self.macro_service.get_macro_series_range(start_date, end_date)
 
+        timing = {"technical_calc_sec": 0.0, "macro_calc_sec": 0.0, "event_calc_sec": 0.0, "diagnostics_sec": 0.0}
+        events_cache: Dict[str, List[Dict]] = {}
         first_price = price_history[0][1]
         initial_shares = floor(initial_cash_safe / first_price)
         initial_cash_after_buy = initial_cash_safe - (initial_shares * first_price)
@@ -267,6 +452,7 @@ class BacktestService:
         sell_cooldown_days_remaining = 0
         days_since_last_sell: int | None = None
         recent_scores: List[float] = []
+        last_sell_reason: str | None = None
         buy_reason_counts = {
             "initial_threshold": 0,
             "pattern_a": 0,
@@ -283,6 +469,7 @@ class BacktestService:
         hold_cash -= hold_shares * first_price
         buy_hold_history: List[Dict] = []
 
+        t_loop_start = time.monotonic()
         for idx, (date_str, close) in enumerate(price_history):
             current_dt = date.fromisoformat(date_str)
             if sell_cooldown_days_remaining > 0:
@@ -293,7 +480,12 @@ class BacktestService:
             if idx >= max(score_ma - 1, 199):
                 sub_history = price_history[: idx + 1]
                 score_rows += 1
-                score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
+                t_score = time.monotonic()
+                try:
+                    score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma, events_cache=events_cache)
+                except TypeError:
+                    score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
+                timing["technical_calc_sec"] += time.monotonic() - t_score
                 score = self._safe_float(score, field_name="score")
                 daily_scores.append({"date": date_str, "score": score})
                 closes = [p[1] for p in sub_history]
@@ -305,7 +497,11 @@ class BacktestService:
                     cpi_hist, cpi_cur = self._history_and_current(macro_series["cpi"], current_dt)
                     vix_hist, vix_cur = self._history_and_current(macro_series["vix"], current_dt)
                     macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
-                    events = self.event_service.get_events_for_date(current_dt)
+                    ckey = current_dt.isoformat()
+                    events = events_cache.get(ckey)
+                    if events is None:
+                        events = self.event_service.get_events_for_date(current_dt)
+                        events_cache[ckey] = events
                     event_adjustment, _ = calculate_event_adjustment(current_dt, events)
                     ma500, ma1000 = calculate_ultra_long_mas(sub_history)
                     score = calculate_total_score(
@@ -346,6 +542,8 @@ class BacktestService:
                 overheat_event_active = overheat_event_date is not None and not overheat_event_consumed
                 sell_gate_open = overheat_event_active and peakout_detected and confirmation_detected
                 topix_overheat_guard_active = False
+                nikkei225_trend_break_guard_active = False
+                nikkei225_trend_break_guard_blocked_no_trend_break = False
                 if sell_rule_name in {"ath_boost_8_score80_gate", "no_ath_penalty_score80_gate"}:
                     sell_gate_open = shares > 0 and score >= sell_threshold_safe
                 elif sell_rule_name == "topix_overheat_guard_score80_gate":
@@ -355,6 +553,21 @@ class BacktestService:
                         topix_overheat_guard_active = score >= sell_threshold_safe
                         if topix_overheat_guard_active:
                             sell_gate_open = True
+                elif sell_rule_name == "nikkei225_trend_break_guard_score80_gate":
+                    boost, trend_break_ok = self._nikkei225_trend_break_guard_boost(
+                        closes,
+                        ma20_series[-1],
+                        ma60_series[-1],
+                        ma200_series[-1],
+                    )
+                    if shares > 0:
+                        if boost > 0:
+                            score = max(0.0, min(100.0, score + boost))
+                            nikkei225_trend_break_guard_active = score >= sell_threshold_safe and trend_break_ok
+                            if nikkei225_trend_break_guard_active:
+                                sell_gate_open = True
+                        elif score >= sell_threshold_safe:
+                            nikkei225_trend_break_guard_blocked_no_trend_break = True
                 cooldown_active = sell_cooldown_days_remaining > 0
                 score_t2 = recent_scores[-3] if len(recent_scores) >= 3 else None
                 score_t1 = recent_scores[-2] if len(recent_scores) >= 2 else None
@@ -369,7 +582,56 @@ class BacktestService:
                 pattern_b = False
                 day60_condition = False
                 score_threshold_condition = score < buy_threshold_safe
-                if days_since_last_sell is None:
+                nikkei_fast_buyback_enabled = (
+                    index_type == "NIKKEI225"
+                    and last_sell_reason is not None
+                    and str(last_sell_reason).startswith("nikkei225_trend_break_guard")
+                    and shares == 0
+                )
+                prev_close = closes[-2] if len(closes) >= 2 else close
+                prev3 = closes[-4] if len(closes) >= 4 and closes[-4] > 0 else None
+                prev5 = closes[-6] if len(closes) >= 6 and closes[-6] > 0 else None
+                return_3d = ((close / prev3) - 1.0) * 100.0 if prev3 is not None else None
+                return_5d = ((close / prev5) - 1.0) * 100.0 if prev5 is not None else None
+                recent_10d_low = min(closes[-10:]) if len(closes) >= 10 else close
+                rebound_from_10d_low = ((close / recent_10d_low) - 1.0) * 100.0 if recent_10d_low > 0 else 0.0
+                recent_5d_high = max(closes[-5:]) if len(closes) >= 5 else close
+                ma200_guard_ok = close >= (ma200_series[-1] * 0.97)
+
+                if nikkei_fast_buyback_enabled and days_since_last_sell is not None and days_since_last_sell < 3:
+                    buy_gate_open = False
+                    buy_reason = "nikkei225_fast_buyback_blocked_too_early"
+                elif nikkei_fast_buyback_enabled and days_since_last_sell is not None and not ma200_guard_ok:
+                    buy_gate_open = False
+                    buy_reason = "nikkei225_fast_buyback_blocked_below_ma200"
+                elif nikkei_fast_buyback_enabled and days_since_last_sell is not None:
+                    cond_a = close > ma20_series[-1] and (return_3d is not None and return_3d >= 0.0)
+                    cond_b = (return_3d is not None and return_3d >= 2.0) and (return_5d is not None and return_5d >= 0.0)
+                    cond_c = rebound_from_10d_low >= 4.0 and close > prev_close
+                    cond_d = close >= recent_5d_high and (return_3d is not None and return_3d >= 0.0)
+                    fast_buyback_open = cond_a or cond_b or cond_c or cond_d
+                    if score_threshold_condition:
+                        buy_gate_open = True
+                        buy_reason = "initial_threshold"
+                    elif days_since_last_sell >= 40 and fast_buyback_open:
+                        buy_gate_open = True
+                        buy_reason = (
+                            "nikkei225_fast_buyback_ma20_recovery" if cond_a else
+                            "nikkei225_fast_buyback_short_reversal" if cond_b else
+                            "nikkei225_fast_buyback_bottom_rebound" if cond_c else
+                            "nikkei225_fast_buyback_recent_high_recovery"
+                        )
+                    elif 3 <= days_since_last_sell < 40 and fast_buyback_open:
+                        buy_gate_open = True
+                        buy_reason = (
+                            "nikkei225_fast_buyback_ma20_recovery" if cond_a else
+                            "nikkei225_fast_buyback_short_reversal" if cond_b else
+                            "nikkei225_fast_buyback_bottom_rebound" if cond_c else
+                            "nikkei225_fast_buyback_recent_high_recovery"
+                        )
+                    else:
+                        buy_gate_open = False
+                elif days_since_last_sell is None:
                     # 初回エントリーは従来閾値を利用
                     buy_gate_open = score_threshold_condition
                     if buy_gate_open:
@@ -425,6 +687,12 @@ class BacktestService:
                                 if topix_overheat_guard_active
                                 else "topix_overheat_guard_score80_gate"
                                 if sell_rule_name == "topix_overheat_guard_score80_gate"
+                                else "nikkei225_trend_break_guard_bypass_peakout_confirmation"
+                                if nikkei225_trend_break_guard_active
+                                else "nikkei225_trend_break_guard_blocked_no_trend_break"
+                                if nikkei225_trend_break_guard_blocked_no_trend_break
+                                else "nikkei225_trend_break_guard_score80_gate"
+                                if sell_rule_name == "nikkei225_trend_break_guard_score80_gate"
                                 else "current_logic_sell"
                             ),
                         }
@@ -449,6 +717,7 @@ class BacktestService:
                     overheat_event_consumed = True
                     sell_cooldown_days_remaining = 30
                     days_since_last_sell = 0
+                    last_sell_reason = trades[-1]["reason"]
                 elif shares > 0 and (sell_gate_open and cooldown_active):
                     sell_gate_block_count += 1
                 elif shares > 0 and overheat_event_active and not sell_gate_open:
@@ -606,6 +875,9 @@ class BacktestService:
             max_cash_wait_days,
             diagnosis,
         )
+
+        timing["total_sec"] = time.monotonic() - t_loop_start
+        logger.info("[backtest_timing] index_type=%s technical_calc_sec=%.3f macro_calc_sec=%.3f event_calc_sec=%.3f diagnostics_sec=%.3f total_sec=%.3f price_rows_count=%d", index_type, timing["technical_calc_sec"], timing["macro_calc_sec"], timing["event_calc_sec"], timing["diagnostics_sec"], timing["total_sec"], len(price_history))
 
         buy_trades = [trade for trade in trades if trade["action"] == "BUY"]
         sell_trades = [trade for trade in trades if trade["action"] == "SELL"]
@@ -793,7 +1065,9 @@ class BacktestService:
             "cagr_pct": round(cagr * 100, 2),
             "max_drawdown_pct": max_dd,
             "trade_count": len(trades),
+            "backtest_timing": {k: round(v, 4) for k, v in timing.items()},
             "trades": trades,
+            "trade_pair_diagnostics": self._build_trade_pair_diagnostics(trades, price_history),
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
             "price_history": price_history,
@@ -822,6 +1096,7 @@ class BacktestService:
                     "buy_count": len(buy_trades),
                     "sell_count": len(sell_trades),
                     "trade_count": len(trades),
+            "backtest_timing": {k: round(v, 4) for k, v in timing.items()},
                     "first_trade_action": first_trade["action"] if first_trade else None,
                     "first_trade_date": first_trade["date"] if first_trade else None,
                     "first_trade_price": first_trade["price"] if first_trade else None,
