@@ -372,7 +372,9 @@ class BacktestService:
         if score_ma < 2:
             raise ValueError("invalid_score_ma:must_be_at_least_2")
 
-        fetch_timeout_sec = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "25"))
+        fetch_timeout_cfg = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "25"))
+        exec_timeout_cfg = float(os.getenv("BACKTEST_EXEC_TIMEOUT_SEC", "60"))
+        fetch_timeout_sec = min(fetch_timeout_cfg, max(5.0, exec_timeout_cfg - 5.0))
         t0_fetch = time.monotonic()
         logger.info(
             "[backtest] price_fetch_start index_type=%s requested_start=%s requested_end=%s timeout_sec=%s",
