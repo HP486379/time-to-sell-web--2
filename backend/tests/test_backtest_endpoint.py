@@ -4,6 +4,8 @@ from datetime import date
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+from fastapi import HTTPException
 import main
 from main import BacktestRequest, BacktestDiagnosticsSummaryRequest
 
@@ -67,3 +69,95 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
     assert "initial_entry" in body["diagnostics"]
     assert "initial_position" in body["diagnostics"]
     assert "exposure" in body["diagnostics"]
+
+
+def test_backtest_insufficient_history_returns_structured_json_error(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        raise ValueError("insufficient_history_for_requested_start:requested_start=2004-01-01,first_available=2014-01-01")
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["error"] == "insufficient_history_for_requested_start"
+    assert excinfo.value.detail["requested_start_date"] == "2004-01-01"
+    assert excinfo.value.detail["available_start_date"] == "2014-01-01"
+
+
+def test_backtest_fetch_timeout_returns_structured_json_error(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        raise ValueError("price_history_fetch_timeout:index_type=SP500,requested_start=2004-01-01,end_date=2025-12-31")
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 504
+    assert excinfo.value.detail["error"] == "price_history_fetch_timeout"
+
+
+def test_backtest_exec_timeout_returns_structured_json_error(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        import time
+        time.sleep(0.2)
+        return {}
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setenv("BACKTEST_EXEC_TIMEOUT_SEC", "0.01")
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 504
+    assert excinfo.value.detail["error"] == "backtest_timeout"
+
+
+def test_backtest_data_unavailable_returns_structured_json_error(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        raise ValueError("data_unavailable")
+
+    class _Market:
+        def get_last_debug(self, index_type):
+            return {"provider_attempts": [{"provider": "yfinance", "symbol": "^GSPC"}]}
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "market_service", _Market(), raising=False)
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error"] == "price_history_data_unavailable"
+    assert excinfo.value.detail["provider"] == "yfinance"
+    assert excinfo.value.detail["symbol"] == "^GSPC"
