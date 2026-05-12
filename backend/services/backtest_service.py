@@ -354,24 +354,12 @@ class BacktestService:
             )
         return details
 
-    def run_backtest(
+    def fetch_and_validate_price_history_for_backtest(
         self,
         start_date: date,
         end_date: date,
-        initial_cash: float,
-        buy_threshold: float = 40.0,
-        sell_threshold: float = 80.0,
-        index_type: str = "SP500",
-        score_ma: int = 200,
-    ) -> Dict:
-        initial_cash_safe = self._safe_float(initial_cash, field_name="initial_cash")
-        buy_threshold_safe = self._safe_float(buy_threshold, field_name="buy_threshold")
-        sell_threshold_safe = self._safe_float(sell_threshold, field_name="sell_threshold")
-        if initial_cash_safe <= 0:
-            raise ValueError("invalid_initial_cash:must_be_positive")
-        if score_ma < 2:
-            raise ValueError("invalid_score_ma:must_be_at_least_2")
-
+        index_type: str,
+    ) -> List[Tuple[str, float]]:
         fetch_timeout_cfg = float(os.getenv("BACKTEST_PRICE_FETCH_TIMEOUT_SEC", "25"))
         exec_timeout_cfg = float(os.getenv("BACKTEST_EXEC_TIMEOUT_SEC", "60"))
         fetch_timeout_sec = min(fetch_timeout_cfg, max(5.0, exec_timeout_cfg - 5.0))
@@ -395,7 +383,6 @@ class BacktestService:
             raw_price_history = fut.result(timeout=fetch_timeout_sec)
         except FuturesTimeoutError as exc:
             fut.cancel()
-            ex.shutdown(wait=False, cancel_futures=True)
             raise ValueError(
                 "price_history_fetch_timeout:"
                 f"index_type={index_type},requested_start={start_date.isoformat()},end_date={end_date.isoformat()}"
@@ -407,19 +394,53 @@ class BacktestService:
                 index_type,
                 time.monotonic() - t0_fetch,
             )
+
         price_history = self._prepare_price_history(raw_price_history, index_type)
         logger.info("[backtest] price_rows_count index_type=%s rows=%d", index_type, len(price_history))
         requested_start_iso = start_date.isoformat()
         if price_history:
             first_available = date.fromisoformat(price_history[0][0])
-            logger.info("[backtest] available_start index_type=%s requested_start=%s available_start=%s", index_type, requested_start_iso, first_available.isoformat())
             history_ok = not (first_available > start_date and (first_available - start_date).days > 10)
-            logger.info("[backtest] history_validation_result index_type=%s ok=%s requested_start=%s available_start=%s available_end=%s", index_type, history_ok, requested_start_iso, first_available.isoformat(), price_history[-1][0])
+            logger.info(
+                "[backtest] history_validation_result index_type=%s ok=%s requested_start=%s available_start=%s available_end=%s",
+                index_type,
+                history_ok,
+                requested_start_iso,
+                first_available.isoformat(),
+                price_history[-1][0],
+            )
             if not history_ok:
                 raise ValueError(
                     "insufficient_history_for_requested_start:"
                     f"requested_start={requested_start_iso},first_available={first_available.isoformat()}"
                 )
+        return price_history
+
+    def run_backtest(
+        self,
+        start_date: date,
+        end_date: date,
+        initial_cash: float,
+        buy_threshold: float = 40.0,
+        sell_threshold: float = 80.0,
+        index_type: str = "SP500",
+        score_ma: int = 200,
+        preloaded_price_history: List[Tuple[str, float]] | None = None,
+    ) -> Dict:
+        initial_cash_safe = self._safe_float(initial_cash, field_name="initial_cash")
+        buy_threshold_safe = self._safe_float(buy_threshold, field_name="buy_threshold")
+        sell_threshold_safe = self._safe_float(sell_threshold, field_name="sell_threshold")
+        if initial_cash_safe <= 0:
+            raise ValueError("invalid_initial_cash:must_be_positive")
+        if score_ma < 2:
+            raise ValueError("invalid_score_ma:must_be_at_least_2")
+
+        # Phase-1: 価格履歴の取得と検証のみ（スコア計算や売買判定は行わない）
+        price_history = (
+            preloaded_price_history
+            if preloaded_price_history is not None
+            else self.fetch_and_validate_price_history_for_backtest(start_date, end_date, index_type)
+        )
 
         required_points = max(200, score_ma)
         if len(price_history) < required_points:

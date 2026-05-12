@@ -19,6 +19,7 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
         sell_threshold: float,
         index_type: str,
         score_ma: int,
+        preloaded_price_history=None,
     ):
         return {
             "final_value": 123456.78,
@@ -40,6 +41,7 @@ def test_backtest_response_contains_legacy_and_current_keys(monkeypatch):
         }
 
     monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: [("2024-01-01", 100.0), ("2024-01-02", 101.0)])
     payload = BacktestRequest(
         index_type="SP500",
         start_date="2024-01-01",
@@ -76,6 +78,7 @@ def test_backtest_insufficient_history_returns_structured_json_error(monkeypatch
         raise ValueError("insufficient_history_for_requested_start:requested_start=2004-01-01,first_available=2014-01-01")
 
     monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("insufficient_history_for_requested_start:requested_start=2004-01-01,first_available=2014-01-01")))
     payload = BacktestRequest(
         index_type="SP500",
         start_date="2004-01-01",
@@ -98,6 +101,7 @@ def test_backtest_fetch_timeout_returns_structured_json_error(monkeypatch):
         raise ValueError("price_history_fetch_timeout:index_type=SP500,requested_start=2004-01-01,end_date=2025-12-31")
 
     monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("price_history_fetch_timeout:index_type=SP500,requested_start=2004-01-01,end_date=2025-12-31")))
     payload = BacktestRequest(
         index_type="SP500",
         start_date="2004-01-01",
@@ -120,6 +124,7 @@ def test_backtest_exec_timeout_returns_structured_json_error(monkeypatch):
         return {}
 
     monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: [("2004-01-01", 100.0)])
     monkeypatch.setenv("BACKTEST_EXEC_TIMEOUT_SEC", "0.01")
     payload = BacktestRequest(
         index_type="SP500",
@@ -145,6 +150,7 @@ def test_backtest_data_unavailable_returns_structured_json_error(monkeypatch):
             return {"provider_attempts": [{"provider": "yfinance", "symbol": "^GSPC"}]}
 
     monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("data_unavailable")))
     monkeypatch.setattr(main.backtest_service, "market_service", _Market(), raising=False)
     payload = BacktestRequest(
         index_type="SP500",
