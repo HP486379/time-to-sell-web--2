@@ -235,6 +235,7 @@ class BacktestService:
         macro_series: Dict[str, List[Tuple[date, float]]],
         current_date: date,
         score_ma: int,
+        events_cache: Dict[str, List[Dict]] | None = None,
     ):
         technical_score, _ = calculate_technical_score(price_history, base_window=score_ma)
 
@@ -246,7 +247,13 @@ class BacktestService:
             (r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur)
         )
 
-        events = self.event_service.get_events_for_date(current_date)
+        cache_key = current_date.isoformat()
+        if events_cache is not None and cache_key in events_cache:
+            events = events_cache[cache_key]
+        else:
+            events = self.event_service.get_events_for_date(current_date)
+            if events_cache is not None:
+                events_cache[cache_key] = events
         event_adjustment, _ = calculate_event_adjustment(current_date, events)
 
         ma500, ma1000 = calculate_ultra_long_mas(price_history)
@@ -420,6 +427,8 @@ class BacktestService:
 
         macro_series = self.macro_service.get_macro_series_range(start_date, end_date)
 
+        timing = {"technical_calc_sec": 0.0, "macro_calc_sec": 0.0, "event_calc_sec": 0.0, "diagnostics_sec": 0.0}
+        events_cache: Dict[str, List[Dict]] = {}
         first_price = price_history[0][1]
         initial_shares = floor(initial_cash_safe / first_price)
         initial_cash_after_buy = initial_cash_safe - (initial_shares * first_price)
@@ -460,6 +469,7 @@ class BacktestService:
         hold_cash -= hold_shares * first_price
         buy_hold_history: List[Dict] = []
 
+        t_loop_start = time.monotonic()
         for idx, (date_str, close) in enumerate(price_history):
             current_dt = date.fromisoformat(date_str)
             if sell_cooldown_days_remaining > 0:
@@ -470,7 +480,12 @@ class BacktestService:
             if idx >= max(score_ma - 1, 199):
                 sub_history = price_history[: idx + 1]
                 score_rows += 1
-                score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
+                t_score = time.monotonic()
+                try:
+                    score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma, events_cache=events_cache)
+                except TypeError:
+                    score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
+                timing["technical_calc_sec"] += time.monotonic() - t_score
                 score = self._safe_float(score, field_name="score")
                 daily_scores.append({"date": date_str, "score": score})
                 closes = [p[1] for p in sub_history]
@@ -482,7 +497,11 @@ class BacktestService:
                     cpi_hist, cpi_cur = self._history_and_current(macro_series["cpi"], current_dt)
                     vix_hist, vix_cur = self._history_and_current(macro_series["vix"], current_dt)
                     macro_score, _ = calculate_macro_score((r_hist, r_cur), (cpi_hist, cpi_cur), (vix_hist, vix_cur))
-                    events = self.event_service.get_events_for_date(current_dt)
+                    ckey = current_dt.isoformat()
+                    events = events_cache.get(ckey)
+                    if events is None:
+                        events = self.event_service.get_events_for_date(current_dt)
+                        events_cache[ckey] = events
                     event_adjustment, _ = calculate_event_adjustment(current_dt, events)
                     ma500, ma1000 = calculate_ultra_long_mas(sub_history)
                     score = calculate_total_score(
@@ -857,6 +876,9 @@ class BacktestService:
             diagnosis,
         )
 
+        timing["total_sec"] = time.monotonic() - t_loop_start
+        logger.info("[backtest_timing] index_type=%s technical_calc_sec=%.3f macro_calc_sec=%.3f event_calc_sec=%.3f diagnostics_sec=%.3f total_sec=%.3f price_rows_count=%d", index_type, timing["technical_calc_sec"], timing["macro_calc_sec"], timing["event_calc_sec"], timing["diagnostics_sec"], timing["total_sec"], len(price_history))
+
         buy_trades = [trade for trade in trades if trade["action"] == "BUY"]
         sell_trades = [trade for trade in trades if trade["action"] == "SELL"]
         first_trade = trades[0] if trades else None
@@ -1043,6 +1065,7 @@ class BacktestService:
             "cagr_pct": round(cagr * 100, 2),
             "max_drawdown_pct": max_dd,
             "trade_count": len(trades),
+            "backtest_timing": {k: round(v, 4) for k, v in timing.items()},
             "trades": trades,
             "trade_pair_diagnostics": self._build_trade_pair_diagnostics(trades, price_history),
             "portfolio_history": portfolio_history,
@@ -1073,6 +1096,7 @@ class BacktestService:
                     "buy_count": len(buy_trades),
                     "sell_count": len(sell_trades),
                     "trade_count": len(trades),
+            "backtest_timing": {k: round(v, 4) for k, v in timing.items()},
                     "first_trade_action": first_trade["action"] if first_trade else None,
                     "first_trade_date": first_trade["date"] if first_trade else None,
                     "first_trade_price": first_trade["price"] if first_trade else None,

@@ -933,6 +933,29 @@ def run_backtest(payload: BacktestRequest):
                     "message": "Requested start date is earlier than available price history.",
                 },
             )
+        if reason == "data_unavailable":
+            provider = "unknown"
+            symbol = None
+            if hasattr(backtest_service, "market_service") and hasattr(backtest_service.market_service, "get_last_debug"):
+                debug = backtest_service.market_service.get_last_debug(payload.index_type.value)
+                attempts = debug.get("provider_attempts") if isinstance(debug, dict) else None
+                if isinstance(attempts, list) and attempts:
+                    first = attempts[0] if isinstance(attempts[0], dict) else {}
+                    provider = str(first.get("provider") or provider)
+                    symbol = first.get("symbol")
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "price_history_data_unavailable",
+                    "index_type": payload.index_type.value,
+                    "requested_start_date": payload.start_date.isoformat(),
+                    "end_date": payload.end_date.isoformat(),
+                    "message": "Price history data is unavailable from the external provider.",
+                    "provider": provider,
+                    "symbol": symbol,
+                },
+            )
         if reason.startswith("price_history_fetch_timeout:"):
             pairs = {}
             for token in reason.split(":", 1)[1].split(","):

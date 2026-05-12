@@ -134,3 +134,30 @@ def test_backtest_exec_timeout_returns_structured_json_error(monkeypatch):
         main.run_backtest(payload)
     assert excinfo.value.status_code == 504
     assert excinfo.value.detail["error"] == "backtest_timeout"
+
+
+def test_backtest_data_unavailable_returns_structured_json_error(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        raise ValueError("data_unavailable")
+
+    class _Market:
+        def get_last_debug(self, index_type):
+            return {"provider_attempts": [{"provider": "yfinance", "symbol": "^GSPC"}]}
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "market_service", _Market(), raising=False)
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail["error"] == "price_history_data_unavailable"
+    assert excinfo.value.detail["provider"] == "yfinance"
+    assert excinfo.value.detail["symbol"] == "^GSPC"
