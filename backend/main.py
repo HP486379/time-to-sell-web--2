@@ -29,6 +29,11 @@ import purchases_store
 from domain.index_type import normalize_index_type
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_build_version() -> str:
+    return os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -848,13 +853,16 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
 def run_backtest(payload: BacktestRequest):
     bt_timeout_sec = float(os.getenv("BACKTEST_EXEC_TIMEOUT_SEC", "60"))
     bt_started = time.monotonic()
+    build_version = _runtime_build_version()
     logger.info(
-        "[backtest] backtest_start index_type=%s requested_start_date=%s end_date=%s timeout_sec=%s",
+        "[backtest] backtest_start index_type=%s requested_start_date=%s end_date=%s timeout_sec=%s build_version=%s",
         payload.index_type.value,
         payload.start_date.isoformat(),
         payload.end_date.isoformat(),
         bt_timeout_sec,
+        build_version,
     )
+    logger.info("[backtest] phase1_price_fetch_start index_type=%s build_version=%s", payload.index_type.value, build_version)
     # Phase-1: price history fetch/validation only
     try:
         prefetched_price_history = backtest_service.fetch_and_validate_price_history_for_backtest(
@@ -862,6 +870,7 @@ def run_backtest(payload: BacktestRequest):
             payload.end_date,
             payload.index_type.value,
         )
+        logger.info("[backtest] phase1_price_fetch_end index_type=%s rows=%d", payload.index_type.value, len(prefetched_price_history))
     except ValueError as exc:
         reason = str(exc)
         logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, reason)
@@ -879,6 +888,7 @@ def run_backtest(payload: BacktestRequest):
                     "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
                     "available_start_date": pairs.get("first_available"),
                     "message": "Requested start date is earlier than available price history.",
+                    "build_version": build_version,
                 },
             )
         if reason == "data_unavailable":
@@ -901,6 +911,7 @@ def run_backtest(payload: BacktestRequest):
                     "message": "Price history data is unavailable from the external provider.",
                     "provider": provider,
                     "symbol": symbol,
+                    "build_version": build_version,
                 },
             )
         if reason.startswith("price_history_fetch_timeout:"):
@@ -916,9 +927,11 @@ def run_backtest(payload: BacktestRequest):
                     "index_type": pairs.get("index_type", payload.index_type.value),
                     "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
                     "end_date": pairs.get("end_date", payload.end_date.isoformat()),
+                    "build_version": build_version,
                 },
             )
         raise
+    logger.info("[backtest] phase2_backtest_start index_type=%s build_version=%s", payload.index_type.value, build_version)
     ex = ThreadPoolExecutor(max_workers=1)
     fut = ex.submit(
         backtest_service.run_backtest,
@@ -976,6 +989,10 @@ def run_backtest(payload: BacktestRequest):
                 "requested_start_date": payload.start_date.isoformat(),
                 "end_date": payload.end_date.isoformat(),
                 "message": "Backtest exceeded server-side timeout before completion.",
+                "phase": "calculation",
+                "last_completed_phase": "price_fetch",
+                "timeout_reason": "phase2_calculation_exceeded_timeout",
+                "build_version": build_version,
             },
         )
     except ValueError as exc:
@@ -996,6 +1013,7 @@ def run_backtest(payload: BacktestRequest):
                     "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
                     "available_start_date": pairs.get("first_available"),
                     "message": "Requested start date is earlier than available price history.",
+                    "build_version": build_version,
                 },
             )
         if reason == "data_unavailable":
@@ -1019,6 +1037,7 @@ def run_backtest(payload: BacktestRequest):
                     "message": "Price history data is unavailable from the external provider.",
                     "provider": provider,
                     "symbol": symbol,
+                    "build_version": build_version,
                 },
             )
         if reason.startswith("price_history_fetch_timeout:"):
