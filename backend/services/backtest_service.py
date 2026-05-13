@@ -39,6 +39,7 @@ class BacktestService:
         logging.getLogger(__name__).info(
             "[BACKTEST CONFIG] BACKTEST_ALLOW_FALLBACK=%s", self.allow_fallback
         )
+        self._last_phase2_progress: Dict[str, object] = {}
 
     def _safe_float(self, value, *, field_name: str) -> float:
         if isinstance(value, bool):
@@ -279,6 +280,9 @@ class BacktestService:
                 max_dd = dd
         return round(max_dd * 100, 2)
 
+    def get_last_phase2_progress(self) -> Dict[str, object]:
+        return dict(self._last_phase2_progress)
+
 
     def _build_trade_pair_diagnostics(self, trades: List[Dict], price_history: List[Tuple[str, float]]) -> List[Dict]:
         index_by_date = {dt: idx for idx, (dt, _) in enumerate(price_history)}
@@ -457,12 +461,29 @@ class BacktestService:
             "technical_calc_sec": 0.0,
             "macro_calc_sec": 0.0,
             "event_calc_sec": 0.0,
+            "trade_loop_sec": 0.0,
             "diagnostics_sec": 0.0,
             "trade_pair_diagnostics_sec": 0.0,
             "equity_curve_build_sec": 0.0,
             "response_build_sec": 0.0,
         }
         events_cache: Dict[str, List[Dict]] = {}
+        self._last_phase2_progress = {
+            "phase2_total_sec": 0.0,
+            "score_calc_sec": 0.0,
+            "technical_calc_sec": 0.0,
+            "macro_calc_sec": 0.0,
+            "event_calc_sec": 0.0,
+            "trade_loop_sec": 0.0,
+            "diagnostics_sec": 0.0,
+            "trade_pair_diagnostics_sec": 0.0,
+            "equity_curve_build_sec": 0.0,
+            "response_build_sec": 0.0,
+            "price_rows_count": len(price_history),
+            "equity_curve_count": 0,
+            "trades_count": 0,
+            "last_processed_date": None,
+        }
         first_price = price_history[0][1]
         initial_shares = floor(initial_cash_safe / first_price)
         initial_cash_after_buy = initial_cash_safe - (initial_shares * first_price)
@@ -505,7 +526,9 @@ class BacktestService:
 
         t_loop_start = time.monotonic()
         for idx, (date_str, close) in enumerate(price_history):
+            t_trade_iter = time.monotonic()
             current_dt = date.fromisoformat(date_str)
+            self._last_phase2_progress["last_processed_date"] = date_str
             if sell_cooldown_days_remaining > 0:
                 sell_cooldown_days_remaining -= 1
             if days_since_last_sell is not None:
@@ -814,6 +837,11 @@ class BacktestService:
 
             hold_value = hold_cash + hold_shares * close
             buy_hold_history.append({"date": date_str, "value": round(hold_value, 2)})
+            timing["trade_loop_sec"] += time.monotonic() - t_trade_iter
+            self._last_phase2_progress["trade_loop_sec"] = round(timing["trade_loop_sec"], 4)
+            self._last_phase2_progress["score_calc_sec"] = round(timing["score_calc_sec"], 4)
+            self._last_phase2_progress["phase2_total_sec"] = round(time.monotonic() - t_loop_start, 4)
+            self._last_phase2_progress["trades_count"] = len(trades)
 
         final_price = price_history[-1][1]
         final_value = cash + shares * final_price
@@ -914,6 +942,7 @@ class BacktestService:
         )
 
         timing["phase2_total_sec"] = time.monotonic() - t_loop_start
+        self._last_phase2_progress["phase2_total_sec"] = round(timing["phase2_total_sec"], 4)
         logger.info(
             "[backtest_timing] index_type=%s phase2_total_sec=%.3f score_calc_sec=%.3f technical_calc_sec=%.3f macro_calc_sec=%.3f event_calc_sec=%.3f diagnostics_sec=%.3f trade_pair_diagnostics_sec=%.3f equity_curve_build_sec=%.3f response_build_sec=%.3f price_rows_count=%d",
             index_type,
@@ -1109,12 +1138,14 @@ class BacktestService:
         first_score = daily_scores[0]["score"] if daily_scores else None
         first_score_date = daily_scores[0]["date"] if daily_scores else None
         timing["diagnostics_sec"] += time.monotonic() - t_diag
+        self._last_phase2_progress["diagnostics_sec"] = round(timing["diagnostics_sec"], 4)
 
         trade_pair_diagnostics: List[Dict] = []
         if debug:
             t_pair = time.monotonic()
             trade_pair_diagnostics = self._build_trade_pair_diagnostics(trades, price_history)
             timing["trade_pair_diagnostics_sec"] = time.monotonic() - t_pair
+            self._last_phase2_progress["trade_pair_diagnostics_sec"] = round(timing["trade_pair_diagnostics_sec"], 4)
 
         return {
             "final_value": round(final_value, 2),

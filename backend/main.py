@@ -988,6 +988,12 @@ def run_backtest(payload: BacktestRequest):
         fut.cancel()
         ex.shutdown(wait=False, cancel_futures=True)
         elapsed = time.monotonic() - bt_started
+        progress = {}
+        if hasattr(backtest_service, "get_last_phase2_progress"):
+            try:
+                progress = backtest_service.get_last_phase2_progress() or {}
+            except Exception:
+                progress = {}
         logger.warning(
             "[backtest] timeout_reason=backtest_timeout index_type=%s requested_start_date=%s end_date=%s backtest_elapsed_sec=%.3f",
             payload.index_type.value,
@@ -1007,6 +1013,22 @@ def run_backtest(payload: BacktestRequest):
                 "last_completed_phase": "price_fetch",
                 "timeout_reason": "phase2_calculation_exceeded_timeout",
                 "build_version": build_version,
+                "phase2_timing": {
+                    "phase2_total_sec": progress.get("phase2_total_sec", round(elapsed, 4)),
+                    "score_calc_sec": progress.get("score_calc_sec", 0.0),
+                    "technical_calc_sec": progress.get("technical_calc_sec", 0.0),
+                    "macro_calc_sec": progress.get("macro_calc_sec", 0.0),
+                    "event_calc_sec": progress.get("event_calc_sec", 0.0),
+                    "trade_loop_sec": progress.get("trade_loop_sec", 0.0),
+                    "diagnostics_sec": progress.get("diagnostics_sec", 0.0),
+                    "trade_pair_diagnostics_sec": progress.get("trade_pair_diagnostics_sec", 0.0),
+                    "equity_curve_build_sec": progress.get("equity_curve_build_sec", 0.0),
+                    "response_build_sec": progress.get("response_build_sec", 0.0),
+                    "price_rows_count": progress.get("price_rows_count", len(prefetched_price_history)),
+                    "equity_curve_count": progress.get("equity_curve_count", 0),
+                    "trades_count": progress.get("trades_count", 0),
+                    "last_processed_date": progress.get("last_processed_date"),
+                },
             },
         )
     except ValueError as exc:
