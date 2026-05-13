@@ -11,6 +11,7 @@ from tools.simulate_experimental_sell_rules import (
     build_portfolio_rule_comparison_from_json,
     parse_index_types,
     run_comparison,
+    build_nikkei225_buyback_delay_diagnostic_from_backtest_response_json,
 )
 
 
@@ -723,3 +724,51 @@ def test_run_simulation_core_reports_invalid_date_parse_failures():
     )
     assert out["debug"]["date_parse_failed_count"] == 1
     assert "invalid_date" in out["debug"]["skipped_row_reasons"]
+
+
+def test_build_nikkei225_buyback_delay_diagnostic_from_backtest_response_json(monkeypatch, tmp_path):
+    input_json = tmp_path / "input.json"
+    input_json.write_text(__import__("json").dumps({
+        "equity_curve": [
+            {"date": "2024-01-01", "close": 100.0},
+            {"date": "2024-01-02", "close": 99.0},
+            {"date": "2024-01-03", "close": 95.0},
+            {"date": "2024-01-04", "close": 96.0},
+            {"date": "2024-01-05", "close": 98.0},
+            {"date": "2024-01-06", "close": 101.0},
+            {"date": "2024-01-07", "close": 103.0},
+            {"date": "2024-01-08", "close": 104.0},
+            {"date": "2024-01-09", "close": 106.0},
+        ]
+    }), encoding="utf-8")
+
+    def _fake_ctx():
+        return object()
+
+    def _fake_run(ctx, **kwargs):
+        return {
+            "trades": [
+                {"action": "SELL", "date": "2024-01-01", "price": 100.0, "quantity": 1},
+                {"action": "BUY", "date": "2024-01-08", "price": 104.0, "quantity": 1, "reason": "pattern_a"},
+            ]
+        }
+
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._build_context", _fake_ctx)
+    monkeypatch.setattr("tools.simulate_experimental_sell_rules._run_simulation_core", _fake_run)
+
+    out_json = tmp_path / "diag.json"
+    out = build_nikkei225_buyback_delay_diagnostic_from_backtest_response_json(
+        str(input_json),
+        start_date=date(2024, 1, 1),
+        end_date=date(2025, 12, 31),
+        output_json=str(out_json),
+        score_ma=200,
+    )
+    assert out_json.exists()
+    assert len(out["summary"]) == 2
+    assert {r["rule_name"] for r in out["summary"]} == {
+        "nikkei225_overheat_guard_score80_gate",
+        "nikkei225_spike_reversal_guard_score80_gate",
+    }
+    assert len(out["details"]) == 2
+    assert all("classification" in d for d in out["details"])
