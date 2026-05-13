@@ -329,6 +329,66 @@ def _is_topix_range_sell_gate_open(rule_name: str, closes: List[float], recent_s
     return False
 
 
+
+
+def _nikkei225_overheat_guard_boost(closes: List[float], ma20: float, ma60: float, ma200: float) -> float:
+    if len(closes) < 120:
+        return 0.0
+    close = closes[-1]
+    if not (close > ma20 and close > ma60 and close > ma200):
+        return 0.0
+    max_60 = max(closes[-60:])
+    max_120 = max(closes[-120:])
+    is_near_60d_high = close >= max_60 * 0.992
+    is_near_120d_high = close >= max_120 * 0.992
+    prev20 = closes[-21] if len(closes) >= 21 else None
+    prev60 = closes[-61] if len(closes) >= 61 else None
+    if prev20 is None or prev60 is None or prev20 <= 0 or prev60 <= 0:
+        return 0.0
+    ret20 = ((close / prev20) - 1.0) * 100.0
+    ret60 = ((close / prev60) - 1.0) * 100.0
+    dev20 = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+    dev60 = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+    if not (is_near_60d_high and is_near_120d_high and ret20 >= 6.0 and ret60 >= 5.0):
+        return 0.0
+    boost = 20.0
+    if dev20 >= 4.0 and dev60 >= 5.0:
+        boost += 15.0
+    return boost
+
+
+def _nikkei225_spike_reversal_guard_boost(closes: List[float], ma20: float, ma60: float, ma200: float) -> float:
+    if len(closes) < 120:
+        return 0.0
+    close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else close
+    if not (close > ma20 and close > ma60 and close > ma200):
+        return 0.0
+    max_60 = max(closes[-60:])
+    max_120 = max(closes[-120:])
+    is_near_60d_high = close >= max_60 * 0.992
+    is_near_120d_high = close >= max_120 * 0.992
+    prev20 = closes[-21] if len(closes) >= 21 else None
+    prev60 = closes[-61] if len(closes) >= 61 else None
+    prev3 = closes[-4] if len(closes) >= 4 else None
+    if prev20 is None or prev60 is None or prev3 is None or prev20 <= 0 or prev60 <= 0 or prev3 <= 0:
+        return 0.0
+    ret20 = ((close / prev20) - 1.0) * 100.0
+    ret60 = ((close / prev60) - 1.0) * 100.0
+    ret3 = ((close / prev3) - 1.0) * 100.0
+    dev20 = ((close / ma20) - 1.0) * 100.0 if ma20 > 0 else 0.0
+    dev60 = ((close / ma60) - 1.0) * 100.0 if ma60 > 0 else 0.0
+    recent_5d_high = max(closes[-5:]) if len(closes) >= 5 else close
+    base_ok = is_near_60d_high and is_near_120d_high
+    spike_ok = ret20 >= 8.0 or dev20 >= 6.0
+    support_ok = ret60 >= 5.0 or dev60 >= 5.0
+    reversal_ok = close < prev_close or close <= recent_5d_high * 0.99 or ret3 <= 0.0
+    if not (base_ok and spike_ok and support_ok and reversal_ok):
+        return 0.0
+    boost = 20.0
+    if dev60 >= 5.0:
+        boost += 10.0
+    return boost
 def _run_simulation_core(
     ctx: SimulationContext,
     *,
@@ -503,6 +563,8 @@ def _run_simulation_core(
             recent_scores.append(total_score)
             ma20_series = moving_average(closes, 20)
             ma50_series = moving_average(closes, 50)
+            ma60_series = moving_average(closes, 60)
+            ma200_series = moving_average(closes, 200)
             cooldown_active = sell_cooldown_days_remaining > 0
             is_overheat_today = total_score >= sell_threshold
             if is_overheat_today and not prev_overheat_state:
@@ -611,6 +673,16 @@ def _run_simulation_core(
                     and total_score >= sell_threshold
                     and _is_topix_range_sell_gate_open(rule_name, closes, recent_scores)
                 )
+            if index_type == "NIKKEI225" and rule_name == "nikkei225_overheat_guard_score80_gate":
+                boost = _nikkei225_overheat_guard_boost(closes, ma20_series[-1], ma60_series[-1], ma200_series[-1])
+                if shares > 0 and boost > 0:
+                    total_score = clip(total_score + boost)
+                    current_logic_sell = shares > 0 and not cooldown_active and total_score >= sell_threshold
+            if index_type == "NIKKEI225" and rule_name == "nikkei225_spike_reversal_guard_score80_gate":
+                boost = _nikkei225_spike_reversal_guard_boost(closes, ma20_series[-1], ma60_series[-1], ma200_series[-1])
+                if shares > 0 and boost > 0:
+                    total_score = clip(total_score + boost)
+                    current_logic_sell = shares > 0 and not cooldown_active and total_score >= sell_threshold
             experimental_sell = (
                 shares > 0
                 and not cooldown_active
@@ -1857,6 +1929,142 @@ def build_index_data_source_debug(
     }
 
 
+
+
+def _safe_pct(base: float, target: float) -> Optional[float]:
+    if base <= 0:
+        return None
+    return round(((target / base) - 1.0) * 100.0, 4)
+
+
+def _classify_nikkei225_sell_diagnostic(row: Dict) -> str:
+    max_dd = row.get("max_drawdown_after_sell_pct")
+    f20 = row.get("forward_20d_pct")
+    f60 = row.get("forward_60d_pct")
+    d2b = row.get("days_from_bottom_to_buy")
+    rebound = row.get("rebound_from_bottom_to_buy_pct")
+    if max_dd is None:
+        return "D. unclear"
+    if f20 is not None and f20 > 3.0 and max_dd > -3.0:
+        return "A. bad_sell"
+    if max_dd <= -5.0:
+        if d2b is not None and rebound is not None and d2b >= 15 and rebound >= 5.0:
+            return "B. good_sell_late_buy"
+        if d2b is not None and rebound is not None:
+            return "C. good_sell_good_buy"
+    return "D. unclear"
+
+
+def build_nikkei225_buyback_delay_diagnostic_from_backtest_response_json(input_json: str, *, start_date: date, end_date: date, output_json: str, score_ma: int = 200) -> Dict:
+    ctx = _build_context()
+    price_history = _load_price_history_from_backtest_response_json(input_json)
+    rules = [
+        "nikkei225_overheat_guard_score80_gate",
+        "nikkei225_spike_reversal_guard_score80_gate",
+    ]
+    price_by_idx = {i: row for i, row in enumerate(price_history)}
+    idx_by_date = {d: i for i, (d, _) in enumerate(price_history)}
+    details: List[Dict] = []
+    summaries: List[Dict] = []
+
+    for rule_name in rules:
+        sim = _run_simulation_core(
+            ctx,
+            index_type="NIKKEI225",
+            rule_name=rule_name,
+            sell_threshold=80.0,
+            technical_threshold=None,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=1_000_000.0,
+            buy_threshold=40.0,
+            score_ma=score_ma,
+            override_price_history=price_history,
+        )
+        trades = sim.get("trades", [])
+        sells = [t for t in trades if t.get("action") == "SELL"]
+        buys = [t for t in trades if t.get("action") == "BUY"]
+        counters = Counter()
+        agg = {"days_out": [], "max_dd": [], "days_bottom_to_buy": [], "rebound": [], "missed": []}
+
+        for si, sell in enumerate(sells):
+            next_buy = next((t for t in trades[trades.index(sell)+1:] if t.get("action") == "BUY"), None)
+            sell_idx = idx_by_date.get(sell["date"])
+            if sell_idx is None:
+                continue
+            sell_price = float(sell["price"])
+            buy_price = float(next_buy["price"]) if next_buy else None
+            buy_idx = idx_by_date.get(next_buy["date"]) if next_buy else None
+            end_idx = buy_idx if buy_idx is not None else len(price_history) - 1
+            window = price_history[sell_idx : end_idx + 1] if end_idx >= sell_idx else [price_history[sell_idx]]
+            min_row = min(window, key=lambda x: x[1]) if window else price_history[sell_idx]
+            min_idx = idx_by_date.get(min_row[0], sell_idx)
+            max_dd_after_sell = _safe_pct(sell_price, min_row[1])
+            days_to_min = (date.fromisoformat(min_row[0]) - date.fromisoformat(sell["date"])).days
+            days_out = (date.fromisoformat(next_buy["date"]) - date.fromisoformat(sell["date"])).days if next_buy else None
+            days_bottom_to_buy = (date.fromisoformat(next_buy["date"]) - date.fromisoformat(min_row[0])).days if next_buy else None
+            rebound = _safe_pct(min_row[1], buy_price) if next_buy and buy_price is not None else None
+            missed = _safe_pct(sell_price, buy_price) if next_buy and buy_price is not None else None
+            rec = {
+                "rule_name": rule_name,
+                "sell_date": sell["date"],
+                "sell_price": sell_price,
+                "buy_date": next_buy["date"] if next_buy else None,
+                "buy_price": buy_price,
+                "days_out_of_market": days_out,
+                "sell_to_buy_return_pct": missed,
+                "forward_5d_pct": _safe_pct(sell_price, price_by_idx.get(sell_idx + 5, (None, None))[1]) if sell_idx + 5 < len(price_history) else None,
+                "forward_10d_pct": _safe_pct(sell_price, price_by_idx.get(sell_idx + 10, (None, None))[1]) if sell_idx + 10 < len(price_history) else None,
+                "forward_20d_pct": _safe_pct(sell_price, price_by_idx.get(sell_idx + 20, (None, None))[1]) if sell_idx + 20 < len(price_history) else None,
+                "forward_40d_pct": _safe_pct(sell_price, price_by_idx.get(sell_idx + 40, (None, None))[1]) if sell_idx + 40 < len(price_history) else None,
+                "forward_60d_pct": _safe_pct(sell_price, price_by_idx.get(sell_idx + 60, (None, None))[1]) if sell_idx + 60 < len(price_history) else None,
+                "min_after_sell_date": min_row[0],
+                "min_after_sell_price": min_row[1],
+                "max_drawdown_after_sell_pct": max_dd_after_sell,
+                "days_to_min_after_sell": days_to_min,
+                "days_from_bottom_to_buy": days_bottom_to_buy,
+                "rebound_from_bottom_to_buy_pct": rebound,
+                "missed_rebound_pct": missed,
+            }
+            rec["buyback_delay_severity"] = "high" if (days_bottom_to_buy is not None and rebound is not None and days_bottom_to_buy >= 15 and rebound >= 5.0) else "low"
+            rec["classification"] = _classify_nikkei225_sell_diagnostic(rec)
+            details.append(rec)
+            counters[rec["classification"]] += 1
+            if days_out is not None: agg["days_out"].append(days_out)
+            if max_dd_after_sell is not None: agg["max_dd"].append(max_dd_after_sell)
+            if days_bottom_to_buy is not None: agg["days_bottom_to_buy"].append(days_bottom_to_buy)
+            if rebound is not None: agg["rebound"].append(rebound)
+            if missed is not None: agg["missed"].append(missed)
+
+        diagnosis = "mixed"
+        if counters["A. bad_sell"] >= max(counters["B. good_sell_late_buy"], counters["C. good_sell_good_buy"]):
+            diagnosis = "sell_is_bad"
+        elif counters["B. good_sell_late_buy"] > counters["A. bad_sell"]:
+            diagnosis = "buyback_is_late"
+        if counters["B. good_sell_late_buy"] > 0 and counters["A. bad_sell"] == 0:
+            diagnosis = "usable_with_buy_adjustment"
+        if counters["A. bad_sell"] >= max(1, len(sells)//2):
+            diagnosis = "reject_rule"
+
+        summaries.append({
+            "rule_name": rule_name,
+            "sell_count": len(sells),
+            "buy_count": len(buys),
+            "bad_sell_count": counters["A. bad_sell"],
+            "good_sell_late_buy_count": counters["B. good_sell_late_buy"],
+            "good_sell_good_buy_count": counters["C. good_sell_good_buy"],
+            "unclear_count": counters["D. unclear"],
+            "avg_days_out_of_market": round(_safe_avg(agg["days_out"]), 4) if agg["days_out"] else None,
+            "avg_max_drawdown_after_sell_pct": round(_safe_avg(agg["max_dd"]), 4) if agg["max_dd"] else None,
+            "avg_days_from_bottom_to_buy": round(_safe_avg(agg["days_bottom_to_buy"]), 4) if agg["days_bottom_to_buy"] else None,
+            "avg_rebound_from_bottom_to_buy_pct": round(_safe_avg(agg["rebound"]), 4) if agg["rebound"] else None,
+            "total_missed_rebound_pct": round(sum(agg["missed"]), 4) if agg["missed"] else 0.0,
+            "diagnosis": diagnosis,
+        })
+
+    output = {"meta": {"index_type": "NIKKEI225", "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}, "summary": summaries, "details": details}
+    Path(output_json).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output
 def main():
     parser = argparse.ArgumentParser(description="Offline experimental SELL rule simulator.")
     parser.add_argument("--index", default=None, help="Single index_type to diagnose")
@@ -1879,6 +2087,7 @@ def main():
     parser.add_argument("--input-backtest-response-json", default=None)
     parser.add_argument("--input-json", default=None)
     parser.add_argument("--output-json", default=None)
+    parser.add_argument("--diagnose-nikkei225-buyback-delay", action="store_true")
     args = parser.parse_args()
 
     if args.portfolio_rules:
@@ -1930,6 +2139,18 @@ def main():
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         if not payload.get("score_ready", False):
             raise RuntimeError("insufficient_history_for_score_calculation")
+        return
+    if args.diagnose_nikkei225_buyback_delay:
+        if not args.input_backtest_response_json or not args.output_json:
+            raise ValueError("--diagnose-nikkei225-buyback-delay requires --input-backtest-response-json and --output-json")
+        payload = build_nikkei225_buyback_delay_diagnostic_from_backtest_response_json(
+            args.input_backtest_response_json,
+            start_date=date.fromisoformat(args.start_date),
+            end_date=date.fromisoformat(args.end_date),
+            output_json=args.output_json,
+            score_ma=args.score_ma,
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     if args.diagnose_topix_missed_sell:
         if not args.input_backtest_response_json or not args.output_json:
