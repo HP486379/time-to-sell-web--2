@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from datetime import date
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -81,7 +82,7 @@ def test_backtest_insufficient_history_returns_structured_json_error(monkeypatch
     monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("insufficient_history_for_requested_start:requested_start=2004-01-01,first_available=2014-01-01")))
     payload = BacktestRequest(
         index_type="SP500",
-        start_date="2004-01-01",
+        start_date="2005-01-01",
         end_date="2025-12-31",
         initial_cash=100000,
         buy_threshold=40,
@@ -104,7 +105,7 @@ def test_backtest_fetch_timeout_returns_structured_json_error(monkeypatch):
     monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("price_history_fetch_timeout:index_type=SP500,requested_start=2004-01-01,end_date=2025-12-31")))
     payload = BacktestRequest(
         index_type="SP500",
-        start_date="2004-01-01",
+        start_date="2005-01-01",
         end_date="2025-12-31",
         initial_cash=100000,
         buy_threshold=40,
@@ -128,7 +129,7 @@ def test_backtest_exec_timeout_returns_structured_json_error(monkeypatch):
     monkeypatch.setenv("BACKTEST_EXEC_TIMEOUT_SEC", "0.01")
     payload = BacktestRequest(
         index_type="SP500",
-        start_date="2004-01-01",
+        start_date="2005-01-01",
         end_date="2025-12-31",
         initial_cash=100000,
         buy_threshold=40,
@@ -154,7 +155,7 @@ def test_backtest_data_unavailable_returns_structured_json_error(monkeypatch):
     monkeypatch.setattr(main.backtest_service, "market_service", _Market(), raising=False)
     payload = BacktestRequest(
         index_type="SP500",
-        start_date="2004-01-01",
+        start_date="2005-01-01",
         end_date="2025-12-31",
         initial_cash=100000,
         buy_threshold=40,
@@ -167,3 +168,67 @@ def test_backtest_data_unavailable_returns_structured_json_error(monkeypatch):
     assert excinfo.value.detail["error"] == "price_history_data_unavailable"
     assert excinfo.value.detail["provider"] == "yfinance"
     assert excinfo.value.detail["symbol"] == "^GSPC"
+
+
+def test_backtest_returns_precomputed_when_request_matches(tmp_path, monkeypatch):
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    key = "SP500|2004-01-01|2025-12-31|100000.00|40.00|80.00|200"
+    doc = {
+        "precomputed_key": key,
+        "generated_at": "2026-05-13T00:00:00Z",
+        "logic_version": "v1",
+        "result": {
+            "final_value": 111111.0,
+            "buy_and_hold_final": 100000.0,
+            "total_return_pct": 11.11,
+            "max_drawdown_pct": 9.99,
+            "trade_count": 3,
+            "price_history": [["2004-01-01", 100.0], ["2025-12-31", 111.11]],
+            "diagnostics": {"trade_summary": {"trade_count": 3}},
+        },
+    }
+    f = tmp_path / "sp500_2004-01-01_2025-12-31_sell80_buy40_ma200.json"
+    f.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(main, "PRECOMPUTED_BACKTEST_DIR", tmp_path)
+    response = main.run_backtest(payload)
+    body = response.model_dump()
+    assert body["summary"]["final_equity"] == 111111.0
+    assert body["diagnostics"]["result_source"] == "precomputed"
+    assert body["diagnostics"]["precomputed_key"] == key
+
+
+def test_backtest_falls_back_to_runtime_when_precomputed_not_matched(monkeypatch):
+    def fake_run_backtest(*args, **kwargs):
+        return {
+            "final_value": 123.0,
+            "buy_and_hold_final": 120.0,
+            "total_return_pct": 3.0,
+            "max_drawdown_pct": 1.0,
+            "trade_count": 1,
+            "price_history": [("2024-01-01", 100.0), ("2024-01-02", 101.0)],
+            "diagnostics": {"trade_summary": {"trade_count": 1}},
+        }
+
+    monkeypatch.setattr(main.backtest_service, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: [("2024-01-01", 100.0), ("2024-01-02", 101.0)])
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        initial_cash=100000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    response = main.run_backtest(payload)
+    body = response.model_dump()
+    assert body["summary"]["final_equity"] == 123.0
+    assert body["diagnostics"].get("result_source") != "precomputed"

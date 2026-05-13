@@ -30,6 +30,7 @@ import purchases_store
 from domain.index_type import normalize_index_type
 
 logger = logging.getLogger(__name__)
+PRECOMPUTED_BACKTEST_DIR = Path(__file__).resolve().parent / "data" / "precomputed_backtests"
 
 
 def _runtime_build_version() -> str:
@@ -851,6 +852,31 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
     ]
 
 
+def _precomputed_backtest_key(payload: BacktestRequest) -> str:
+    return (
+        f"{payload.index_type.value}|{payload.start_date.isoformat()}|{payload.end_date.isoformat()}|"
+        f"{float(payload.initial_cash):.2f}|{float(payload.buy_threshold):.2f}|{float(payload.sell_threshold):.2f}|{int(payload.score_ma)}"
+    )
+
+
+def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
+    index_slug = payload.index_type.value.lower()
+    filename = (
+        f"{index_slug}_{payload.start_date.isoformat()}_{payload.end_date.isoformat()}_"
+        f"sell{int(payload.sell_threshold)}_buy{int(payload.buy_threshold)}_ma{int(payload.score_ma)}.json"
+    )
+    path = PRECOMPUTED_BACKTEST_DIR / filename
+    if not path.exists():
+        return None
+    import json
+    with path.open("r", encoding="utf-8") as f:
+        doc = json.load(f)
+    expected_key = _precomputed_backtest_key(payload)
+    if str(doc.get("precomputed_key")) != expected_key:
+        return None
+    return doc
+
+
 @app.post("/api/backtest", response_model=BacktestResponse)
 def run_backtest(payload: BacktestRequest):
     bt_timeout_sec = float(os.getenv("BACKTEST_EXEC_TIMEOUT_SEC", "60"))
@@ -864,6 +890,41 @@ def run_backtest(payload: BacktestRequest):
         bt_timeout_sec,
         build_version,
     )
+    precomputed = _load_precomputed_backtest(payload)
+    if precomputed is not None:
+        result = precomputed.get("result", {})
+        diagnostics = result.get("diagnostics") or {}
+        diagnostics["result_source"] = "precomputed"
+        diagnostics["precomputed_key"] = precomputed.get("precomputed_key")
+        diagnostics["generated_at"] = precomputed.get("generated_at")
+        diagnostics["logic_version"] = precomputed.get("logic_version")
+        diagnostics["index_type"] = payload.index_type.value
+        diagnostics["start_date"] = payload.start_date.isoformat()
+        diagnostics["end_date"] = payload.end_date.isoformat()
+        diagnostics["sell_threshold"] = payload.sell_threshold
+        diagnostics["buy_threshold"] = payload.buy_threshold
+        diagnostics["score_ma"] = payload.score_ma
+        price_history = result.get("price_history", [])
+        equity_curve = _build_equity_curve(price_history)
+        summary = BacktestSummary(
+            final_equity=result["final_value"],
+            hold_equity=result["buy_and_hold_final"],
+            total_return=result["total_return_pct"],
+            max_drawdown=result["max_drawdown_pct"],
+            trade_count=result["trade_count"],
+            final_asset=result["final_value"],
+            buy_and_hold_asset=result["buy_and_hold_final"],
+        )
+        return BacktestResponse(
+            summary=summary,
+            equity_curve=equity_curve,
+            diagnostics=diagnostics,
+            final_asset=result["final_value"],
+            buy_and_hold_asset=result["buy_and_hold_final"],
+            total_return=result["total_return_pct"],
+            max_drawdown=result["max_drawdown_pct"],
+            trade_count=result["trade_count"],
+        )
     logger.info("[backtest] phase1_price_fetch_start index_type=%s build_version=%s", payload.index_type.value, build_version)
     # Phase-1: price history fetch/validation only
     try:
