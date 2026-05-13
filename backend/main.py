@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 import math
+import inspect
 import statistics
 import logging
 import os
@@ -126,6 +127,7 @@ class BacktestRequest(BaseModel):
     buy_threshold: float = 40.0
     sell_threshold: float = 80.0
     score_ma: int = Field(200)
+    debug: bool = False
 
     @field_validator("index_type", mode="before")
     @classmethod
@@ -933,8 +935,7 @@ def run_backtest(payload: BacktestRequest):
         raise
     logger.info("[backtest] phase2_backtest_start index_type=%s build_version=%s", payload.index_type.value, build_version)
     ex = ThreadPoolExecutor(max_workers=1)
-    fut = ex.submit(
-        backtest_service.run_backtest,
+    run_args = [
         payload.start_date,
         payload.end_date,
         payload.initial_cash,
@@ -943,11 +944,22 @@ def run_backtest(payload: BacktestRequest):
         payload.index_type.value,
         payload.score_ma,
         prefetched_price_history,
-    )
+    ]
+    run_kwargs = {}
+    try:
+        if "debug" in inspect.signature(backtest_service.run_backtest).parameters:
+            run_kwargs["debug"] = payload.debug
+    except (TypeError, ValueError):
+        pass
+    fut = ex.submit(backtest_service.run_backtest, *run_args, **run_kwargs)
     try:
         result = fut.result(timeout=bt_timeout_sec)
         price_history = result.get("price_history", [])
+        t_eq = time.monotonic()
         equity_curve = _build_equity_curve(price_history)
+        if isinstance(result.get("backtest_timing"), dict):
+            result["backtest_timing"]["equity_curve_build_sec"] = round(time.monotonic() - t_eq, 4)
+        t_resp = time.monotonic()
         summary = BacktestSummary(
             final_equity=result["final_value"],
             hold_equity=result["buy_and_hold_final"],
@@ -958,6 +970,8 @@ def run_backtest(payload: BacktestRequest):
             buy_and_hold_asset=result["buy_and_hold_final"],
         )
         elapsed = time.monotonic() - bt_started
+        if isinstance(result.get("backtest_timing"), dict):
+            result["backtest_timing"]["response_build_sec"] = round(time.monotonic() - t_resp, 4)
         logger.info("[backtest] backtest_elapsed_sec index_type=%s elapsed_sec=%.3f", payload.index_type.value, elapsed)
         ex.shutdown(wait=False, cancel_futures=True)
         return BacktestResponse(

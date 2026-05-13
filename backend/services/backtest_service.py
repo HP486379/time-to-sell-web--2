@@ -426,6 +426,7 @@ class BacktestService:
         index_type: str = "SP500",
         score_ma: int = 200,
         preloaded_price_history: List[Tuple[str, float]] | None = None,
+        debug: bool = True,
     ) -> Dict:
         initial_cash_safe = self._safe_float(initial_cash, field_name="initial_cash")
         buy_threshold_safe = self._safe_float(buy_threshold, field_name="buy_threshold")
@@ -450,7 +451,17 @@ class BacktestService:
 
         macro_series = self.macro_service.get_macro_series_range(start_date, end_date)
 
-        timing = {"technical_calc_sec": 0.0, "macro_calc_sec": 0.0, "event_calc_sec": 0.0, "diagnostics_sec": 0.0}
+        timing = {
+            "phase2_total_sec": 0.0,
+            "score_calc_sec": 0.0,
+            "technical_calc_sec": 0.0,
+            "macro_calc_sec": 0.0,
+            "event_calc_sec": 0.0,
+            "diagnostics_sec": 0.0,
+            "trade_pair_diagnostics_sec": 0.0,
+            "equity_curve_build_sec": 0.0,
+            "response_build_sec": 0.0,
+        }
         events_cache: Dict[str, List[Dict]] = {}
         first_price = price_history[0][1]
         initial_shares = floor(initial_cash_safe / first_price)
@@ -508,9 +519,10 @@ class BacktestService:
                     score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma, events_cache=events_cache)
                 except TypeError:
                     score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
-                timing["technical_calc_sec"] += time.monotonic() - t_score
+                timing["score_calc_sec"] += time.monotonic() - t_score
                 score = self._safe_float(score, field_name="score")
-                daily_scores.append({"date": date_str, "score": score})
+                if debug:
+                    daily_scores.append({"date": date_str, "score": score})
                 closes = [p[1] for p in sub_history]
                 sell_rule_name = self._get_sell_rule_name(index_type)
                 if sell_rule_name != "current_logic":
@@ -720,8 +732,9 @@ class BacktestService:
                             ),
                         }
                     )
-                    trade_enriched_rows.append(
-                        {
+                    if debug:
+                        trade_enriched_rows.append(
+                            {
                             "action": "SELL",
                             "date": date_str,
                             "price": close,
@@ -734,8 +747,8 @@ class BacktestService:
                             "confirmation_detected": confirmation_detected,
                             "sell_gate_open": sell_gate_open,
                             "cooldown_clear": not cooldown_active,
-                        }
-                    )
+                            }
+                        )
                     shares = 0
                     overheat_event_consumed = True
                     sell_cooldown_days_remaining = 30
@@ -774,8 +787,9 @@ class BacktestService:
                                 "reason": buy_reason,
                             }
                         )
-                        trade_enriched_rows.append(
-                            {
+                        if debug:
+                            trade_enriched_rows.append(
+                                {
                                 "action": "BUY",
                                 "date": date_str,
                                 "price": close,
@@ -792,8 +806,8 @@ class BacktestService:
                                 "rebound_detected": rebound_detected,
                                 "confirmation_detected": confirmation_detected,
                                 "signal_reason": buy_reason,
-                            }
-                        )
+                                }
+                            )
 
             portfolio_value = cash + shares * close
             portfolio_history.append({"date": date_str, "value": round(portfolio_value, 2)})
@@ -899,8 +913,21 @@ class BacktestService:
             diagnosis,
         )
 
-        timing["total_sec"] = time.monotonic() - t_loop_start
-        logger.info("[backtest_timing] index_type=%s technical_calc_sec=%.3f macro_calc_sec=%.3f event_calc_sec=%.3f diagnostics_sec=%.3f total_sec=%.3f price_rows_count=%d", index_type, timing["technical_calc_sec"], timing["macro_calc_sec"], timing["event_calc_sec"], timing["diagnostics_sec"], timing["total_sec"], len(price_history))
+        timing["phase2_total_sec"] = time.monotonic() - t_loop_start
+        logger.info(
+            "[backtest_timing] index_type=%s phase2_total_sec=%.3f score_calc_sec=%.3f technical_calc_sec=%.3f macro_calc_sec=%.3f event_calc_sec=%.3f diagnostics_sec=%.3f trade_pair_diagnostics_sec=%.3f equity_curve_build_sec=%.3f response_build_sec=%.3f price_rows_count=%d",
+            index_type,
+            timing["phase2_total_sec"],
+            timing["score_calc_sec"],
+            timing["technical_calc_sec"],
+            timing["macro_calc_sec"],
+            timing["event_calc_sec"],
+            timing["diagnostics_sec"],
+            timing["trade_pair_diagnostics_sec"],
+            timing["equity_curve_build_sec"],
+            timing["response_build_sec"],
+            len(price_history),
+        )
 
         buy_trades = [trade for trade in trades if trade["action"] == "BUY"]
         sell_trades = [trade for trade in trades if trade["action"] == "SELL"]
@@ -927,6 +954,7 @@ class BacktestService:
             else None
         )
 
+        t_diag = time.monotonic()
         buy_events: List[Dict] = []
         for idx, trade in enumerate(trade_enriched_rows):
             if trade["action"] != "BUY":
@@ -1080,6 +1108,13 @@ class BacktestService:
         )
         first_score = daily_scores[0]["score"] if daily_scores else None
         first_score_date = daily_scores[0]["date"] if daily_scores else None
+        timing["diagnostics_sec"] += time.monotonic() - t_diag
+
+        trade_pair_diagnostics: List[Dict] = []
+        if debug:
+            t_pair = time.monotonic()
+            trade_pair_diagnostics = self._build_trade_pair_diagnostics(trades, price_history)
+            timing["trade_pair_diagnostics_sec"] = time.monotonic() - t_pair
 
         return {
             "final_value": round(final_value, 2),
@@ -1090,7 +1125,7 @@ class BacktestService:
             "trade_count": len(trades),
             "backtest_timing": {k: round(v, 4) for k, v in timing.items()},
             "trades": trades,
-            "trade_pair_diagnostics": self._build_trade_pair_diagnostics(trades, price_history),
+            "trade_pair_diagnostics": trade_pair_diagnostics if debug else [],
             "portfolio_history": portfolio_history,
             "buy_hold_history": buy_hold_history,
             "price_history": price_history,
@@ -1149,8 +1184,8 @@ class BacktestService:
                     "initial_position_is_trade": False,
                     "note": "strategy starts invested at start_date; initial position is not counted as a trade",
                 },
-                "sell_events": sell_events,
-                "buy_events": buy_events,
+                "sell_events": sell_events if debug else [],
+                "buy_events": buy_events if debug else [],
                 "exposure": {
                     "total_trading_days": total_trading_days,
                     "invested_days": sum(position_state),
