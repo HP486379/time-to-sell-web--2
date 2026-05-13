@@ -523,11 +523,15 @@ class BacktestService:
         hold_shares = floor(hold_cash / first_price)
         hold_cash -= hold_shares * first_price
         buy_hold_history: List[Dict] = []
+        running_history: List[Tuple[str, float]] = []
+        close_history: List[float] = []
 
         t_loop_start = time.monotonic()
         for idx, (date_str, close) in enumerate(price_history):
             t_trade_iter = time.monotonic()
             current_dt = date.fromisoformat(date_str)
+            running_history.append((date_str, close))
+            close_history.append(close)
             self._last_phase2_progress["last_processed_date"] = date_str
             if sell_cooldown_days_remaining > 0:
                 sell_cooldown_days_remaining -= 1
@@ -535,21 +539,20 @@ class BacktestService:
                 days_since_last_sell += 1
 
             if idx >= max(score_ma - 1, 199):
-                sub_history = price_history[: idx + 1]
                 score_rows += 1
                 t_score = time.monotonic()
                 try:
-                    score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma, events_cache=events_cache)
+                    score = self._calculate_scores(running_history, macro_series, current_dt, score_ma, events_cache=events_cache)
                 except TypeError:
-                    score = self._calculate_scores(sub_history, macro_series, current_dt, score_ma)
+                    score = self._calculate_scores(running_history, macro_series, current_dt, score_ma)
                 timing["score_calc_sec"] += time.monotonic() - t_score
                 score = self._safe_float(score, field_name="score")
                 if debug:
                     daily_scores.append({"date": date_str, "score": score})
-                closes = [p[1] for p in sub_history]
+                closes = close_history
                 sell_rule_name = self._get_sell_rule_name(index_type)
                 if sell_rule_name != "current_logic":
-                    technical_score, _ = calculate_technical_score(sub_history, base_window=score_ma)
+                    technical_score, _ = calculate_technical_score(running_history, base_window=score_ma)
                     technical_score = self._apply_technical_sell_variant(sell_rule_name, technical_score, closes)
                     r_hist, r_cur = self._history_and_current(macro_series["r_10y"], current_dt)
                     cpi_hist, cpi_cur = self._history_and_current(macro_series["cpi"], current_dt)
@@ -561,7 +564,7 @@ class BacktestService:
                         events = self.event_service.get_events_for_date(current_dt)
                         events_cache[ckey] = events
                     event_adjustment, _ = calculate_event_adjustment(current_dt, events)
-                    ma500, ma1000 = calculate_ultra_long_mas(sub_history)
+                    ma500, ma1000 = calculate_ultra_long_mas(running_history)
                     score = calculate_total_score(
                         technical_score,
                         macro_score,
