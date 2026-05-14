@@ -866,14 +866,46 @@ def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
         f"sell{int(payload.sell_threshold)}_buy{int(payload.buy_threshold)}_ma{int(payload.score_ma)}.json"
     )
     path = PRECOMPUTED_BACKTEST_DIR / filename
+    computed_key = _precomputed_backtest_key(payload)
+    logger.info(
+        "[backtest] precomputed_lookup_start payload.index_type=%s normalized_index_type=%s start_date=%s end_date=%s initial_cash=%s sell_threshold=%s buy_threshold=%s score_ma=%s computed_precomputed_key=%s expected_path=%s file_exists=%s",
+        payload.index_type,
+        payload.index_type.value,
+        payload.start_date.isoformat(),
+        payload.end_date.isoformat(),
+        payload.initial_cash,
+        payload.sell_threshold,
+        payload.buy_threshold,
+        payload.score_ma,
+        computed_key,
+        str(path),
+        path.exists(),
+    )
     if not path.exists():
+        for candidate in PRECOMPUTED_BACKTEST_DIR.glob("*.json"):
+            try:
+                import json
+                with candidate.open("r", encoding="utf-8") as f:
+                    doc = json.load(f)
+                if str(doc.get("precomputed_key")) == computed_key:
+                    logger.info("[backtest] precomputed_hit=true precomputed_key=%s fallback_path=%s", computed_key, str(candidate))
+                    return doc
+            except Exception:
+                continue
+        logger.info("[backtest] precomputed_hit=false precomputed_miss_reason=file_not_found")
         return None
     import json
     with path.open("r", encoding="utf-8") as f:
         doc = json.load(f)
-    expected_key = _precomputed_backtest_key(payload)
+    expected_key = computed_key
     if str(doc.get("precomputed_key")) != expected_key:
+        logger.info(
+            "[backtest] precomputed_hit=false precomputed_miss_reason=key_mismatch file_key=%s computed_key=%s",
+            doc.get("precomputed_key"),
+            expected_key,
+        )
         return None
+    logger.info("[backtest] precomputed_hit=true precomputed_key=%s", expected_key)
     return doc
 
 
