@@ -182,12 +182,12 @@ def test_backtest_returns_precomputed_when_request_matches(tmp_path, monkeypatch
         index_type="SP500",
         start_date="2004-01-01",
         end_date="2025-12-31",
-        initial_cash=100000,
+        initial_cash=1000000,
         buy_threshold=40,
         sell_threshold=80,
         score_ma=200,
     )
-    key = "SP500|2004-01-01|2025-12-31|100000.00|40.00|80.00|200"
+    key = "SP500|2004-01-01|2025-12-31|1000000.00|40.00|80.00|200"
     doc = {
         "precomputed_key": key,
         "generated_at": "2026-05-13T00:00:00Z",
@@ -217,7 +217,7 @@ def test_backtest_precomputed_key_mismatch_falls_back_to_runtime(tmp_path, monke
         index_type="SP500",
         start_date="2004-01-01",
         end_date="2025-12-31",
-        initial_cash=100000,
+        initial_cash=1000000,
         buy_threshold=40,
         sell_threshold=80,
         score_ma=200,
@@ -225,6 +225,43 @@ def test_backtest_precomputed_key_mismatch_falls_back_to_runtime(tmp_path, monke
     )
     doc = {
         "precomputed_key": "SP500|2004-01-01|2025-12-31|999999.00|40.00|80.00|200",
+        "generated_at": "2026-05-13T00:00:00Z",
+        "logic_version": "v1",
+        "result": {
+            "final_value": 111111.0,
+            "buy_and_hold_final": 100000.0,
+            "total_return_pct": 11.11,
+            "max_drawdown_pct": 9.99,
+            "trade_count": 3,
+            "price_history": [["2004-01-01", 100.0], ["2025-12-31", 111.11]],
+            "diagnostics": {"trade_summary": {"trade_count": 3}},
+        },
+    }
+    f = tmp_path / "sp500_2004-01-01_2025-12-31_sell80_buy40_ma200.json"
+    f.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(main, "PRECOMPUTED_BACKTEST_DIR", tmp_path)
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("insufficient_history_for_requested_start:requested_start=2004-01-01,first_available=2014-01-01")))
+    with pytest.raises(HTTPException) as excinfo:
+        main.run_backtest(payload)
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["precomputed_hit"] is False
+    assert excinfo.value.detail["precomputed_miss_reason"] == "key_mismatch"
+
+
+def test_backtest_precomputed_key_mismatch_when_buy_sell_order_is_swapped(tmp_path, monkeypatch):
+    payload = BacktestRequest(
+        index_type="SP500",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=1000000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+        debug=True,
+    )
+    # buy/sell order swapped inside stored key on purpose
+    doc = {
+        "precomputed_key": "SP500|2004-01-01|2025-12-31|1000000.00|80.00|40.00|200",
         "generated_at": "2026-05-13T00:00:00Z",
         "logic_version": "v1",
         "result": {

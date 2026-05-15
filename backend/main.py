@@ -26,6 +26,7 @@ from services.macro_data_service import MacroDataService
 from services.event_service import EventService
 from services.nav_service import FundNavService
 from services.backtest_service import BacktestService
+from services.precomputed_key import build_precomputed_backtest_key
 import purchases_store
 from domain.index_type import normalize_index_type
 
@@ -853,9 +854,14 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
 
 
 def _precomputed_backtest_key(payload: BacktestRequest) -> str:
-    return (
-        f"{payload.index_type.value}|{payload.start_date.isoformat()}|{payload.end_date.isoformat()}|"
-        f"{float(payload.initial_cash):.2f}|{float(payload.buy_threshold):.2f}|{float(payload.sell_threshold):.2f}|{int(payload.score_ma)}"
+    return build_precomputed_backtest_key(
+        index_type=payload.index_type.value,
+        start_date_iso=payload.start_date.isoformat(),
+        end_date_iso=payload.end_date.isoformat(),
+        initial_cash=payload.initial_cash,
+        buy_threshold=payload.buy_threshold,
+        sell_threshold=payload.sell_threshold,
+        score_ma=payload.score_ma,
     )
 
 
