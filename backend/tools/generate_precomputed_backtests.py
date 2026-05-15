@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import traceback
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -71,39 +72,62 @@ def _validate_generated_payload(index_type: str, payload: dict) -> None:
         )
 
 
+def _generate_one(service: BacktestService, index_type: str) -> str:
+    result = service.run_backtest(
+        START_DATE,
+        END_DATE,
+        INITIAL_CASH,
+        BUY_THRESHOLD,
+        SELL_THRESHOLD,
+        index_type,
+        SCORE_MA,
+        debug=False,
+    )
+    payload = {
+        "precomputed_key": build_precomputed_backtest_key(
+            index_type=index_type,
+            start_date_iso=START_DATE.isoformat(),
+            end_date_iso=END_DATE.isoformat(),
+            initial_cash=INITIAL_CASH,
+            buy_threshold=BUY_THRESHOLD,
+            sell_threshold=SELL_THRESHOLD,
+            score_ma=SCORE_MA,
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "logic_version": "v1",
+        "git_commit": os.getenv("GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT") or "unknown",
+        "result": result,
+    }
+    _validate_generated_payload(index_type, payload)
+    fn = _output_filename(index_type)
+    (OUT_DIR / fn).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return fn
+
+
 if __name__ == "__main__":
     market = SP500MarketService()
     macro = MacroDataService()
     events = EventService()
     service = BacktestService(market, macro, events)
 
+    successes: list[str] = []
+    failures: dict[str, str] = {}
+
     for index_type in _selected_targets():
-        result = service.run_backtest(
-            START_DATE,
-            END_DATE,
-            INITIAL_CASH,
-            BUY_THRESHOLD,
-            SELL_THRESHOLD,
-            index_type,
-            SCORE_MA,
-            debug=False,
-        )
-        payload = {
-            "precomputed_key": build_precomputed_backtest_key(
-                index_type=index_type,
-                start_date_iso=START_DATE.isoformat(),
-                end_date_iso=END_DATE.isoformat(),
-                initial_cash=INITIAL_CASH,
-                buy_threshold=BUY_THRESHOLD,
-                sell_threshold=SELL_THRESHOLD,
-                score_ma=SCORE_MA,
-            ),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "logic_version": "v1",
-            "git_commit": os.getenv("GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT") or "unknown",
-            "result": result,
-        }
-        _validate_generated_payload(index_type, payload)
-        fn = _output_filename(index_type)
-        (OUT_DIR / fn).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        print("wrote", fn)
+        try:
+            fn = _generate_one(service, index_type)
+            successes.append(index_type)
+            print(f"wrote {fn}")
+        except Exception as exc:
+            failures[index_type] = str(exc)
+            print(f"failed {index_type}: {exc}")
+            if os.getenv("PRECOMPUTED_VERBOSE_ERRORS", "").lower() in {"1", "true", "yes", "on"}:
+                traceback.print_exc()
+            continue
+
+    print("\n=== precomputed generation summary ===")
+    print(f"successes: {successes}")
+    print(f"failures: {failures}")
+
+    if failures:
+        sys.exit(1)
