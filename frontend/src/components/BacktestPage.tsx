@@ -24,8 +24,8 @@ import { INDEX_LABELS, type IndexType } from '../types/index'
 import { getBacktestViewStatus, toBacktestIndexType } from '../utils/indexTypeMap'
 
 const DEFAULT_REQUEST: BacktestRequest = {
-  start_date: '2014-01-01',
-  end_date: '2024-11-30',
+  start_date: '2000-01-01',
+  end_date: '2025-12-31',
   initial_cash: 1_000_000,
   sell_threshold: 80,
   buy_threshold: 40,
