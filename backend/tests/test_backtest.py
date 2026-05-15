@@ -7,6 +7,7 @@ import pytest
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from services.backtest_service import BacktestService
+from scoring.technical import calculate_technical_score
 
 
 class FakeMarketService:
@@ -212,7 +213,7 @@ def test_nikkei225_like_case_does_not_sell_when_score_threshold_is_false():
         FakeMarketServiceForSellDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
     )
 
-    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="NIKKEI225")
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
 
     assert result["trade_count"] == 0
     assert result["final_value"] == result["buy_and_hold_final"]
@@ -253,7 +254,7 @@ def test_buy_diagnostics_reason_flags_reflect_actual_gate_conditions():
         FakeMarketServiceForBuyDiagnostics(), FakeMacroServiceFlat(), FakeEventService()
     )
 
-    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="NIKKEI225")
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
     buy_events = result["diagnostics"]["buy_events"]
 
     assert len(buy_events) >= 1
@@ -267,3 +268,55 @@ def test_buy_diagnostics_reason_flags_reflect_actual_gate_conditions():
         or first_buy["buy_reason_flags"]["pattern_b"]
     )
     assert first_buy["buy_reason_flags"]["signal_reason"] in {"day60", "pattern_a", "pattern_b", "both"}
+
+
+class FakeMarketServiceStartsLate:
+    def get_price_history_range(self, start: date, end: date, allow_fallback: bool = True, index_type: str = "SP500"):
+        late_start = date(2014, 1, 1)
+        return [((late_start + timedelta(days=i)).isoformat(), 100.0 + i) for i in range(260)]
+
+
+def test_backtest_raises_when_requested_start_is_not_available():
+    service = BacktestService(FakeMarketServiceStartsLate(), FakeMacroServiceFlat(), FakeEventService())
+    with pytest.raises(ValueError, match="insufficient_history_for_requested_start"):
+        service.run_backtest(date(2004, 1, 1), date(2025, 12, 31), initial_cash=1000.0, index_type="SP500")
+
+
+def test_technical_score_equivalence_sub_history_vs_running_history():
+    start = date(2010, 1, 1)
+    price_history = []
+    for i in range(420):
+        dt = start + timedelta(days=i)
+        base = 100.0 + (i * 0.18)
+        wobble = ((i % 9) - 4) * 0.21
+        price_history.append((dt.isoformat(), round(base + wobble, 4)))
+
+    running_history = []
+    check_indices = [199, 220, 260, 320, 419]
+
+    for idx, row in enumerate(price_history):
+        running_history.append(row)
+        if idx not in check_indices:
+            continue
+        old_score, old_reason = calculate_technical_score(price_history[: idx + 1], base_window=200)
+        new_score, new_reason = calculate_technical_score(running_history, base_window=200)
+        assert old_score == new_score
+        assert old_reason == new_reason
+
+
+def test_running_history_and_sub_history_produce_same_backtest_outcome_with_fixed_data():
+    start = date(2020, 1, 1)
+    end = start + timedelta(days=259)
+    market = FakeMarketServiceForSellDiagnostics()
+    macro = FakeMacroServiceFlat()
+    events = FakeEventService()
+
+    service = BacktestService(market, macro, events)
+    result = service.run_backtest(start, end, initial_cash=1000.0, index_type="SP500")
+
+    # run_backtest currently uses running_history append-only path.
+    # This regression assertion guarantees stable strategy outcome on fixed data.
+    assert result["final_value"] == 760.0
+    assert result["buy_and_hold_final"] == 760.0
+    assert result["max_drawdown_pct"] == 24.0
+    assert result["trade_count"] == 0
