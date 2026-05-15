@@ -4,8 +4,12 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
 import math
+import inspect
 import statistics
 import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query, Header, Request
@@ -26,6 +30,12 @@ import purchases_store
 from domain.index_type import normalize_index_type
 
 logger = logging.getLogger(__name__)
+PRECOMPUTED_BACKTEST_DIR = Path(__file__).resolve().parent / "data" / "precomputed_backtests"
+
+
+def _runtime_build_version() -> str:
+    return os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT") or "unknown"
+
 logging.basicConfig(level=logging.INFO)
 
 
@@ -118,6 +128,7 @@ class BacktestRequest(BaseModel):
     buy_threshold: float = 40.0
     sell_threshold: float = 80.0
     score_ma: int = Field(200)
+    debug: bool = False
 
     @field_validator("index_type", mode="before")
     @classmethod
@@ -841,18 +852,103 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
     ]
 
 
+def _precomputed_backtest_key(payload: BacktestRequest) -> str:
+    return (
+        f"{payload.index_type.value}|{payload.start_date.isoformat()}|{payload.end_date.isoformat()}|"
+        f"{float(payload.initial_cash):.2f}|{float(payload.buy_threshold):.2f}|{float(payload.sell_threshold):.2f}|{int(payload.score_ma)}"
+    )
+
+
+def _load_precomputed_backtest(payload: BacktestRequest) -> tuple[Optional[dict], dict]:
+    index_slug = payload.index_type.value.lower()
+    filename = (
+        f"{index_slug}_{payload.start_date.isoformat()}_{payload.end_date.isoformat()}_"
+        f"sell{int(payload.sell_threshold)}_buy{int(payload.buy_threshold)}_ma{int(payload.score_ma)}.json"
+    )
+    path = PRECOMPUTED_BACKTEST_DIR / filename
+    computed_key = _precomputed_backtest_key(payload)
+    meta = {
+        "precomputed_lookup_key": computed_key,
+        "precomputed_expected_path": str(path),
+        "precomputed_file_exists": path.exists(),
+        "precomputed_hit": False,
+        "precomputed_miss_reason": None,
+    }
+    logger.info(
+        "[backtest] precomputed_lookup_start payload.index_type=%s normalized_index_type=%s start_date=%s end_date=%s initial_cash=%s sell_threshold=%s buy_threshold=%s score_ma=%s computed_precomputed_key=%s expected_path=%s file_exists=%s",
+        payload.index_type,
+        payload.index_type.value,
+        payload.start_date.isoformat(),
+        payload.end_date.isoformat(),
+        payload.initial_cash,
+        payload.sell_threshold,
+        payload.buy_threshold,
+        payload.score_ma,
+        computed_key,
+        str(path),
+        meta["precomputed_file_exists"],
+    )
+    if not path.exists():
+        for candidate in PRECOMPUTED_BACKTEST_DIR.glob("*.json"):
+            try:
+                import json
+                with candidate.open("r", encoding="utf-8") as f:
+                    doc = json.load(f)
+                if str(doc.get("precomputed_key")) == computed_key:
+                    logger.info("[backtest] precomputed_hit=true precomputed_key=%s fallback_path=%s", computed_key, str(candidate))
+                    meta["precomputed_hit"] = True
+                    return doc, meta
+            except Exception:
+                continue
+        logger.info("[backtest] precomputed_hit=false precomputed_miss_reason=file_not_found")
+        meta["precomputed_miss_reason"] = "file_not_found"
+        return None, meta
+    import json
+    with path.open("r", encoding="utf-8") as f:
+        doc = json.load(f)
+    expected_key = computed_key
+    if str(doc.get("precomputed_key")) != expected_key:
+        logger.info(
+            "[backtest] precomputed_hit=false precomputed_miss_reason=key_mismatch file_key=%s computed_key=%s",
+            doc.get("precomputed_key"),
+            expected_key,
+        )
+        meta["precomputed_miss_reason"] = "key_mismatch"
+        return None, meta
+    logger.info("[backtest] precomputed_hit=true precomputed_key=%s", expected_key)
+    meta["precomputed_hit"] = True
+    return doc, meta
+
+
 @app.post("/api/backtest", response_model=BacktestResponse)
 def run_backtest(payload: BacktestRequest):
-    try:
-        result = backtest_service.run_backtest(
-            payload.start_date,
-            payload.end_date,
-            payload.initial_cash,
-            payload.buy_threshold,
-            payload.sell_threshold,
-            payload.index_type.value,
-            payload.score_ma,
-        )
+    bt_timeout_sec = float(os.getenv("BACKTEST_EXEC_TIMEOUT_SEC", "60"))
+    bt_started = time.monotonic()
+    build_version = _runtime_build_version()
+    logger.info(
+        "[backtest] backtest_start index_type=%s requested_start_date=%s end_date=%s timeout_sec=%s build_version=%s",
+        payload.index_type.value,
+        payload.start_date.isoformat(),
+        payload.end_date.isoformat(),
+        bt_timeout_sec,
+        build_version,
+    )
+    precomputed, precomputed_lookup_meta = _load_precomputed_backtest(payload)
+    if precomputed is not None:
+        result = precomputed.get("result", {})
+        diagnostics = result.get("diagnostics") or {}
+        diagnostics["result_source"] = "precomputed"
+        diagnostics["precomputed_key"] = precomputed.get("precomputed_key")
+        diagnostics["generated_at"] = precomputed.get("generated_at")
+        diagnostics["logic_version"] = precomputed.get("logic_version")
+        diagnostics["index_type"] = payload.index_type.value
+        diagnostics["start_date"] = payload.start_date.isoformat()
+        diagnostics["end_date"] = payload.end_date.isoformat()
+        diagnostics["sell_threshold"] = payload.sell_threshold
+        diagnostics["buy_threshold"] = payload.buy_threshold
+        diagnostics["score_ma"] = payload.score_ma
+        if payload.debug:
+            diagnostics.update(precomputed_lookup_meta)
         price_history = result.get("price_history", [])
         equity_curve = _build_equity_curve(price_history)
         summary = BacktestSummary(
@@ -867,6 +963,129 @@ def run_backtest(payload: BacktestRequest):
         return BacktestResponse(
             summary=summary,
             equity_curve=equity_curve,
+            diagnostics=diagnostics,
+            final_asset=result["final_value"],
+            buy_and_hold_asset=result["buy_and_hold_final"],
+            total_return=result["total_return_pct"],
+            max_drawdown=result["max_drawdown_pct"],
+            trade_count=result["trade_count"],
+        )
+    logger.info("[backtest] phase1_price_fetch_start index_type=%s build_version=%s", payload.index_type.value, build_version)
+    # Phase-1: price history fetch/validation only
+    try:
+        prefetched_price_history = backtest_service.fetch_and_validate_price_history_for_backtest(
+            payload.start_date,
+            payload.end_date,
+            payload.index_type.value,
+        )
+        logger.info("[backtest] phase1_price_fetch_end index_type=%s rows=%d", payload.index_type.value, len(prefetched_price_history))
+    except ValueError as exc:
+        reason = str(exc)
+        logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, reason)
+        if reason.startswith("insufficient_history_for_requested_start:"):
+            pairs = {}
+            for token in reason.split(":", 1)[1].split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "insufficient_history_for_requested_start",
+                    "index_type": payload.index_type.value,
+                    "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
+                    "available_start_date": pairs.get("first_available"),
+                    "message": "Requested start date is earlier than available price history.",
+                    "build_version": build_version,
+                    **(precomputed_lookup_meta if payload.debug else {}),
+                },
+            )
+        if reason == "data_unavailable":
+            provider = "unknown"
+            symbol = None
+            if hasattr(backtest_service, "market_service") and hasattr(backtest_service.market_service, "get_last_debug"):
+                debug = backtest_service.market_service.get_last_debug(payload.index_type.value)
+                attempts = debug.get("provider_attempts") if isinstance(debug, dict) else None
+                if isinstance(attempts, list) and attempts:
+                    first = attempts[0] if isinstance(attempts[0], dict) else {}
+                    provider = str(first.get("provider") or provider)
+                    symbol = first.get("symbol")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "price_history_data_unavailable",
+                    "index_type": payload.index_type.value,
+                    "requested_start_date": payload.start_date.isoformat(),
+                    "end_date": payload.end_date.isoformat(),
+                    "message": "Price history data is unavailable from the external provider.",
+                    "provider": provider,
+                    "symbol": symbol,
+                    "build_version": build_version,
+                    **(precomputed_lookup_meta if payload.debug else {}),
+                },
+            )
+        if reason.startswith("price_history_fetch_timeout:"):
+            pairs = {}
+            for token in reason.split(":", 1)[1].split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "error": "price_history_fetch_timeout",
+                    "index_type": pairs.get("index_type", payload.index_type.value),
+                    "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
+                    "end_date": pairs.get("end_date", payload.end_date.isoformat()),
+                    "build_version": build_version,
+                    **(precomputed_lookup_meta if payload.debug else {}),
+                },
+            )
+        raise
+    logger.info("[backtest] phase2_backtest_start index_type=%s build_version=%s", payload.index_type.value, build_version)
+    ex = ThreadPoolExecutor(max_workers=1)
+    run_args = [
+        payload.start_date,
+        payload.end_date,
+        payload.initial_cash,
+        payload.buy_threshold,
+        payload.sell_threshold,
+        payload.index_type.value,
+        payload.score_ma,
+        prefetched_price_history,
+    ]
+    run_kwargs = {}
+    try:
+        if "debug" in inspect.signature(backtest_service.run_backtest).parameters:
+            run_kwargs["debug"] = payload.debug
+    except (TypeError, ValueError):
+        pass
+    fut = ex.submit(backtest_service.run_backtest, *run_args, **run_kwargs)
+    try:
+        result = fut.result(timeout=bt_timeout_sec)
+        price_history = result.get("price_history", [])
+        t_eq = time.monotonic()
+        equity_curve = _build_equity_curve(price_history)
+        if isinstance(result.get("backtest_timing"), dict):
+            result["backtest_timing"]["equity_curve_build_sec"] = round(time.monotonic() - t_eq, 4)
+        t_resp = time.monotonic()
+        summary = BacktestSummary(
+            final_equity=result["final_value"],
+            hold_equity=result["buy_and_hold_final"],
+            total_return=result["total_return_pct"],
+            max_drawdown=result["max_drawdown_pct"],
+            trade_count=result["trade_count"],
+            final_asset=result["final_value"],
+            buy_and_hold_asset=result["buy_and_hold_final"],
+        )
+        elapsed = time.monotonic() - bt_started
+        if isinstance(result.get("backtest_timing"), dict):
+            result["backtest_timing"]["response_build_sec"] = round(time.monotonic() - t_resp, 4)
+        logger.info("[backtest] backtest_elapsed_sec index_type=%s elapsed_sec=%.3f", payload.index_type.value, elapsed)
+        ex.shutdown(wait=False, cancel_futures=True)
+        return BacktestResponse(
+            summary=summary,
+            equity_curve=equity_curve,
             diagnostics=result.get("diagnostics"),
             final_asset=result["final_value"],
             buy_and_hold_asset=result["buy_and_hold_final"],
@@ -874,17 +1093,128 @@ def run_backtest(payload: BacktestRequest):
             max_drawdown=result["max_drawdown_pct"],
             trade_count=result["trade_count"],
         )
+    except FuturesTimeoutError:
+        fut.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+        elapsed = time.monotonic() - bt_started
+        progress = {}
+        if hasattr(backtest_service, "get_last_phase2_progress"):
+            try:
+                progress = backtest_service.get_last_phase2_progress() or {}
+            except Exception:
+                progress = {}
+        logger.warning(
+            "[backtest] timeout_reason=backtest_timeout index_type=%s requested_start_date=%s end_date=%s backtest_elapsed_sec=%.3f",
+            payload.index_type.value,
+            payload.start_date.isoformat(),
+            payload.end_date.isoformat(),
+            elapsed,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "backtest_timeout",
+                "index_type": payload.index_type.value,
+                "requested_start_date": payload.start_date.isoformat(),
+                "end_date": payload.end_date.isoformat(),
+                "message": "Backtest exceeded server-side timeout before completion.",
+                "phase": "calculation",
+                "last_completed_phase": "price_fetch",
+                "timeout_reason": "phase2_calculation_exceeded_timeout",
+                "build_version": build_version,
+                "phase2_timing": {
+                    "phase2_total_sec": progress.get("phase2_total_sec", round(elapsed, 4)),
+                    "score_calc_sec": progress.get("score_calc_sec", 0.0),
+                    "technical_calc_sec": progress.get("technical_calc_sec", 0.0),
+                    "macro_calc_sec": progress.get("macro_calc_sec", 0.0),
+                    "event_calc_sec": progress.get("event_calc_sec", 0.0),
+                    "trade_loop_sec": progress.get("trade_loop_sec", 0.0),
+                    "diagnostics_sec": progress.get("diagnostics_sec", 0.0),
+                    "trade_pair_diagnostics_sec": progress.get("trade_pair_diagnostics_sec", 0.0),
+                    "equity_curve_build_sec": progress.get("equity_curve_build_sec", 0.0),
+                    "response_build_sec": progress.get("response_build_sec", 0.0),
+                    "price_rows_count": progress.get("price_rows_count", len(prefetched_price_history)),
+                    "equity_curve_count": progress.get("equity_curve_count", 0),
+                    "trades_count": progress.get("trades_count", 0),
+                    "last_processed_date": progress.get("last_processed_date"),
+                },
+            },
+        )
     except ValueError as exc:
-        logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, str(exc))
+        reason = str(exc)
+        logger.warning("[backtest] validation_failed index_type=%s reason=%s", payload.index_type.value, reason)
+        if reason.startswith("insufficient_history_for_requested_start:"):
+            pairs = {}
+            for token in reason.split(":", 1)[1].split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "insufficient_history_for_requested_start",
+                    "index_type": payload.index_type.value,
+                    "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
+                    "available_start_date": pairs.get("first_available"),
+                    "message": "Requested start date is earlier than available price history.",
+                "build_version": build_version,
+                **(precomputed_lookup_meta if payload.debug else {}),
+            },
+        )
+        if reason == "data_unavailable":
+            provider = "unknown"
+            symbol = None
+            if hasattr(backtest_service, "market_service") and hasattr(backtest_service.market_service, "get_last_debug"):
+                debug = backtest_service.market_service.get_last_debug(payload.index_type.value)
+                attempts = debug.get("provider_attempts") if isinstance(debug, dict) else None
+                if isinstance(attempts, list) and attempts:
+                    first = attempts[0] if isinstance(attempts[0], dict) else {}
+                    provider = str(first.get("provider") or provider)
+                    symbol = first.get("symbol")
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "price_history_data_unavailable",
+                    "index_type": payload.index_type.value,
+                    "requested_start_date": payload.start_date.isoformat(),
+                    "end_date": payload.end_date.isoformat(),
+                    "message": "Price history data is unavailable from the external provider.",
+                    "provider": provider,
+                    "symbol": symbol,
+                    "build_version": build_version,
+                },
+            )
+        if reason.startswith("price_history_fetch_timeout:"):
+            pairs = {}
+            for token in reason.split(":", 1)[1].split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    pairs[k.strip()] = v.strip()
+            elapsed = time.monotonic() - bt_started
+            logger.warning("[backtest] timeout_reason=price_history_fetch_timeout index_type=%s backtest_elapsed_sec=%.3f", payload.index_type.value, elapsed)
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "error": "price_history_fetch_timeout",
+                    "index_type": pairs.get("index_type", payload.index_type.value),
+                    "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
+                    "end_date": pairs.get("end_date", payload.end_date.isoformat()),
+                },
+            )
+        ex.shutdown(wait=False, cancel_futures=True)
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "BACKTEST_COMPUTATION_ERROR",
-                "reason": str(exc),
+                "reason": reason,
                 "index_type": payload.index_type.value,
             },
         )
     except Exception:
+        ex.shutdown(wait=False, cancel_futures=True)
         logger.exception("Backtest failed", exc_info=True)
         raise HTTPException(
             status_code=502,
