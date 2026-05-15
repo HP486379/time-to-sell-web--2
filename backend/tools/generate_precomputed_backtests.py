@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from services.sp500_market_service import SP500MarketService
 from services.macro_data_service import MacroDataService
@@ -11,7 +16,7 @@ from services.event_service import EventService
 from services.backtest_service import BacktestService
 from services.precomputed_key import build_precomputed_backtest_key
 
-OUT_DIR = Path(__file__).resolve().parents[1] / "data" / "precomputed_backtests"
+OUT_DIR = BACKEND_DIR / "data" / "precomputed_backtests"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 START_DATE = date(2000, 1, 1)
