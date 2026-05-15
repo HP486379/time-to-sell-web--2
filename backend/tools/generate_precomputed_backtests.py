@@ -26,7 +26,7 @@ BUY_THRESHOLD = 40.0
 SELL_THRESHOLD = 80.0
 SCORE_MA = 200
 
-TARGETS = [
+DEFAULT_TARGETS = [
     "SP500",
     "SP500_JPY",
     "TOPIX",
@@ -34,6 +34,17 @@ TARGETS = [
     "ALLCOUNTRY_JPY",
     "NIFTY50",
 ]
+
+
+def _selected_targets() -> list[str]:
+    raw = os.getenv("PRECOMPUTED_TARGETS", "").strip()
+    if not raw:
+        return DEFAULT_TARGETS
+    requested = [item.strip().upper() for item in raw.split(",") if item.strip()]
+    invalid = [item for item in requested if item not in DEFAULT_TARGETS]
+    if invalid:
+        raise ValueError(f"unknown PRECOMPUTED_TARGETS: {invalid}; allowed={DEFAULT_TARGETS}")
+    return requested
 
 
 def _output_filename(index_type: str) -> str:
@@ -66,7 +77,7 @@ if __name__ == "__main__":
     events = EventService()
     service = BacktestService(market, macro, events)
 
-    for index_type in TARGETS:
+    for index_type in _selected_targets():
         result = service.run_backtest(
             START_DATE,
             END_DATE,
