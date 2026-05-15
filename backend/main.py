@@ -859,7 +859,7 @@ def _precomputed_backtest_key(payload: BacktestRequest) -> str:
     )
 
 
-def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
+def _load_precomputed_backtest(payload: BacktestRequest) -> tuple[Optional[dict], dict]:
     index_slug = payload.index_type.value.lower()
     filename = (
         f"{index_slug}_{payload.start_date.isoformat()}_{payload.end_date.isoformat()}_"
@@ -867,6 +867,13 @@ def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
     )
     path = PRECOMPUTED_BACKTEST_DIR / filename
     computed_key = _precomputed_backtest_key(payload)
+    meta = {
+        "precomputed_lookup_key": computed_key,
+        "precomputed_expected_path": str(path),
+        "precomputed_file_exists": path.exists(),
+        "precomputed_hit": False,
+        "precomputed_miss_reason": None,
+    }
     logger.info(
         "[backtest] precomputed_lookup_start payload.index_type=%s normalized_index_type=%s start_date=%s end_date=%s initial_cash=%s sell_threshold=%s buy_threshold=%s score_ma=%s computed_precomputed_key=%s expected_path=%s file_exists=%s",
         payload.index_type,
@@ -879,7 +886,7 @@ def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
         payload.score_ma,
         computed_key,
         str(path),
-        path.exists(),
+        meta["precomputed_file_exists"],
     )
     if not path.exists():
         for candidate in PRECOMPUTED_BACKTEST_DIR.glob("*.json"):
@@ -889,11 +896,13 @@ def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
                     doc = json.load(f)
                 if str(doc.get("precomputed_key")) == computed_key:
                     logger.info("[backtest] precomputed_hit=true precomputed_key=%s fallback_path=%s", computed_key, str(candidate))
-                    return doc
+                    meta["precomputed_hit"] = True
+                    return doc, meta
             except Exception:
                 continue
         logger.info("[backtest] precomputed_hit=false precomputed_miss_reason=file_not_found")
-        return None
+        meta["precomputed_miss_reason"] = "file_not_found"
+        return None, meta
     import json
     with path.open("r", encoding="utf-8") as f:
         doc = json.load(f)
@@ -904,9 +913,11 @@ def _load_precomputed_backtest(payload: BacktestRequest) -> Optional[dict]:
             doc.get("precomputed_key"),
             expected_key,
         )
-        return None
+        meta["precomputed_miss_reason"] = "key_mismatch"
+        return None, meta
     logger.info("[backtest] precomputed_hit=true precomputed_key=%s", expected_key)
-    return doc
+    meta["precomputed_hit"] = True
+    return doc, meta
 
 
 @app.post("/api/backtest", response_model=BacktestResponse)
@@ -922,7 +933,7 @@ def run_backtest(payload: BacktestRequest):
         bt_timeout_sec,
         build_version,
     )
-    precomputed = _load_precomputed_backtest(payload)
+    precomputed, precomputed_lookup_meta = _load_precomputed_backtest(payload)
     if precomputed is not None:
         result = precomputed.get("result", {})
         diagnostics = result.get("diagnostics") or {}
@@ -936,6 +947,8 @@ def run_backtest(payload: BacktestRequest):
         diagnostics["sell_threshold"] = payload.sell_threshold
         diagnostics["buy_threshold"] = payload.buy_threshold
         diagnostics["score_ma"] = payload.score_ma
+        if payload.debug:
+            diagnostics.update(precomputed_lookup_meta)
         price_history = result.get("price_history", [])
         equity_curve = _build_equity_curve(price_history)
         summary = BacktestSummary(
@@ -984,6 +997,7 @@ def run_backtest(payload: BacktestRequest):
                     "available_start_date": pairs.get("first_available"),
                     "message": "Requested start date is earlier than available price history.",
                     "build_version": build_version,
+                    **(precomputed_lookup_meta if payload.debug else {}),
                 },
             )
         if reason == "data_unavailable":
@@ -1007,6 +1021,7 @@ def run_backtest(payload: BacktestRequest):
                     "provider": provider,
                     "symbol": symbol,
                     "build_version": build_version,
+                    **(precomputed_lookup_meta if payload.debug else {}),
                 },
             )
         if reason.startswith("price_history_fetch_timeout:"):
@@ -1023,6 +1038,7 @@ def run_backtest(payload: BacktestRequest):
                     "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
                     "end_date": pairs.get("end_date", payload.end_date.isoformat()),
                     "build_version": build_version,
+                    **(precomputed_lookup_meta if payload.debug else {}),
                 },
             )
         raise
@@ -1142,9 +1158,10 @@ def run_backtest(payload: BacktestRequest):
                     "requested_start_date": pairs.get("requested_start", payload.start_date.isoformat()),
                     "available_start_date": pairs.get("first_available"),
                     "message": "Requested start date is earlier than available price history.",
-                    "build_version": build_version,
-                },
-            )
+                "build_version": build_version,
+                **(precomputed_lookup_meta if payload.debug else {}),
+            },
+        )
         if reason == "data_unavailable":
             provider = "unknown"
             symbol = None
