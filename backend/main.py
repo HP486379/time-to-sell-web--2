@@ -1122,6 +1122,7 @@ def run_backtest(payload: BacktestRequest):
                 "last_completed_phase": "price_fetch",
                 "timeout_reason": "phase2_calculation_exceeded_timeout",
                 "build_version": build_version,
+                **precomputed_lookup_meta,
                 "phase2_timing": {
                     "phase2_total_sec": progress.get("phase2_total_sec", round(elapsed, 4)),
                     "score_calc_sec": progress.get("score_calc_sec", 0.0),
@@ -1159,7 +1160,6 @@ def run_backtest(payload: BacktestRequest):
                     "available_start_date": pairs.get("first_available"),
                     "message": "Requested start date is earlier than available price history.",
                 "build_version": build_version,
-                **(precomputed_lookup_meta if payload.debug else {}),
             },
         )
         if reason == "data_unavailable":

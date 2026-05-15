@@ -140,6 +140,13 @@ def test_backtest_exec_timeout_returns_structured_json_error(monkeypatch):
         main.run_backtest(payload)
     assert excinfo.value.status_code == 504
     assert excinfo.value.detail["error"] == "backtest_timeout"
+    assert "precomputed_lookup_key" in excinfo.value.detail
+    assert "precomputed_expected_path" in excinfo.value.detail
+    assert "precomputed_file_exists" in excinfo.value.detail
+    assert "precomputed_hit" in excinfo.value.detail
+    assert "precomputed_miss_reason" in excinfo.value.detail
+    assert isinstance(excinfo.value.detail["precomputed_file_exists"], bool)
+    assert isinstance(excinfo.value.detail["precomputed_hit"], bool)
 
 
 def test_backtest_data_unavailable_returns_structured_json_error(monkeypatch):
