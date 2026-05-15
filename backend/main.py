@@ -854,8 +854,13 @@ def _build_equity_curve(price_history: List[tuple]) -> List[BacktestPoint]:
 
 
 def _precomputed_backtest_key(payload: BacktestRequest) -> str:
+    precomputed_index_type = (
+        IndexType.ALLCOUNTRY_JPY.value
+        if payload.index_type.value == IndexType.ALLCOUNTRY.value
+        else payload.index_type.value
+    )
     return build_precomputed_backtest_key(
-        index_type=payload.index_type.value,
+        index_type=precomputed_index_type,
         start_date_iso=payload.start_date.isoformat(),
         end_date_iso=payload.end_date.isoformat(),
         initial_cash=payload.initial_cash,
@@ -866,7 +871,12 @@ def _precomputed_backtest_key(payload: BacktestRequest) -> str:
 
 
 def _load_precomputed_backtest(payload: BacktestRequest) -> tuple[Optional[dict], dict]:
-    index_slug = payload.index_type.value.lower()
+    normalized_index_type = (
+        IndexType.ALLCOUNTRY_JPY.value
+        if payload.index_type.value == IndexType.ALLCOUNTRY.value
+        else payload.index_type.value
+    )
+    index_slug = normalized_index_type.lower()
     filename = (
         f"{index_slug}_{payload.start_date.isoformat()}_{payload.end_date.isoformat()}_"
         f"sell{int(payload.sell_threshold)}_buy{int(payload.buy_threshold)}_ma{int(payload.score_ma)}.json"
@@ -883,7 +893,7 @@ def _load_precomputed_backtest(payload: BacktestRequest) -> tuple[Optional[dict]
     logger.info(
         "[backtest] precomputed_lookup_start payload.index_type=%s normalized_index_type=%s start_date=%s end_date=%s initial_cash=%s sell_threshold=%s buy_threshold=%s score_ma=%s computed_precomputed_key=%s expected_path=%s file_exists=%s",
         payload.index_type,
-        payload.index_type.value,
+        normalized_index_type,
         payload.start_date.isoformat(),
         payload.end_date.isoformat(),
         payload.initial_cash,
