@@ -1496,6 +1496,7 @@ def create_purchase(
     user_id = x_user_id if x_user_id else payload.user_id
 
     if payload.product_id not in purchases_store.PRODUCT_TO_INDEX:
+        ex.shutdown(wait=False, cancel_futures=True)
         raise HTTPException(
             status_code=400,
             detail=(
