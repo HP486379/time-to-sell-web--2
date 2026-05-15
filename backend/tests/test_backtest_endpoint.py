@@ -212,6 +212,40 @@ def test_backtest_returns_precomputed_when_request_matches(tmp_path, monkeypatch
     assert body["diagnostics"]["precomputed_key"] == key
 
 
+def test_backtest_returns_precomputed_for_sp500_jpy_when_file_exists(tmp_path, monkeypatch):
+    payload = BacktestRequest(
+        index_type="SP500_JPY",
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=1000000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    key = "SP500_JPY|2004-01-01|2025-12-31|1000000.00|40.00|80.00|200"
+    doc = {
+        "precomputed_key": key,
+        "generated_at": "2026-05-13T00:00:00Z",
+        "logic_version": "v1",
+        "result": {
+            "final_value": 2222222.0,
+            "buy_and_hold_final": 2000000.0,
+            "total_return_pct": 122.22,
+            "max_drawdown_pct": 10.0,
+            "trade_count": 4,
+            "price_history": [["2004-01-01", 100.0], ["2025-12-31", 222.22]],
+            "diagnostics": {"trade_summary": {"trade_count": 4}},
+        },
+    }
+    f = tmp_path / "sp500_jpy_2004-01-01_2025-12-31_sell80_buy40_ma200.json"
+    f.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(main, "PRECOMPUTED_BACKTEST_DIR", tmp_path)
+    response = main.run_backtest(payload)
+    body = response.model_dump()
+    assert body["summary"]["final_equity"] == 2222222.0
+    assert body["diagnostics"]["result_source"] == "precomputed"
+
+
 def test_backtest_precomputed_key_mismatch_falls_back_to_runtime(tmp_path, monkeypatch):
     payload = BacktestRequest(
         index_type="SP500",
@@ -311,3 +345,51 @@ def test_backtest_falls_back_to_runtime_when_precomputed_not_matched(monkeypatch
     body = response.model_dump()
     assert body["summary"]["final_equity"] == 123.0
     assert body["diagnostics"].get("result_source") != "precomputed"
+
+
+@pytest.mark.parametrize(
+    "index_type,filename,key",
+    [
+        ("TOPIX", "topix_2004-01-01_2025-12-31_sell80_buy40_ma200.json", "TOPIX|2004-01-01|2025-12-31|1000000.00|40.00|80.00|200"),
+        ("ALLCOUNTRY_JPY", "allcountry_jpy_2004-01-01_2025-12-31_sell80_buy40_ma200.json", "ALLCOUNTRY_JPY|2004-01-01|2025-12-31|1000000.00|40.00|80.00|200"),
+        ("NIFTY50", "nifty50_2004-01-01_2025-12-31_sell80_buy40_ma200.json", "NIFTY50|2004-01-01|2025-12-31|1000000.00|40.00|80.00|200"),
+    ],
+)
+def test_backtest_precomputed_short_circuits_before_history_validation_for_2004_requests(
+    tmp_path, monkeypatch, index_type, filename, key
+):
+    payload = BacktestRequest(
+        index_type=index_type,
+        start_date="2004-01-01",
+        end_date="2025-12-31",
+        initial_cash=1000000,
+        buy_threshold=40,
+        sell_threshold=80,
+        score_ma=200,
+    )
+    doc = {
+        "precomputed_key": key,
+        "generated_at": "2026-05-15T00:00:00Z",
+        "logic_version": "v1",
+        "result": {
+            "final_value": 1500000.0,
+            "buy_and_hold_final": 1400000.0,
+            "total_return_pct": 50.0,
+            "max_drawdown_pct": 20.0,
+            "trade_count": 5,
+            "price_history": [["2004-01-01", 100.0], ["2025-12-31", 150.0]],
+            "diagnostics": {"trade_summary": {"trade_count": 5}},
+        },
+    }
+    (tmp_path / filename).write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(main, "PRECOMPUTED_BACKTEST_DIR", tmp_path)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("fetch_and_validate_price_history_for_backtest should not be called on precomputed hit")
+
+    monkeypatch.setattr(main.backtest_service, "fetch_and_validate_price_history_for_backtest", fail_if_called)
+
+    response = main.run_backtest(payload)
+    body = response.model_dump()
+    assert body["diagnostics"]["result_source"] == "precomputed"
+    assert body["diagnostics"]["precomputed_key"] == key
