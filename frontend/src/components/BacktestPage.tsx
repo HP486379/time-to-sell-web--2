@@ -10,7 +10,6 @@ import {
   Button,
   Typography,
   Alert,
-  Divider,
   FormControl,
   InputLabel,
   Select,
@@ -18,8 +17,8 @@ import {
 } from '@mui/material'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import dayjs from 'dayjs'
-import { runBacktest } from '../apis'
-import type { BacktestRequest, BacktestResult } from '../types/apis'
+import { runAccumulationBacktest, runBacktest } from '../apis'
+import type { AccumulationBacktestRequest, BacktestRequest, BacktestResult } from '../types/apis'
 import { INDEX_LABELS, type IndexType } from '../types/index'
 import { getBacktestViewStatus, toBacktestIndexType } from '../utils/indexTypeMap'
 
@@ -41,6 +40,12 @@ const PRECOMPUTED_INITIAL_CASH = 1_000_000
 const PRECOMPUTED_SELL_THRESHOLD = 80
 const PRECOMPUTED_BUY_THRESHOLD = 40
 const PRECOMPUTED_SCORE_MA = 200
+const ACCUMULATION_DEFAULT_START_DATE = '2023-01-01'
+const ACCUMULATION_DEFAULT_INITIAL_CASH = 0
+const ACCUMULATION_DEFAULT_MONTHLY_AMOUNT = 30_000
+const ACCUMULATION_DEFAULT_PROFIT_TAKE_PCT = 20
+
+type BacktestMode = 'lump_sum' | 'accumulation'
 
 const getPrecomputedStartDates = (indexType: IndexType): string[] => {
   const fixedStarts = FULL_2005_INDEX_TYPES.includes(indexType)
@@ -58,7 +63,7 @@ const isRuntimeRangeAllowed = (startDate: string, endDate: string): boolean => {
 
 const isPrecomputedRequest = (request: BacktestRequest): boolean => {
   return (
-    getPrecomputedStartDates(request.index_type).includes(request.start_date) &&
+    getPrecomputedStartDates(request.index_type as IndexType).includes(request.start_date) &&
     request.end_date === PRECOMPUTED_END_DATE &&
     Number(request.initial_cash) === PRECOMPUTED_INITIAL_CASH &&
     Number(request.sell_threshold) === PRECOMPUTED_SELL_THRESHOLD &&
@@ -67,11 +72,16 @@ const isPrecomputedRequest = (request: BacktestRequest): boolean => {
   )
 }
 
-const getBacktestValidationError = (request: BacktestRequest): string | null => {
+const getBacktestValidationError = (mode: BacktestMode, request: BacktestRequest): string | null => {
+  if (mode === 'accumulation') {
+    if (isRuntimeRangeAllowed(request.start_date, request.end_date)) return null
+    return '積立バックテストの任意計算は3年以内のみ対応です。長期の積立検証は今後の事前計算プリセットで対応予定です。'
+  }
+
   if (isPrecomputedRequest(request)) return null
   if (isRuntimeRangeAllowed(request.start_date, request.end_date)) return null
 
-  const availableStarts = getPrecomputedStartDates(request.index_type).join(' / ')
+  const availableStarts = getPrecomputedStartDates(request.index_type as IndexType).join(' / ')
   return (
     `3年超のバックテストは事前計算済み期間のみ利用できます。` +
     `対象インデックスの開始日は ${availableStarts}、終了日は ${PRECOMPUTED_END_DATE}、` +
@@ -102,10 +112,40 @@ const currencySafe = (v: unknown) => {
 }
 
 export function BacktestPage() {
+  const [mode, setMode] = useState<BacktestMode>('lump_sum')
   const [params, setParams] = useState<BacktestRequest>(DEFAULT_REQUEST)
+  const [monthlyAmount, setMonthlyAmount] = useState(ACCUMULATION_DEFAULT_MONTHLY_AMOUNT)
+  const [profitTakePct, setProfitTakePct] = useState(ACCUMULATION_DEFAULT_PROFIT_TAKE_PCT)
   const [result, setResult] = useState<BacktestResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const handleModeChange = (nextMode: BacktestMode) => {
+    setMode(nextMode)
+    setResult(null)
+    setError(null)
+    if (nextMode === 'accumulation') {
+      setParams((prev) => ({
+        ...prev,
+        start_date: ACCUMULATION_DEFAULT_START_DATE,
+        end_date: PRECOMPUTED_END_DATE,
+        initial_cash: ACCUMULATION_DEFAULT_INITIAL_CASH,
+        sell_threshold: PRECOMPUTED_SELL_THRESHOLD,
+        buy_threshold: PRECOMPUTED_BUY_THRESHOLD,
+        score_ma: PRECOMPUTED_SCORE_MA,
+      }))
+    } else {
+      setParams((prev) => ({
+        ...prev,
+        start_date: BACKTEST_START_DATES[prev.index_type as IndexType],
+        end_date: PRECOMPUTED_END_DATE,
+        initial_cash: PRECOMPUTED_INITIAL_CASH,
+        sell_threshold: PRECOMPUTED_SELL_THRESHOLD,
+        buy_threshold: PRECOMPUTED_BUY_THRESHOLD,
+        score_ma: PRECOMPUTED_SCORE_MA,
+      }))
+    }
+  }
 
   const handleChange = (key: keyof BacktestRequest, value: string | number) => {
     setParams((prev) => ({ ...prev, [key]: value }))
@@ -115,9 +155,9 @@ export function BacktestPage() {
     setParams((prev) => ({
       ...prev,
       index_type: indexType,
-      start_date: BACKTEST_START_DATES[indexType],
+      start_date: mode === 'accumulation' ? ACCUMULATION_DEFAULT_START_DATE : BACKTEST_START_DATES[indexType],
       end_date: PRECOMPUTED_END_DATE,
-      initial_cash: PRECOMPUTED_INITIAL_CASH,
+      initial_cash: mode === 'accumulation' ? ACCUMULATION_DEFAULT_INITIAL_CASH : PRECOMPUTED_INITIAL_CASH,
       sell_threshold: PRECOMPUTED_SELL_THRESHOLD,
       buy_threshold: PRECOMPUTED_BUY_THRESHOLD,
       score_ma: PRECOMPUTED_SCORE_MA,
@@ -127,7 +167,7 @@ export function BacktestPage() {
   }
 
   const handleRun = async () => {
-    const validationError = getBacktestValidationError(params)
+    const validationError = getBacktestValidationError(mode, params)
     if (validationError) {
       setError(validationError)
       setResult(null)
@@ -137,7 +177,15 @@ export function BacktestPage() {
     try {
       setLoading(true)
       setError(null)
-      const res = await runBacktest({ ...params, index_type: toBacktestIndexType(params.index_type) })
+      const normalizedParams = { ...params, index_type: toBacktestIndexType(params.index_type as IndexType) }
+      const res =
+        mode === 'accumulation'
+          ? await runAccumulationBacktest({
+              ...normalizedParams,
+              monthly_amount: monthlyAmount,
+              profit_take_pct: profitTakePct,
+            } as AccumulationBacktestRequest)
+          : await runBacktest(normalizedParams)
       setResult(res)
     } catch (e: any) {
       setError(e.message ?? 'バックテストに失敗しました')
@@ -146,16 +194,25 @@ export function BacktestPage() {
     }
   }
 
+  const chartData =
+    mode === 'accumulation'
+      ? (result?.portfolio_history || []).map((point, idx) => ({
+          date: point.date,
+          strategy: point.value,
+          hold: result?.buy_hold_history?.[idx]?.value ?? null,
+        }))
+      : (result?.equity_curve || []).map((point) => ({
+          date: point.date,
+          close: point.close,
+          ma20: point.ma20 ?? null,
+          ma60: point.ma60 ?? null,
+          ma200: point.ma200 ?? null,
+        }))
 
-  const noClearSellStatus = getBacktestViewStatus(params.index_type, result?.summary.trade_count)
-  const chartData = (result?.equity_curve || []).map((point) => ({
-    date: point.date,
-    close: point.close,
-    ma20: point.ma20 ?? null,
-    ma60: point.ma60 ?? null,
-    ma200: point.ma200 ?? null,
-  }))
-  const startDateHelperText = `3年超は ${getPrecomputedStartDates(params.index_type).join(' / ')} のみ対応`
+  const startDateHelperText =
+    mode === 'accumulation'
+      ? '積立バックテストの任意計算は3年以内のみ対応'
+      : `3年超は ${getPrecomputedStartDates(params.index_type as IndexType).join(' / ')} のみ対応`
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -172,6 +229,20 @@ export function BacktestPage() {
               </Alert>
             )}
             <Grid container spacing={2}>
+              <Grid item xs={12} sm={6} md={3}>
+                <FormControl fullWidth size="small">
+                  <InputLabel id="mode-select">バックテスト種別</InputLabel>
+                  <Select
+                    labelId="mode-select"
+                    value={mode}
+                    label="バックテスト種別"
+                    onChange={(e) => handleModeChange(e.target.value as BacktestMode)}
+                  >
+                    <MenuItem value="lump_sum">一括投資</MenuItem>
+                    <MenuItem value="accumulation">積立投資</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <TextField
                   label="開始日"
@@ -219,6 +290,28 @@ export function BacktestPage() {
                   </Select>
                 </FormControl>
               </Grid>
+              {mode === 'accumulation' && (
+                <>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <TextField
+                      label="毎月積立額"
+                      type="number"
+                      fullWidth
+                      value={monthlyAmount}
+                      onChange={(e) => setMonthlyAmount(Number(e.target.value))}
+                    />
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <TextField
+                      label="利確割合（%）"
+                      type="number"
+                      fullWidth
+                      value={profitTakePct}
+                      onChange={(e) => setProfitTakePct(Number(e.target.value))}
+                    />
+                  </Grid>
+                </>
+              )}
               <Grid item xs={12} sm={6} md={3}>
                 <TextField
                   label="売りしきい値"
@@ -270,18 +363,38 @@ export function BacktestPage() {
                   最終資産: <strong>{currencySafe(result.summary.final_equity)}</strong>
                 </Typography>
                 <Typography variant="body2">
-                  単純ホールド: <strong>{currencySafe(result.summary.hold_equity)}</strong>
+                  {mode === 'accumulation' ? '通常積立ホールド' : '単純ホールド'}:{' '}
+                  <strong>{currencySafe(result.summary.hold_equity)}</strong>
                 </Typography>
+                {mode === 'accumulation' && (
+                  <>
+                    <Typography variant="body2">
+                      累計積立額: <strong>{currencySafe(result.summary.total_contributed)}</strong>
+                    </Typography>
+                    <Typography variant="body2">
+                      待機資金: <strong>{currencySafe(result.summary.waiting_cash)}</strong>
+                    </Typography>
+                    <Typography variant="body2">
+                      利確回数 / 再投入回数:{' '}
+                      <strong>{result.summary.profit_take_count ?? 0} 回 / {result.summary.reinvest_count ?? 0} 回</strong>
+                    </Typography>
+                  </>
+                )}
                 <Typography variant="body2">
                   トータルリターン: <strong>{pctFmt(result.summary.total_return)}</strong>
                 </Typography>
+                {mode === 'accumulation' && result.summary.hold_return !== undefined && (
+                  <Typography variant="body2">
+                    通常積立リターン: <strong>{pctFmt(result.summary.hold_return)}</strong>
+                  </Typography>
+                )}
                 <Typography variant="body2">
                   最大ドローダウン: <strong>{pctFmt(result.summary.max_drawdown)}</strong>
                 </Typography>
                 <Typography variant="body2">
                   売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
                 </Typography>
-                {getBacktestViewStatus(result.summary.trade_count) && (
+                {mode === 'lump_sum' && getBacktestViewStatus(result.summary.trade_count) && (
                   <Typography variant="body2" color="text.secondary">
                     {getBacktestViewStatus(result.summary.trade_count)}
                   </Typography>
@@ -295,9 +408,9 @@ export function BacktestPage() {
           </CardContent>
         </Card>
 
-        {result?.equity_curve && result.equity_curve.length > 0 && (
+        {chartData.length > 0 && (
           <Card>
-            <CardHeader title="価格推移" />
+            <CardHeader title={mode === 'accumulation' ? '資産推移' : '価格推移'} />
             <CardContent>
               <ResponsiveContainer width="100%" height={320}>
                 <LineChart data={chartData} margin={{ left: 8, right: 8 }}>
@@ -312,10 +425,19 @@ export function BacktestPage() {
                     labelFormatter={(d) => dayjs(d as string).format('YYYY-MM-DD')}
                   />
                   <Legend />
-                  <Line type="monotone" dataKey="close" name="終値" stroke="#7c3aed" dot={false} />
-                  <Line type="monotone" dataKey="ma20" name="MA20" stroke="#0ea5e9" dot={false} />
-                  <Line type="monotone" dataKey="ma60" name="MA60" stroke="#10b981" dot={false} />
-                  <Line type="monotone" dataKey="ma200" name="MA200" stroke="#f97316" dot={false} />
+                  {mode === 'accumulation' ? (
+                    <>
+                      <Line type="monotone" dataKey="strategy" name="積立＋売り時くん" stroke="#7c3aed" dot={false} />
+                      <Line type="monotone" dataKey="hold" name="通常積立ホールド" stroke="#10b981" dot={false} />
+                    </>
+                  ) : (
+                    <>
+                      <Line type="monotone" dataKey="close" name="終値" stroke="#7c3aed" dot={false} />
+                      <Line type="monotone" dataKey="ma20" name="MA20" stroke="#0ea5e9" dot={false} />
+                      <Line type="monotone" dataKey="ma60" name="MA60" stroke="#10b981" dot={false} />
+                      <Line type="monotone" dataKey="ma200" name="MA200" stroke="#f97316" dot={false} />
+                    </>
+                  )}
                 </LineChart>
               </ResponsiveContainer>
             </CardContent>
