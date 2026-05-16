@@ -475,7 +475,12 @@ class SP500MarketService:
                 ratio,
             )
         low_threshold = 0.05 if index_type == "TOPIX" else 0.1
-        high_threshold = 20.0 if index_type == "TOPIX" else 10.0
+        if index_type == "TOPIX":
+    　　　　 high_threshold = 20.0
+　　　　 elif index_type == "SP500_JPY":
+             high_threshold = 12.0
+        else:
+            high_threshold = 10.0
         if ratio < low_threshold:
             return reject(f"abnormal_ratio_low:ratio={ratio:.6f}<min={low_threshold:.6f}")
         if ratio > high_threshold:
