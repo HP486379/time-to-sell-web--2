@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import traceback
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -20,12 +21,30 @@ from services.precomputed_key import build_precomputed_backtest_key
 OUT_DIR = BACKEND_DIR / "data" / "precomputed_backtests"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-START_DATE = date(2000, 1, 1)
 END_DATE = date(2025, 12, 31)
 INITIAL_CASH = 1_000_000.0
 BUY_THRESHOLD = 40.0
 SELL_THRESHOLD = 80.0
 SCORE_MA = 200
+
+
+@dataclass(frozen=True)
+class TargetConfig:
+    index_type: str
+    start_date: date
+    end_date: date = END_DATE
+
+
+TARGET_CONFIGS: dict[str, TargetConfig] = {
+    # Full 2000-start data is available through the current providers.
+    "SP500": TargetConfig("SP500", date(2000, 1, 1)),
+    "SP500_JPY": TargetConfig("SP500_JPY", date(2000, 1, 1)),
+    "NIKKEI225": TargetConfig("NIKKEI225", date(2000, 1, 1)),
+    # Provider-limited earliest usable dates confirmed by generation attempt.
+    "TOPIX": TargetConfig("TOPIX", date(2008, 1, 4)),
+    "ALLCOUNTRY_JPY": TargetConfig("ALLCOUNTRY_JPY", date(2008, 3, 28)),
+    "NIFTY50": TargetConfig("NIFTY50", date(2007, 9, 17)),
+}
 
 DEFAULT_TARGETS = [
     "SP500",
@@ -42,20 +61,20 @@ def _selected_targets() -> list[str]:
     if not raw:
         return DEFAULT_TARGETS
     requested = [item.strip().upper() for item in raw.split(",") if item.strip()]
-    invalid = [item for item in requested if item not in DEFAULT_TARGETS]
+    invalid = [item for item in requested if item not in TARGET_CONFIGS]
     if invalid:
         raise ValueError(f"unknown PRECOMPUTED_TARGETS: {invalid}; allowed={DEFAULT_TARGETS}")
     return requested
 
 
-def _output_filename(index_type: str) -> str:
+def _output_filename(config: TargetConfig) -> str:
     return (
-        f"{index_type.lower()}_{START_DATE.isoformat()}_{END_DATE.isoformat()}_"
+        f"{config.index_type.lower()}_{config.start_date.isoformat()}_{config.end_date.isoformat()}_"
         f"sell{int(SELL_THRESHOLD)}_buy{int(BUY_THRESHOLD)}_ma{int(SCORE_MA)}.json"
     )
 
 
-def _validate_generated_payload(index_type: str, payload: dict) -> None:
+def _validate_generated_payload(config: TargetConfig, payload: dict) -> None:
     result = payload.get("result") or {}
     price_history = result.get("price_history") or []
     equity_curve = result.get("equity_curve") or result.get("portfolio_history") or []
@@ -63,31 +82,38 @@ def _validate_generated_payload(index_type: str, payload: dict) -> None:
     if len(price_history) <= 2:
         raise ValueError(
             f"generated precomputed backtest looks like placeholder data: "
-            f"index_type={index_type}, price_history_points={len(price_history)}"
+            f"index_type={config.index_type}, price_history_points={len(price_history)}"
         )
     if len(equity_curve) <= 2:
         raise ValueError(
             f"generated precomputed backtest has too few equity points: "
-            f"index_type={index_type}, equity_points={len(equity_curve)}"
+            f"index_type={config.index_type}, equity_points={len(equity_curve)}"
+        )
+
+    first_date = str(price_history[0][0]) if price_history else None
+    if first_date and first_date > config.start_date.isoformat():
+        raise ValueError(
+            f"generated precomputed backtest starts later than configured: "
+            f"index_type={config.index_type}, configured_start={config.start_date.isoformat()}, first_price_date={first_date}"
         )
 
 
-def _generate_one(service: BacktestService, index_type: str) -> str:
+def _generate_one(service: BacktestService, config: TargetConfig) -> str:
     result = service.run_backtest(
-        START_DATE,
-        END_DATE,
+        config.start_date,
+        config.end_date,
         INITIAL_CASH,
         BUY_THRESHOLD,
         SELL_THRESHOLD,
-        index_type,
+        config.index_type,
         SCORE_MA,
         debug=False,
     )
     payload = {
         "precomputed_key": build_precomputed_backtest_key(
-            index_type=index_type,
-            start_date_iso=START_DATE.isoformat(),
-            end_date_iso=END_DATE.isoformat(),
+            index_type=config.index_type,
+            start_date_iso=config.start_date.isoformat(),
+            end_date_iso=config.end_date.isoformat(),
             initial_cash=INITIAL_CASH,
             buy_threshold=BUY_THRESHOLD,
             sell_threshold=SELL_THRESHOLD,
@@ -96,10 +122,15 @@ def _generate_one(service: BacktestService, index_type: str) -> str:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "logic_version": "v1",
         "git_commit": os.getenv("GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT") or "unknown",
+        "source_policy": {
+            "type": "provider_available_start_date",
+            "configured_start_date": config.start_date.isoformat(),
+            "end_date": config.end_date.isoformat(),
+        },
         "result": result,
     }
-    _validate_generated_payload(index_type, payload)
-    fn = _output_filename(index_type)
+    _validate_generated_payload(config, payload)
+    fn = _output_filename(config)
     (OUT_DIR / fn).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return fn
 
@@ -114,8 +145,9 @@ if __name__ == "__main__":
     failures: dict[str, str] = {}
 
     for index_type in _selected_targets():
+        config = TARGET_CONFIGS[index_type]
         try:
-            fn = _generate_one(service, index_type)
+            fn = _generate_one(service, config)
             successes.append(index_type)
             print(f"wrote {fn}")
         except Exception as exc:
