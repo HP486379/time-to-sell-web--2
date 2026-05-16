@@ -74,6 +74,7 @@ PRESET_CONFIGS: dict[str, dict[str, TargetConfig]] = {
     "hybrid": HYBRID_TARGET_CONFIGS,
     "standard_2005": _fixed_start_target_configs(2005),
     "standard_2010": _fixed_start_target_configs(2010),
+    "standard_2014": _fixed_start_target_configs(2014),
     "standard_2015": _fixed_start_target_configs(2015),
 }
 
