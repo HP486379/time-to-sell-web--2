@@ -124,5 +124,376 @@
     "name": "PCE",
     "importance": 4,
     "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-05-01",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-05-08",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-05-12",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-05-15",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-05-28",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（改定値）"
+  },
+  {
+    "date": "2026-05-29",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-06-01",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-06-05",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-06-10",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-06-16",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-06-17",
+    "name": "FOMC",
+    "importance": 5,
+    "source": "manual",
+    "description": "FOMC 政策金利・声明"
+  },
+  {
+    "date": "2026-06-25",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（確報値）"
+  },
+  {
+    "date": "2026-06-26",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-07-01",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-07-02",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-07-14",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-07-16",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-07-29",
+    "name": "FOMC",
+    "importance": 5,
+    "source": "manual",
+    "description": "FOMC 政策金利・声明"
+  },
+  {
+    "date": "2026-07-30",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（速報値）"
+  },
+  {
+    "date": "2026-07-31",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-08-03",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-08-07",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-08-12",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-08-14",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-08-27",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（改定値）"
+  },
+  {
+    "date": "2026-08-28",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-09-01",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-09-04",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-09-11",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-09-16",
+    "name": "FOMC",
+    "importance": 5,
+    "source": "manual",
+    "description": "FOMC 政策金利・声明"
+  },
+  {
+    "date": "2026-09-16",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-09-30",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（確報値）"
+  },
+  {
+    "date": "2026-09-30",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-10-01",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-10-02",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-10-15",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-10-16",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-10-28",
+    "name": "FOMC",
+    "importance": 5,
+    "source": "manual",
+    "description": "FOMC 政策金利・声明"
+  },
+  {
+    "date": "2026-10-29",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（速報値）"
+  },
+  {
+    "date": "2026-10-30",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-11-02",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-11-06",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-11-13",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-11-17",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-11-25",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（改定値）"
+  },
+  {
+    "date": "2026-11-25",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
+  },
+  {
+    "date": "2026-12-01",
+    "name": "ISM Manufacturing",
+    "importance": 4,
+    "source": "manual",
+    "description": "ISM製造業景況感"
+  },
+  {
+    "date": "2026-12-04",
+    "name": "Nonfarm Payrolls",
+    "importance": 5,
+    "source": "manual",
+    "description": "雇用統計（非農業部門雇用者数）"
+  },
+  {
+    "date": "2026-12-09",
+    "name": "FOMC",
+    "importance": 5,
+    "source": "manual",
+    "description": "FOMC 政策金利・声明"
+  },
+  {
+    "date": "2026-12-10",
+    "name": "CPI Release",
+    "importance": 4,
+    "source": "manual",
+    "description": "米国CPIの発表"
+  },
+  {
+    "date": "2026-12-16",
+    "name": "Retail Sales",
+    "importance": 4,
+    "source": "manual",
+    "description": "小売売上高"
+  },
+  {
+    "date": "2026-12-22",
+    "name": "GDP",
+    "importance": 4,
+    "source": "manual",
+    "description": "実質GDP（確報値）"
+  },
+  {
+    "date": "2026-12-23",
+    "name": "PCE",
+    "importance": 4,
+    "source": "manual",
+    "description": "PCEデフレーター"
   }
 ]
