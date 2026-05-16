@@ -36,7 +36,7 @@ const BACKTEST_START_DATES: Record<IndexType, string> = {
 const FULL_2005_INDEX_TYPES: IndexType[] = ['SP500', 'sp500_jpy', 'NIKKEI']
 const DEFAULT_LONG_PRECOMPUTED_START_DATES = ['2010-01-01', '2014-01-01', '2015-01-01']
 const PRECOMPUTED_END_DATE = '2025-12-31'
-const RUNTIME_MAX_DAYS = 366 * 5
+const RUNTIME_MAX_DAYS = 366 * 3
 const PRECOMPUTED_INITIAL_CASH = 1_000_000
 const PRECOMPUTED_SELL_THRESHOLD = 80
 const PRECOMPUTED_BUY_THRESHOLD = 40
@@ -73,7 +73,7 @@ const getBacktestValidationError = (request: BacktestRequest): string | null => 
 
   const availableStarts = getPrecomputedStartDates(request.index_type).join(' / ')
   return (
-    `5年超のバックテストは事前計算済み期間のみ利用できます。` +
+    `3年超のバックテストは事前計算済み期間のみ利用できます。` +
     `対象インデックスの開始日は ${availableStarts}、終了日は ${PRECOMPUTED_END_DATE}、` +
     `初期資金100万円・売り80・買い40・MA200にしてください。`
   )
@@ -155,7 +155,7 @@ export function BacktestPage() {
     ma60: point.ma60 ?? null,
     ma200: point.ma200 ?? null,
   }))
-  const startDateHelperText = `5年超は ${getPrecomputedStartDates(params.index_type).join(' / ')} のみ対応`
+  const startDateHelperText = `3年超は ${getPrecomputedStartDates(params.index_type).join(' / ')} のみ対応`
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
