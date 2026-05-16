@@ -34,18 +34,8 @@ class TargetConfig:
     index_type: str
     start_date: date
     end_date: date = END_DATE
+    preset: str = "hybrid"
 
-
-TARGET_CONFIGS: dict[str, TargetConfig] = {
-    # Full 2000-start data is available through the current providers.
-    "SP500": TargetConfig("SP500", date(2000, 1, 1)),
-    "SP500_JPY": TargetConfig("SP500_JPY", date(2000, 1, 1)),
-    "NIKKEI225": TargetConfig("NIKKEI225", date(2000, 1, 1)),
-    # Provider-limited earliest usable dates confirmed by generation attempt.
-    "TOPIX": TargetConfig("TOPIX", date(2008, 1, 4)),
-    "ALLCOUNTRY_JPY": TargetConfig("ALLCOUNTRY_JPY", date(2008, 3, 28)),
-    "NIFTY50": TargetConfig("NIFTY50", date(2007, 9, 17)),
-}
 
 DEFAULT_TARGETS = [
     "SP500",
@@ -56,16 +46,73 @@ DEFAULT_TARGETS = [
     "NIFTY50",
 ]
 
+HYBRID_TARGET_CONFIGS: dict[str, TargetConfig] = {
+    # Full 2000-start data is available through the current providers.
+    "SP500": TargetConfig("SP500", date(2000, 1, 1), preset="hybrid"),
+    "SP500_JPY": TargetConfig("SP500_JPY", date(2000, 1, 1), preset="hybrid"),
+    "NIKKEI225": TargetConfig("NIKKEI225", date(2000, 1, 1), preset="hybrid"),
+    # Provider-limited earliest usable dates confirmed by generation attempt.
+    "TOPIX": TargetConfig("TOPIX", date(2008, 1, 4), preset="hybrid"),
+    "ALLCOUNTRY_JPY": TargetConfig("ALLCOUNTRY_JPY", date(2008, 3, 28), preset="hybrid"),
+    "NIFTY50": TargetConfig("NIFTY50", date(2007, 9, 17), preset="hybrid"),
+}
+
+
+def _fixed_start_target_configs(start_year: int) -> dict[str, TargetConfig]:
+    start = date(start_year, 1, 1)
+    preset = f"standard_{start_year}"
+    return {
+        index_type: TargetConfig(index_type, start, preset=preset)
+        for index_type in DEFAULT_TARGETS
+    }
+
+
+PRESET_CONFIGS: dict[str, dict[str, TargetConfig]] = {
+    "hybrid": HYBRID_TARGET_CONFIGS,
+    "standard_2005": _fixed_start_target_configs(2005),
+    "standard_2010": _fixed_start_target_configs(2010),
+    "standard_2015": _fixed_start_target_configs(2015),
+}
+
+DEFAULT_PRESETS = ["hybrid"]
+
+
+def _selected_presets() -> list[str]:
+    raw = os.getenv("PRECOMPUTED_PRESETS", "").strip()
+    if not raw:
+        return DEFAULT_PRESETS
+    requested = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    invalid = [item for item in requested if item not in PRESET_CONFIGS]
+    if invalid:
+        raise ValueError(f"unknown PRECOMPUTED_PRESETS: {invalid}; allowed={list(PRESET_CONFIGS)}")
+    return requested
+
 
 def _selected_targets() -> list[str]:
     raw = os.getenv("PRECOMPUTED_TARGETS", "").strip()
     if not raw:
         return DEFAULT_TARGETS
     requested = [item.strip().upper() for item in raw.split(",") if item.strip()]
-    invalid = [item for item in requested if item not in TARGET_CONFIGS]
+    invalid = [item for item in requested if item not in DEFAULT_TARGETS]
     if invalid:
         raise ValueError(f"unknown PRECOMPUTED_TARGETS: {invalid}; allowed={DEFAULT_TARGETS}")
     return requested
+
+
+def _selected_configs() -> list[TargetConfig]:
+    targets = set(_selected_targets())
+    configs: list[TargetConfig] = []
+    seen: set[tuple[str, date, date]] = set()
+    for preset in _selected_presets():
+        for index_type, config in PRESET_CONFIGS[preset].items():
+            if index_type not in targets:
+                continue
+            key = (config.index_type, config.start_date, config.end_date)
+            if key in seen:
+                continue
+            seen.add(key)
+            configs.append(config)
+    return configs
 
 
 def _output_filename(config: TargetConfig) -> str:
@@ -138,6 +185,7 @@ def _generate_one(service: BacktestService, config: TargetConfig) -> str:
         "git_commit": os.getenv("GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT") or "unknown",
         "source_policy": {
             "type": "provider_available_start_date",
+            "preset": config.preset,
             "configured_start_date": config.start_date.isoformat(),
             "end_date": config.end_date.isoformat(),
             "start_date_tolerance_days": START_DATE_TOLERANCE_DAYS,
@@ -159,15 +207,15 @@ if __name__ == "__main__":
     successes: list[str] = []
     failures: dict[str, str] = {}
 
-    for index_type in _selected_targets():
-        config = TARGET_CONFIGS[index_type]
+    for config in _selected_configs():
+        label = f"{config.preset}:{config.index_type}:{config.start_date.isoformat()}"
         try:
             fn = _generate_one(service, config)
-            successes.append(index_type)
+            successes.append(label)
             print(f"wrote {fn}")
         except Exception as exc:
-            failures[index_type] = str(exc)
-            print(f"failed {index_type}: {exc}")
+            failures[label] = str(exc)
+            print(f"failed {label}: {exc}")
             if os.getenv("PRECOMPUTED_VERBOSE_ERRORS", "").lower() in {"1", "true", "yes", "on"}:
                 traceback.print_exc()
             continue
