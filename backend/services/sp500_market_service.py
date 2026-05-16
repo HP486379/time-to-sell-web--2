@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import math
 import os
 import random
@@ -49,11 +49,11 @@ class SP500MarketService:
             "TOPIX": os.getenv("TOPIX_SYMBOL", "1306.T"),
             "NIKKEI225": os.getenv("NIKKEI_SYMBOL", "^N225"),
             "NIFTY50": os.getenv("NIFTY50_SYMBOL", "^NSEI"),
-            # オルカンは MSCI ACWI 連動 ETF（ACWI）をプロキシとして利用する
+            # 繧ｪ繝ｫ繧ｫ繝ｳ縺ｯ MSCI ACWI 騾｣蜍・ETF・・CWI・峨ｒ繝励Ο繧ｭ繧ｷ縺ｨ縺励※蛻ｩ逕ｨ縺吶ｋ
             "ALLCOUNTRY": os.getenv("ORUKAN_SYMBOL", "ACWI"),
-            # オルカン円建ては ACWI × USD/JPY を用いる
+            # 繧ｪ繝ｫ繧ｫ繝ｳ蜀・ｻｺ縺ｦ縺ｯ ACWI ﾃ・USD/JPY 繧堤畑縺・ｋ
             "ALLCOUNTRY_JPY": os.getenv("ORUKAN_JPY_SYMBOL", os.getenv("ORUKAN_SYMBOL", "ACWI")),
-            # S&P500 円建ては ^GSPC × USD/JPY を用いる
+            # S&P500 蜀・ｻｺ縺ｦ縺ｯ ^GSPC ﾃ・USD/JPY 繧堤畑縺・ｋ
             "SP500_JPY": os.getenv("SP500_JPY_SYMBOL", os.getenv("SP500_SYMBOL", "^GSPC")),
         }
         self.symbol_fallback_map = {
@@ -114,7 +114,7 @@ class SP500MarketService:
             "NIKKEI225": 15000.0,
             "NIFTY50": 4000.0,
             "ALLCOUNTRY": 15000.0,
-            # index_jpy は指数値×USD/JPY で桁が大きくなるため、妥当なスケールに合わせる
+            # index_jpy 縺ｯ謖・焚蛟､ﾃ誘SD/JPY 縺ｧ譯√′螟ｧ縺阪￥縺ｪ繧九◆繧√∝ｦ･蠖薙↑繧ｹ繧ｱ繝ｼ繝ｫ縺ｫ蜷医ｏ縺帙ｋ
             "ALLCOUNTRY_JPY": 2000000.0,
             "SP500_JPY": 600000.0,
         }
@@ -457,9 +457,9 @@ class SP500MarketService:
         if not history:
             return reject("empty_history")
 
-        # スケール判定は絶対価格ではなく ratio を使用する。
-        # 通常レンジ: 0.2 < ratio < 5.0（ここは reject ではなくログのみ）
-        # reject は明らかな異常値のみに限定する。
+        # 繧ｹ繧ｱ繝ｼ繝ｫ蛻､螳壹・邨ｶ蟇ｾ萓｡譬ｼ縺ｧ縺ｯ縺ｪ縺・ratio 繧剃ｽｿ逕ｨ縺吶ｋ縲・
+        # 騾壼ｸｸ繝ｬ繝ｳ繧ｸ: 0.2 < ratio < 5.0・医％縺薙・ reject 縺ｧ縺ｯ縺ｪ縺上Ο繧ｰ縺ｮ縺ｿ・・
+        # reject 縺ｯ譏弱ｉ縺九↑逡ｰ蟶ｸ蛟､縺ｮ縺ｿ縺ｫ髯仙ｮ壹☆繧九・
         if first_price is None or first_price <= 0:
             return reject(f"invalid_first_close:{first_price}")
         if last_price is None or last_price <= 0:
@@ -476,9 +476,9 @@ class SP500MarketService:
             )
         low_threshold = 0.05 if index_type == "TOPIX" else 0.1
         if index_type == "TOPIX":
-    　　　　 high_threshold = 20.0
-　　　　 elif index_type == "SP500_JPY":
-             high_threshold = 12.0
+            high_threshold = 20.0
+        elif index_type == "SP500_JPY":
+            high_threshold = 12.0
         else:
             high_threshold = 10.0
         if ratio < low_threshold:
@@ -517,7 +517,7 @@ class SP500MarketService:
         if len(history) < 200:
             soft_flags.append(f"LOW_POINTS(points={len(history)})")
 
-        # 連続同値が長い場合は劣化扱い
+        # 騾｣邯壼酔蛟､縺碁聞縺・ｴ蜷医・蜉｣蛹匁桶縺・
         prev_value: Optional[float] = None
         flat_run = 1
         max_flat_run = 1
@@ -1763,11 +1763,11 @@ class SP500MarketService:
         return hist
 
     def _fallback_history(self, start: date, end: date, index_type: str) -> List[Tuple[str, float]]:
-        """決定的で過度に膨らまないシンセティック履歴を生成する。
+        """豎ｺ螳夂噪縺ｧ驕主ｺｦ縺ｫ閹ｨ繧峨∪縺ｪ縺・す繝ｳ繧ｻ繝・ぅ繝・け螻･豁ｴ繧堤函謌舌☆繧九・
 
-        * 年率のドリフトは指数ごとに設定（S&P500: 約7%、TOPIX: 約4%）
-        * 日次の揺らぎを小さめに入れて最大ドローダウンが0%にならないようにする
-        * 週末はスキップし、営業日ベースで積み上げる
+        * 蟷ｴ邇・・繝峨Μ繝輔ヨ縺ｯ謖・焚縺斐→縺ｫ險ｭ螳夲ｼ・&P500: 邏・%縲ゝOPIX: 邏・%・・
+        * 譌･谺｡縺ｮ謠ｺ繧峨℃繧貞ｰ上＆繧√↓蜈･繧後※譛螟ｧ繝峨Ο繝ｼ繝繧ｦ繝ｳ縺・%縺ｫ縺ｪ繧峨↑縺・ｈ縺・↓縺吶ｋ
+        * 騾ｱ譛ｫ縺ｯ繧ｹ繧ｭ繝・・縺励∝霧讌ｭ譌･繝吶・繧ｹ縺ｧ遨阪∩荳翫￡繧・
         """
 
         index_type = self._normalize_index_type(index_type)
@@ -1808,9 +1808,9 @@ class SP500MarketService:
 
         current = start
         while current <= end:
-            if current.weekday() < 5:  # 月〜金のみ
+            if current.weekday() < 5:  # 譛医憺≡縺ｮ縺ｿ
                 noise = rng.uniform(-noise_span, noise_span)
-                # 半年ごとに5%程度の調整を入れて drawdown を作る（TOPIXは除外）
+                # 蜊雁ｹｴ縺斐→縺ｫ5%遞句ｺｦ縺ｮ隱ｿ謨ｴ繧貞・繧後※ drawdown 繧剃ｽ懊ｋ・・OPIX縺ｯ髯､螟厄ｼ・
                 if index_type != "TOPIX" and (current.timetuple().tm_yday // 182) % 2 == 1:
                     noise -= 0.002
 
@@ -1835,7 +1835,7 @@ class SP500MarketService:
         current = start
         while current <= end:
             if current.weekday() < 5:
-                # 日次 ±0.2% 程度の為替揺らぎ
+                # 譌･谺｡ ﾂｱ0.2% 遞句ｺｦ縺ｮ轤ｺ譖ｿ謠ｺ繧峨℃
                 fx = max(50.0, fx * (1 + rng.uniform(-0.002, 0.002)))
                 history.append((current.isoformat(), round(fx, 4)))
             current += timedelta(days=1)
@@ -2209,10 +2209,10 @@ class SP500MarketService:
 
     def get_fund_nav_jpy(self, sp_price_usd: float, usd_jpy: float) -> float:
         """
-        eMAXIS Slim 米国株式（S&P500）の直近基準価額を取得する。
+        eMAXIS Slim 邀ｳ蝗ｽ譬ｪ蠑擾ｼ・&P500・峨・逶ｴ霑大渕貅紋ｾ｡鬘阪ｒ蜿門ｾ励☆繧九・
 
-        Yahoo! Finance 上のファンドコード（デフォルト: 03311187.T）を優先し、
-        取得できない場合は S&P500 指数を為替で円換算した値でフォールバックする。
+        Yahoo! Finance 荳翫・繝輔ぃ繝ｳ繝峨さ繝ｼ繝会ｼ医ョ繝輔か繝ｫ繝・ 03311187.T・峨ｒ蜆ｪ蜈医＠縲・
+        蜿門ｾ励〒縺阪↑縺・ｴ蜷医・ S&P500 謖・焚繧堤ぜ譖ｿ縺ｧ蜀・鋤邂励＠縺溷､縺ｧ繝輔か繝ｼ繝ｫ繝舌ャ繧ｯ縺吶ｋ縲・
         """
 
         fund_symbol = os.getenv("SP500_FUND_SYMBOL", "VOO")
@@ -2296,3 +2296,4 @@ class SP500MarketService:
                 }
             )
         return series
+
