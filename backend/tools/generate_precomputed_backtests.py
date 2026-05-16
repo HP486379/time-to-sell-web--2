@@ -46,6 +46,8 @@ DEFAULT_TARGETS = [
     "NIFTY50",
 ]
 
+FULL_2005_TARGETS = ["SP500", "SP500_JPY", "NIKKEI225"]
+
 HYBRID_TARGET_CONFIGS: dict[str, TargetConfig] = {
     # Full 2000-start data is available through the current providers.
     "SP500": TargetConfig("SP500", date(2000, 1, 1), preset="hybrid"),
@@ -61,9 +63,10 @@ HYBRID_TARGET_CONFIGS: dict[str, TargetConfig] = {
 def _fixed_start_target_configs(start_year: int) -> dict[str, TargetConfig]:
     start = date(start_year, 1, 1)
     preset = f"standard_{start_year}"
+    allowed_targets = FULL_2005_TARGETS if start_year == 2005 else DEFAULT_TARGETS
     return {
         index_type: TargetConfig(index_type, start, preset=preset)
-        for index_type in DEFAULT_TARGETS
+        for index_type in allowed_targets
     }
 
 
