@@ -23,13 +23,25 @@ import type { BacktestRequest, BacktestResult } from '../types/apis'
 import { INDEX_LABELS, type IndexType } from '../types/index'
 import { getBacktestViewStatus, toBacktestIndexType } from '../utils/indexTypeMap'
 
+const BACKTEST_START_DATES: Record<IndexType, string> = {
+  SP500: '2000-01-01',
+  sp500_jpy: '2000-01-01',
+  TOPIX: '2008-01-04',
+  NIKKEI: '2000-01-01',
+  NIFTY50: '2007-09-17',
+  ORUKAN: '2008-03-28',
+  orukan_jpy: '2008-03-28',
+}
+
+const DEFAULT_INDEX_TYPE: IndexType = 'SP500'
+
 const DEFAULT_REQUEST: BacktestRequest = {
-  start_date: '2000-01-01',
+  start_date: BACKTEST_START_DATES[DEFAULT_INDEX_TYPE],
   end_date: '2025-12-31',
   initial_cash: 1_000_000,
   sell_threshold: 80,
   buy_threshold: 40,
-  index_type: 'SP500',
+  index_type: DEFAULT_INDEX_TYPE,
   score_ma: 200,
 }
 
@@ -51,6 +63,15 @@ export function BacktestPage() {
 
   const handleChange = (key: keyof BacktestRequest, value: string | number) => {
     setParams((prev) => ({ ...prev, [key]: value }))
+  }
+
+  const handleIndexChange = (indexType: IndexType) => {
+    setParams((prev) => ({
+      ...prev,
+      index_type: indexType,
+      start_date: BACKTEST_START_DATES[indexType],
+    }))
+    setResult(null)
   }
 
   const handleRun = async () => {
@@ -127,7 +148,7 @@ export function BacktestPage() {
                     labelId="index-select"
                     value={params.index_type}
                     label="対象インデックス"
-                    onChange={(e) => handleChange('index_type', e.target.value as IndexType)}
+                    onChange={(e) => handleIndexChange(e.target.value as IndexType)}
                   >
                     {(Object.keys(INDEX_LABELS) as IndexType[]).map((key) => (
                       <MenuItem key={key} value={key}>
