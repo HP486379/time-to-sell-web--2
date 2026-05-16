@@ -33,7 +33,8 @@ const BACKTEST_START_DATES: Record<IndexType, string> = {
   orukan_jpy: '2008-03-28',
 }
 
-const FIXED_PRECOMPUTED_START_DATES = ['2005-01-01', '2010-01-01', '2015-01-01']
+const FULL_2005_INDEX_TYPES: IndexType[] = ['SP500', 'sp500_jpy', 'NIKKEI']
+const DEFAULT_LONG_PRECOMPUTED_START_DATES = ['2010-01-01', '2015-01-01']
 const PRECOMPUTED_END_DATE = '2025-12-31'
 const RUNTIME_MAX_DAYS = 366 * 5
 const PRECOMPUTED_INITIAL_CASH = 1_000_000
@@ -42,7 +43,10 @@ const PRECOMPUTED_BUY_THRESHOLD = 40
 const PRECOMPUTED_SCORE_MA = 200
 
 const getPrecomputedStartDates = (indexType: IndexType): string[] => {
-  return Array.from(new Set([BACKTEST_START_DATES[indexType], ...FIXED_PRECOMPUTED_START_DATES])).sort()
+  const fixedStarts = FULL_2005_INDEX_TYPES.includes(indexType)
+    ? ['2005-01-01', ...DEFAULT_LONG_PRECOMPUTED_START_DATES]
+    : DEFAULT_LONG_PRECOMPUTED_START_DATES
+  return Array.from(new Set([BACKTEST_START_DATES[indexType], ...fixedStarts])).sort()
 }
 
 const isRuntimeRangeAllowed = (startDate: string, endDate: string): boolean => {
