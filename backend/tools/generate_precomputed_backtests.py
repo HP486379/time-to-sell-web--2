@@ -26,6 +26,7 @@ INITIAL_CASH = 1_000_000.0
 BUY_THRESHOLD = 40.0
 SELL_THRESHOLD = 80.0
 SCORE_MA = 200
+START_DATE_TOLERANCE_DAYS = int(os.getenv("PRECOMPUTED_START_DATE_TOLERANCE_DAYS", "7"))
 
 
 @dataclass(frozen=True)
@@ -90,12 +91,25 @@ def _validate_generated_payload(config: TargetConfig, payload: dict) -> None:
             f"index_type={config.index_type}, equity_points={len(equity_curve)}"
         )
 
-    first_date = str(price_history[0][0]) if price_history else None
-    if first_date and first_date > config.start_date.isoformat():
-        raise ValueError(
-            f"generated precomputed backtest starts later than configured: "
-            f"index_type={config.index_type}, configured_start={config.start_date.isoformat()}, first_price_date={first_date}"
-        )
+    first_date_text = str(price_history[0][0]) if price_history else None
+    if first_date_text:
+        first_date = date.fromisoformat(first_date_text)
+        if first_date < config.start_date:
+            raise ValueError(
+                f"generated precomputed backtest starts before configured range: "
+                f"index_type={config.index_type}, configured_start={config.start_date.isoformat()}, "
+                f"first_price_date={first_date.isoformat()}"
+            )
+        start_lag_days = (first_date - config.start_date).days
+        if start_lag_days > START_DATE_TOLERANCE_DAYS:
+            raise ValueError(
+                f"generated precomputed backtest starts too late: "
+                f"index_type={config.index_type}, configured_start={config.start_date.isoformat()}, "
+                f"first_price_date={first_date.isoformat()}, lag_days={start_lag_days}, "
+                f"tolerance_days={START_DATE_TOLERANCE_DAYS}"
+            )
+        payload.setdefault("source_policy", {})["first_price_date"] = first_date.isoformat()
+        payload.setdefault("source_policy", {})["start_lag_days"] = start_lag_days
 
 
 def _generate_one(service: BacktestService, config: TargetConfig) -> str:
@@ -126,6 +140,7 @@ def _generate_one(service: BacktestService, config: TargetConfig) -> str:
             "type": "provider_available_start_date",
             "configured_start_date": config.start_date.isoformat(),
             "end_date": config.end_date.isoformat(),
+            "start_date_tolerance_days": START_DATE_TOLERANCE_DAYS,
         },
         "result": result,
     }
