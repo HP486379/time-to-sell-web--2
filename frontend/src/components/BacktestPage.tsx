@@ -33,16 +33,58 @@ const BACKTEST_START_DATES: Record<IndexType, string> = {
   orukan_jpy: '2008-03-28',
 }
 
+const FIXED_PRECOMPUTED_START_DATES = ['2005-01-01', '2010-01-01', '2015-01-01']
+const PRECOMPUTED_END_DATE = '2025-12-31'
+const RUNTIME_MAX_DAYS = 366 * 5
+const PRECOMPUTED_INITIAL_CASH = 1_000_000
+const PRECOMPUTED_SELL_THRESHOLD = 80
+const PRECOMPUTED_BUY_THRESHOLD = 40
+const PRECOMPUTED_SCORE_MA = 200
+
+const getPrecomputedStartDates = (indexType: IndexType): string[] => {
+  return Array.from(new Set([BACKTEST_START_DATES[indexType], ...FIXED_PRECOMPUTED_START_DATES])).sort()
+}
+
+const isRuntimeRangeAllowed = (startDate: string, endDate: string): boolean => {
+  const start = dayjs(startDate)
+  const end = dayjs(endDate)
+  if (!start.isValid() || !end.isValid() || end.isBefore(start)) return false
+  return end.diff(start, 'day') <= RUNTIME_MAX_DAYS
+}
+
+const isPrecomputedRequest = (request: BacktestRequest): boolean => {
+  return (
+    getPrecomputedStartDates(request.index_type).includes(request.start_date) &&
+    request.end_date === PRECOMPUTED_END_DATE &&
+    Number(request.initial_cash) === PRECOMPUTED_INITIAL_CASH &&
+    Number(request.sell_threshold) === PRECOMPUTED_SELL_THRESHOLD &&
+    Number(request.buy_threshold) === PRECOMPUTED_BUY_THRESHOLD &&
+    Number(request.score_ma) === PRECOMPUTED_SCORE_MA
+  )
+}
+
+const getBacktestValidationError = (request: BacktestRequest): string | null => {
+  if (isPrecomputedRequest(request)) return null
+  if (isRuntimeRangeAllowed(request.start_date, request.end_date)) return null
+
+  const availableStarts = getPrecomputedStartDates(request.index_type).join(' / ')
+  return (
+    `5年超のバックテストは事前計算済み期間のみ利用できます。` +
+    `対象インデックスの開始日は ${availableStarts}、終了日は ${PRECOMPUTED_END_DATE}、` +
+    `初期資金100万円・売り80・買い40・MA200にしてください。`
+  )
+}
+
 const DEFAULT_INDEX_TYPE: IndexType = 'SP500'
 
 const DEFAULT_REQUEST: BacktestRequest = {
   start_date: BACKTEST_START_DATES[DEFAULT_INDEX_TYPE],
-  end_date: '2025-12-31',
-  initial_cash: 1_000_000,
-  sell_threshold: 80,
-  buy_threshold: 40,
+  end_date: PRECOMPUTED_END_DATE,
+  initial_cash: PRECOMPUTED_INITIAL_CASH,
+  sell_threshold: PRECOMPUTED_SELL_THRESHOLD,
+  buy_threshold: PRECOMPUTED_BUY_THRESHOLD,
   index_type: DEFAULT_INDEX_TYPE,
-  score_ma: 200,
+  score_ma: PRECOMPUTED_SCORE_MA,
 }
 
 const currencyFmt = new Intl.NumberFormat('ja-JP', { style: 'currency', currency: 'JPY', maximumFractionDigits: 0 })
@@ -70,11 +112,24 @@ export function BacktestPage() {
       ...prev,
       index_type: indexType,
       start_date: BACKTEST_START_DATES[indexType],
+      end_date: PRECOMPUTED_END_DATE,
+      initial_cash: PRECOMPUTED_INITIAL_CASH,
+      sell_threshold: PRECOMPUTED_SELL_THRESHOLD,
+      buy_threshold: PRECOMPUTED_BUY_THRESHOLD,
+      score_ma: PRECOMPUTED_SCORE_MA,
     }))
     setResult(null)
+    setError(null)
   }
 
   const handleRun = async () => {
+    const validationError = getBacktestValidationError(params)
+    if (validationError) {
+      setError(validationError)
+      setResult(null)
+      return
+    }
+
     try {
       setLoading(true)
       setError(null)
@@ -96,6 +151,7 @@ export function BacktestPage() {
     ma60: point.ma60 ?? null,
     ma200: point.ma200 ?? null,
   }))
+  const startDateHelperText = `5年超は ${getPrecomputedStartDates(params.index_type).join(' / ')} のみ対応`
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -120,6 +176,7 @@ export function BacktestPage() {
                   value={params.start_date}
                   onChange={(e) => handleChange('start_date', e.target.value)}
                   InputLabelProps={{ shrink: true }}
+                  helperText={startDateHelperText}
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
