@@ -28,6 +28,7 @@ export interface BacktestSummary {
   profit_take_count?: number
   deferred_contribution_count?: number
   deferred_contribution_amount?: number
+  overheat_signal_count?: number
   reinvest_count?: number
   contribution_count?: number
   waiting_cash?: number
@@ -59,9 +60,10 @@ export interface AccumulationScoreDiagnostics {
 
 export interface AccumulationDiagnosticDate {
   date: string
-  score: number
+  score?: number | null
   close?: number
   reason?: string
+  signal_date?: string | null
 }
 
 export interface AccumulationDiagnostics {
@@ -70,12 +72,16 @@ export interface AccumulationDiagnostics {
   buy_candidate_count?: number
   blocked_by_cooldown_count?: number
   no_position_sell_candidate_count?: number
+  overheat_signal_count?: number
+  pending_overheat_signal?: boolean
+  pending_overheat_signal_date?: string | null
   deferred_contribution_count?: number
   deferred_contribution_amount?: number
   top_score_dates?: AccumulationDiagnosticDate[]
   sell_candidate_dates?: AccumulationDiagnosticDate[]
   near_sell_candidate_dates?: AccumulationDiagnosticDate[]
   buy_candidate_dates?: AccumulationDiagnosticDate[]
+  deferred_after_signal_dates?: AccumulationDiagnosticDate[]
   blocked_sell_dates?: AccumulationDiagnosticDate[]
   no_trade_reason?: string | null
 }

@@ -158,6 +158,10 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
     deferred_contribution_amount = 0.0
     reinvest_count = 0
     last_contribution_month: tuple[int, int] | None = None
+    pending_overheat_signal = False
+    pending_overheat_signal_date: str | None = None
+    overheat_signal_count = 0
+    deferred_after_signal_dates: list[dict[str, Any]] = []
 
     portfolio_history: list[dict[str, Any]] = []
     buy_hold_history: list[dict[str, Any]] = []
@@ -192,6 +196,10 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
 
             if score >= float(params["sell_threshold"]):
                 sell_candidate_dates.append(score_row)
+                if not pending_overheat_signal:
+                    pending_overheat_signal = True
+                    pending_overheat_signal_date = date_str
+                    overheat_signal_count += 1
             elif score >= max(float(params["sell_threshold"]) - 5.0, 0.0):
                 near_sell_candidate_dates.append(score_row)
 
@@ -206,17 +214,22 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
                 strategy_cash += monthly_amount
                 total_contributed += monthly_amount
                 contribution_count += 1
-                if score is not None and score >= float(params["sell_threshold"]):
+                if pending_overheat_signal:
                     deferred_contribution_count += 1
                     deferred_contribution_amount += monthly_amount
-                    trades.append({
+                    defer_row = {
                         "action": "DEFER_CONTRIBUTION",
                         "date": date_str,
                         "amount": monthly_amount,
                         "price": close,
-                        "score": round(score, 4),
-                        "reason": "overheat_defer_monthly_contribution",
-                    })
+                        "score": round(score, 4) if score is not None else None,
+                        "signal_date": pending_overheat_signal_date,
+                        "reason": "previous_overheat_signal_defer_next_monthly_contribution",
+                    }
+                    trades.append(defer_row)
+                    deferred_after_signal_dates.append(defer_row)
+                    pending_overheat_signal = False
+                    pending_overheat_signal_date = None
                 else:
                     if strategy_cash >= close:
                         qty = floor(strategy_cash / close)
@@ -288,6 +301,7 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             "profit_take_count": 0,
             "deferred_contribution_count": deferred_contribution_count,
             "deferred_contribution_amount": round(deferred_contribution_amount, 2),
+            "overheat_signal_count": overheat_signal_count,
             "reinvest_count": reinvest_count,
             "contribution_count": contribution_count,
             "waiting_cash": round(strategy_cash, 2),
@@ -305,9 +319,9 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             "score_ma": params["score_ma"],
             "sell_threshold": params["sell_threshold"],
             "buy_threshold": params["buy_threshold"],
-            "sell_policy": "defer_monthly_contribution_when_overheated",
+            "sell_policy": "defer_next_monthly_contribution_after_overheat_signal",
             "index_specific_sell_adjustment_applied": False,
-            "index_specific_sell_adjustment_note": "積立版では保有分を売却せず、過熱時は新規積立分だけを一時待機し、冷却時に再投入する。",
+            "index_specific_sell_adjustment_note": "積立版では保有分を売却せず、月中に過熱を検知したら次回の新規積立分を一時待機し、冷却時に再投入する。",
             "score_samples": {
                 "first_score_date": daily_scores[0]["date"] if daily_scores else None,
                 "first_score": daily_scores[0]["score"] if daily_scores else None,
@@ -322,16 +336,20 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
                 "sell_candidate_count": len(sell_candidate_dates),
                 "near_sell_candidate_count": len(near_sell_candidate_dates),
                 "buy_candidate_count": len(buy_candidate_dates),
+                "overheat_signal_count": overheat_signal_count,
+                "pending_overheat_signal": pending_overheat_signal,
+                "pending_overheat_signal_date": pending_overheat_signal_date,
                 "deferred_contribution_count": deferred_contribution_count,
                 "deferred_contribution_amount": round(deferred_contribution_amount, 2),
                 "top_score_dates": top_score_dates,
                 "sell_candidate_dates": sell_candidate_dates[:10],
                 "near_sell_candidate_dates": near_sell_candidate_dates[:10],
                 "buy_candidate_dates": buy_candidate_dates[:10],
+                "deferred_after_signal_dates": deferred_after_signal_dates[:10],
                 "blocked_sell_dates": [],
                 "no_trade_reason": (
                     "score_never_reached_sell_threshold" if not sell_candidate_dates else
-                    "no_monthly_contribution_on_sell_candidate_dates" if deferred_contribution_count == 0 else
+                    "overheat_signal_after_final_contribution" if deferred_contribution_count == 0 and pending_overheat_signal else
                     None
                 ),
             },
