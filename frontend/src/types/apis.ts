@@ -44,10 +44,59 @@ export interface PortfolioPoint {
   value: number
 }
 
+export interface AccumulationScoreDiagnostics {
+  first_score_date?: string | null
+  first_score?: number | null
+  min_score?: number | null
+  max_score?: number | null
+  days_score_above_sell_threshold?: number
+  days_score_above_near_sell_threshold?: number
+  near_sell_threshold?: number
+  days_score_below_buy_threshold?: number
+}
+
+export interface AccumulationDiagnosticDate {
+  date: string
+  score: number
+  close?: number
+  reason?: string
+}
+
+export interface AccumulationDiagnostics {
+  sell_candidate_count?: number
+  near_sell_candidate_count?: number
+  buy_candidate_count?: number
+  blocked_by_cooldown_count?: number
+  no_position_sell_candidate_count?: number
+  top_score_dates?: AccumulationDiagnosticDate[]
+  sell_candidate_dates?: AccumulationDiagnosticDate[]
+  near_sell_candidate_dates?: AccumulationDiagnosticDate[]
+  buy_candidate_dates?: AccumulationDiagnosticDate[]
+  blocked_sell_dates?: AccumulationDiagnosticDate[]
+  no_trade_reason?: string | null
+}
+
+export interface BacktestDiagnostics {
+  result_source?: string
+  backtest_type?: string
+  index_type?: string
+  start_date?: string
+  end_date?: string
+  score_ma?: number
+  sell_threshold?: number
+  buy_threshold?: number
+  sell_policy?: string
+  index_specific_sell_adjustment_applied?: boolean
+  index_specific_sell_adjustment_note?: string
+  score_samples?: AccumulationScoreDiagnostics
+  accumulation_diagnostics?: AccumulationDiagnostics
+  [key: string]: unknown
+}
+
 export interface BacktestResult {
   summary: BacktestSummary
   equity_curve: BacktestPoint[]
   portfolio_history?: PortfolioPoint[]
   buy_hold_history?: PortfolioPoint[]
-  diagnostics?: Record<string, unknown>
+  diagnostics?: BacktestDiagnostics
 }
