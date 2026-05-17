@@ -163,6 +163,12 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
     buy_hold_history: list[dict[str, Any]] = []
     trades: list[dict[str, Any]] = []
     daily_scores: list[dict[str, Any]] = []
+    sell_candidate_dates: list[dict[str, Any]] = []
+    near_sell_candidate_dates: list[dict[str, Any]] = []
+    buy_candidate_dates: list[dict[str, Any]] = []
+    blocked_sell_dates: list[dict[str, Any]] = []
+    no_position_sell_candidate_count = 0
+    blocked_by_cooldown_count = 0
 
     for idx, (date_str, close_raw) in enumerate(price_history):
         close = float(close_raw)
@@ -206,7 +212,16 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
                 ))
             except TypeError:
                 score = float(service._calculate_scores(running_history, macro_series, current_dt, int(params["score_ma"])))
-            daily_scores.append({"date": date_str, "score": round(score, 4)})
+            score_row = {"date": date_str, "score": round(score, 4), "close": round(close, 4)}
+            daily_scores.append(score_row)
+
+            if score >= float(params["sell_threshold"]):
+                sell_candidate_dates.append(score_row)
+            elif score >= max(float(params["sell_threshold"]) - 5.0, 0.0):
+                near_sell_candidate_dates.append(score_row)
+
+            if score < float(params["buy_threshold"]):
+                buy_candidate_dates.append(score_row)
 
             if strategy_shares > 0 and score >= float(params["sell_threshold"]) and sell_cooldown_days == 0:
                 sell_qty = floor(strategy_shares * (float(params["profit_take_pct"]) / 100.0))
@@ -227,6 +242,14 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
                         "score": round(score, 4),
                         "reason": "accumulation_profit_take_score_threshold",
                     })
+            elif score >= float(params["sell_threshold"]):
+                if strategy_shares <= 0:
+                    no_position_sell_candidate_count += 1
+                    blocked_reason = "no_position"
+                else:
+                    blocked_by_cooldown_count += 1
+                    blocked_reason = "sell_cooldown"
+                blocked_sell_dates.append({**score_row, "reason": blocked_reason})
             elif strategy_cash >= close and score < float(params["buy_threshold"]):
                 buy_qty = floor(strategy_cash / close)
                 if buy_qty > 0:
@@ -267,6 +290,8 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             "ma200": ma200[idx] if idx < len(ma200) else None,
         })
 
+    top_score_dates = sorted(daily_scores, key=lambda row: row["score"], reverse=True)[:5]
+
     return {
         "summary": {
             "final_equity": final_value,
@@ -298,11 +323,35 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             "score_ma": params["score_ma"],
             "sell_threshold": params["sell_threshold"],
             "buy_threshold": params["buy_threshold"],
+            "sell_policy": "raw_score_threshold_partial_take",
+            "index_specific_sell_adjustment_applied": False,
+            "index_specific_sell_adjustment_note": "積立MVPでは一括版の指数別SELL補正は未適用。まずは素の総合スコア閾値で診断する。",
             "score_samples": {
                 "first_score_date": daily_scores[0]["date"] if daily_scores else None,
                 "first_score": daily_scores[0]["score"] if daily_scores else None,
                 "min_score": min((row["score"] for row in daily_scores), default=None),
                 "max_score": max((row["score"] for row in daily_scores), default=None),
+                "days_score_above_sell_threshold": len(sell_candidate_dates),
+                "days_score_above_near_sell_threshold": len(near_sell_candidate_dates),
+                "near_sell_threshold": max(float(params["sell_threshold"]) - 5.0, 0.0),
+                "days_score_below_buy_threshold": len(buy_candidate_dates),
+            },
+            "accumulation_diagnostics": {
+                "sell_candidate_count": len(sell_candidate_dates),
+                "near_sell_candidate_count": len(near_sell_candidate_dates),
+                "buy_candidate_count": len(buy_candidate_dates),
+                "blocked_by_cooldown_count": blocked_by_cooldown_count,
+                "no_position_sell_candidate_count": no_position_sell_candidate_count,
+                "top_score_dates": top_score_dates,
+                "sell_candidate_dates": sell_candidate_dates[:10],
+                "near_sell_candidate_dates": near_sell_candidate_dates[:10],
+                "buy_candidate_dates": buy_candidate_dates[:10],
+                "blocked_sell_dates": blocked_sell_dates[:10],
+                "no_trade_reason": (
+                    "score_never_reached_sell_threshold" if not sell_candidate_dates else
+                    "sell_candidates_blocked_or_no_cash_reinvestment" if trade_count == 0 else
+                    None
+                ),
             },
         },
     }

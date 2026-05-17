@@ -14,6 +14,7 @@ import {
   InputLabel,
   Select,
   MenuItem,
+  Divider,
 } from '@mui/material'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import dayjs from 'dayjs'
@@ -109,6 +110,10 @@ const pctFmt = (v: unknown) => {
 const currencySafe = (v: unknown) => {
   const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
   return Number.isFinite(num) ? currencyFmt.format(num) : '-'
+}
+const numSafe = (v: unknown) => {
+  const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
+  return Number.isFinite(num) ? num.toFixed(2) : '-'
 }
 
 export function BacktestPage() {
@@ -213,6 +218,10 @@ export function BacktestPage() {
     mode === 'accumulation'
       ? '積立バックテストの任意計算は3年以内のみ対応'
       : `3年超は ${getPrecomputedStartDates(params.index_type as IndexType).join(' / ')} のみ対応`
+
+  const scoreSamples = result?.diagnostics?.score_samples
+  const accumulationDiagnostics = result?.diagnostics?.accumulation_diagnostics
+  const topScoreDates = accumulationDiagnostics?.top_score_dates ?? []
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -407,6 +416,53 @@ export function BacktestPage() {
             )}
           </CardContent>
         </Card>
+
+        {mode === 'accumulation' && result && (
+          <Card>
+            <CardHeader title="積立診断" subheader="売り時くん判定が効いているかを確認するための診断情報" />
+            <CardContent>
+              <Stack spacing={1.2}>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Typography variant="body2">最大スコア: <strong>{numSafe(scoreSamples?.max_score)}</strong></Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Typography variant="body2">80以上の日数: <strong>{scoreSamples?.days_score_above_sell_threshold ?? 0} 日</strong></Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Typography variant="body2">75以上の日数: <strong>{scoreSamples?.days_score_above_near_sell_threshold ?? 0} 日</strong></Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Typography variant="body2">40未満の日数: <strong>{scoreSamples?.days_score_below_buy_threshold ?? 0} 日</strong></Typography>
+                  </Grid>
+                </Grid>
+                {result.diagnostics?.index_specific_sell_adjustment_note && (
+                  <Alert severity="info">{result.diagnostics.index_specific_sell_adjustment_note}</Alert>
+                )}
+                {accumulationDiagnostics?.no_trade_reason && (
+                  <Alert severity="warning">
+                    売買なし理由: {accumulationDiagnostics.no_trade_reason === 'score_never_reached_sell_threshold'
+                      ? 'スコアが売りしきい値に到達していません。'
+                      : '売り候補はありましたが、保有数・クールダウン・再投入条件で売買されていません。'}
+                  </Alert>
+                )}
+                <Divider />
+                <Typography variant="subtitle2">スコア上位日</Typography>
+                {topScoreDates.length > 0 ? (
+                  <Stack spacing={0.5}>
+                    {topScoreDates.map((row) => (
+                      <Typography key={`${row.date}-${row.score}`} variant="body2" color="text.secondary">
+                        {row.date}: score {numSafe(row.score)} / close {numSafe(row.close)}
+                      </Typography>
+                    ))}
+                  </Stack>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">スコア診断データがありません。</Typography>
+                )}
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
 
         {chartData.length > 0 && (
           <Card>
