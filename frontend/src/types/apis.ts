@@ -26,6 +26,8 @@ export interface BacktestSummary {
   monthly_amount?: number
   profit_take_pct?: number
   profit_take_count?: number
+  deferred_contribution_count?: number
+  deferred_contribution_amount?: number
   reinvest_count?: number
   contribution_count?: number
   waiting_cash?: number
@@ -68,6 +70,8 @@ export interface AccumulationDiagnostics {
   buy_candidate_count?: number
   blocked_by_cooldown_count?: number
   no_position_sell_candidate_count?: number
+  deferred_contribution_count?: number
+  deferred_contribution_amount?: number
   top_score_dates?: AccumulationDiagnosticDate[]
   sell_candidate_dates?: AccumulationDiagnosticDate[]
   near_sell_candidate_dates?: AccumulationDiagnosticDate[]
