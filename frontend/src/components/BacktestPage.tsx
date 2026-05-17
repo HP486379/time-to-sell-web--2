@@ -115,6 +115,10 @@ const numSafe = (v: unknown) => {
   const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
   return Number.isFinite(num) ? num.toFixed(2) : '-'
 }
+const labelNumberSafe = (v: unknown, fallback: number) => {
+  const num = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
+  return Number.isFinite(num) ? num : fallback
+}
 
 export function BacktestPage() {
   const [mode, setMode] = useState<BacktestMode>('lump_sum')
@@ -222,6 +226,9 @@ export function BacktestPage() {
   const scoreSamples = result?.diagnostics?.score_samples
   const accumulationDiagnostics = result?.diagnostics?.accumulation_diagnostics
   const topScoreDates = accumulationDiagnostics?.top_score_dates ?? []
+  const sellThresholdLabel = labelNumberSafe(result?.diagnostics?.sell_threshold, labelNumberSafe(params.sell_threshold, PRECOMPUTED_SELL_THRESHOLD))
+  const nearSellThresholdLabel = labelNumberSafe(scoreSamples?.near_sell_threshold, Math.max(sellThresholdLabel - 5, 0))
+  const buyThresholdLabel = labelNumberSafe(result?.diagnostics?.buy_threshold, labelNumberSafe(params.buy_threshold, PRECOMPUTED_BUY_THRESHOLD))
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -329,7 +336,7 @@ export function BacktestPage() {
                   fullWidth
                   value={params.sell_threshold}
                   onChange={(e) => handleChange('sell_threshold', Number(e.target.value))}
-                  helperText={mode === 'accumulation' ? 'この値以上で当月積立を待機' : undefined}
+                  helperText={mode === 'accumulation' ? 'この値以上で次回積立を待機' : undefined}
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
@@ -433,13 +440,13 @@ export function BacktestPage() {
                     <Typography variant="body2">最大スコア: <strong>{numSafe(scoreSamples?.max_score)}</strong></Typography>
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">80以上の日数: <strong>{scoreSamples?.days_score_above_sell_threshold ?? 0} 日</strong></Typography>
+                    <Typography variant="body2">{sellThresholdLabel}以上の日数: <strong>{scoreSamples?.days_score_above_sell_threshold ?? 0} 日</strong></Typography>
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">75以上の日数: <strong>{scoreSamples?.days_score_above_near_sell_threshold ?? 0} 日</strong></Typography>
+                    <Typography variant="body2">{nearSellThresholdLabel}以上の日数: <strong>{scoreSamples?.days_score_above_near_sell_threshold ?? 0} 日</strong></Typography>
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">40未満の日数: <strong>{scoreSamples?.days_score_below_buy_threshold ?? 0} 日</strong></Typography>
+                    <Typography variant="body2">{buyThresholdLabel}未満の日数: <strong>{scoreSamples?.days_score_below_buy_threshold ?? 0} 日</strong></Typography>
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
                     <Typography variant="body2">待機積立回数: <strong>{accumulationDiagnostics?.deferred_contribution_count ?? 0} 回</strong></Typography>
@@ -455,7 +462,7 @@ export function BacktestPage() {
                   <Alert severity="warning">
                     待機なし理由: {accumulationDiagnostics.no_trade_reason === 'score_never_reached_sell_threshold'
                       ? 'スコアが売りしきい値に到達していません。'
-                      : '売り候補日はありましたが、月初積立日と重なっていません。'}
+                      : '最終積立後に過熱シグナルが出たため、次回積立待機まで進んでいません。'}
                   </Alert>
                 )}
                 <Divider />
