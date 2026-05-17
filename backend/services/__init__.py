@@ -154,10 +154,10 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
     total_contributed = float(params["initial_cash"])
     contribution_count = 0
     trade_count = 0
-    profit_take_count = 0
+    deferred_contribution_count = 0
+    deferred_contribution_amount = 0.0
     reinvest_count = 0
     last_contribution_month: tuple[int, int] | None = None
-    sell_cooldown_days = 0
 
     portfolio_history: list[dict[str, Any]] = []
     buy_hold_history: list[dict[str, Any]] = []
@@ -166,9 +166,6 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
     sell_candidate_dates: list[dict[str, Any]] = []
     near_sell_candidate_dates: list[dict[str, Any]] = []
     buy_candidate_dates: list[dict[str, Any]] = []
-    blocked_sell_dates: list[dict[str, Any]] = []
-    no_position_sell_candidate_count = 0
-    blocked_by_cooldown_count = 0
 
     for idx, (date_str, close_raw) in enumerate(price_history):
         close = float(close_raw)
@@ -176,29 +173,7 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
         running_history.append((date_str, close))
         closes.append(close)
         month_key = (current_dt.year, current_dt.month)
-
-        if last_contribution_month != month_key:
-            last_contribution_month = month_key
-            monthly_amount = float(params["monthly_amount"])
-            if monthly_amount > 0:
-                strategy_cash += monthly_amount
-                hold_cash += monthly_amount
-                total_contributed += monthly_amount
-                contribution_count += 1
-
-        if strategy_cash >= close:
-            qty = floor(strategy_cash / close)
-            if qty > 0:
-                strategy_cash -= qty * close
-                strategy_shares += qty
-        if hold_cash >= close:
-            hold_qty = floor(hold_cash / close)
-            if hold_qty > 0:
-                hold_cash -= hold_qty * close
-                hold_shares += hold_qty
-
-        if sell_cooldown_days > 0:
-            sell_cooldown_days -= 1
+        is_contribution_day = last_contribution_month != month_key
 
         score = None
         if idx >= max(int(params["score_ma"]) - 1, 199):
@@ -223,48 +198,53 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             if score < float(params["buy_threshold"]):
                 buy_candidate_dates.append(score_row)
 
-            if strategy_shares > 0 and score >= float(params["sell_threshold"]) and sell_cooldown_days == 0:
-                sell_qty = floor(strategy_shares * (float(params["profit_take_pct"]) / 100.0))
-                if sell_qty <= 0 and params["profit_take_pct"] > 0:
-                    sell_qty = 1
-                sell_qty = min(strategy_shares, sell_qty)
-                if sell_qty > 0:
-                    strategy_cash += sell_qty * close
-                    strategy_shares -= sell_qty
-                    trade_count += 1
-                    profit_take_count += 1
-                    sell_cooldown_days = 30
+        if is_contribution_day:
+            last_contribution_month = month_key
+            monthly_amount = float(params["monthly_amount"])
+            if monthly_amount > 0:
+                hold_cash += monthly_amount
+                strategy_cash += monthly_amount
+                total_contributed += monthly_amount
+                contribution_count += 1
+                if score is not None and score >= float(params["sell_threshold"]):
+                    deferred_contribution_count += 1
+                    deferred_contribution_amount += monthly_amount
                     trades.append({
-                        "action": "SELL_PARTIAL",
+                        "action": "DEFER_CONTRIBUTION",
                         "date": date_str,
-                        "quantity": sell_qty,
+                        "amount": monthly_amount,
                         "price": close,
                         "score": round(score, 4),
-                        "reason": "accumulation_profit_take_score_threshold",
+                        "reason": "overheat_defer_monthly_contribution",
                     })
-            elif score >= float(params["sell_threshold"]):
-                if strategy_shares <= 0:
-                    no_position_sell_candidate_count += 1
-                    blocked_reason = "no_position"
                 else:
-                    blocked_by_cooldown_count += 1
-                    blocked_reason = "sell_cooldown"
-                blocked_sell_dates.append({**score_row, "reason": blocked_reason})
-            elif strategy_cash >= close and score < float(params["buy_threshold"]):
-                buy_qty = floor(strategy_cash / close)
-                if buy_qty > 0:
-                    strategy_cash -= buy_qty * close
-                    strategy_shares += buy_qty
-                    trade_count += 1
-                    reinvest_count += 1
-                    trades.append({
-                        "action": "BUY_REINVEST",
-                        "date": date_str,
-                        "quantity": buy_qty,
-                        "price": close,
-                        "score": round(score, 4),
-                        "reason": "accumulation_reinvest_score_threshold",
-                    })
+                    if strategy_cash >= close:
+                        qty = floor(strategy_cash / close)
+                        if qty > 0:
+                            strategy_cash -= qty * close
+                            strategy_shares += qty
+
+        if hold_cash >= close:
+            hold_qty = floor(hold_cash / close)
+            if hold_qty > 0:
+                hold_cash -= hold_qty * close
+                hold_shares += hold_qty
+
+        if score is not None and strategy_cash >= close and score < float(params["buy_threshold"]):
+            buy_qty = floor(strategy_cash / close)
+            if buy_qty > 0:
+                strategy_cash -= buy_qty * close
+                strategy_shares += buy_qty
+                trade_count += 1
+                reinvest_count += 1
+                trades.append({
+                    "action": "BUY_REINVEST",
+                    "date": date_str,
+                    "quantity": buy_qty,
+                    "price": close,
+                    "score": round(score, 4),
+                    "reason": "cooldown_reinvest_deferred_cash",
+                })
 
         strategy_value = strategy_cash + strategy_shares * close
         hold_value = hold_cash + hold_shares * close
@@ -305,7 +285,9 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             "total_contributed": round(total_contributed, 2),
             "monthly_amount": float(params["monthly_amount"]),
             "profit_take_pct": float(params["profit_take_pct"]),
-            "profit_take_count": profit_take_count,
+            "profit_take_count": 0,
+            "deferred_contribution_count": deferred_contribution_count,
+            "deferred_contribution_amount": round(deferred_contribution_amount, 2),
             "reinvest_count": reinvest_count,
             "contribution_count": contribution_count,
             "waiting_cash": round(strategy_cash, 2),
@@ -323,9 +305,9 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
             "score_ma": params["score_ma"],
             "sell_threshold": params["sell_threshold"],
             "buy_threshold": params["buy_threshold"],
-            "sell_policy": "raw_score_threshold_partial_take",
+            "sell_policy": "defer_monthly_contribution_when_overheated",
             "index_specific_sell_adjustment_applied": False,
-            "index_specific_sell_adjustment_note": "積立MVPでは一括版の指数別SELL補正は未適用。まずは素の総合スコア閾値で診断する。",
+            "index_specific_sell_adjustment_note": "積立版では保有分を売却せず、過熱時は新規積立分だけを一時待機し、冷却時に再投入する。",
             "score_samples": {
                 "first_score_date": daily_scores[0]["date"] if daily_scores else None,
                 "first_score": daily_scores[0]["score"] if daily_scores else None,
@@ -340,16 +322,16 @@ def _run_accumulation_backtest_endpoint(payload: dict[str, Any]) -> dict[str, An
                 "sell_candidate_count": len(sell_candidate_dates),
                 "near_sell_candidate_count": len(near_sell_candidate_dates),
                 "buy_candidate_count": len(buy_candidate_dates),
-                "blocked_by_cooldown_count": blocked_by_cooldown_count,
-                "no_position_sell_candidate_count": no_position_sell_candidate_count,
+                "deferred_contribution_count": deferred_contribution_count,
+                "deferred_contribution_amount": round(deferred_contribution_amount, 2),
                 "top_score_dates": top_score_dates,
                 "sell_candidate_dates": sell_candidate_dates[:10],
                 "near_sell_candidate_dates": near_sell_candidate_dates[:10],
                 "buy_candidate_dates": buy_candidate_dates[:10],
-                "blocked_sell_dates": blocked_sell_dates[:10],
+                "blocked_sell_dates": [],
                 "no_trade_reason": (
                     "score_never_reached_sell_threshold" if not sell_candidate_dates else
-                    "sell_candidates_blocked_or_no_cash_reinvestment" if trade_count == 0 else
+                    "no_monthly_contribution_on_sell_candidate_dates" if deferred_contribution_count == 0 else
                     None
                 ),
             },

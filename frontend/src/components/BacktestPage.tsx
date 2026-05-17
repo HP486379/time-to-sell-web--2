@@ -317,6 +317,7 @@ export function BacktestPage() {
                       fullWidth
                       value={profitTakePct}
                       onChange={(e) => setProfitTakePct(Number(e.target.value))}
+                      helperText="積立待機方式では保有分売却なし。将来の利確方式用パラメータです。"
                     />
                   </Grid>
                 </>
@@ -328,6 +329,7 @@ export function BacktestPage() {
                   fullWidth
                   value={params.sell_threshold}
                   onChange={(e) => handleChange('sell_threshold', Number(e.target.value))}
+                  helperText={mode === 'accumulation' ? 'この値以上で当月積立を待機' : undefined}
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
@@ -337,6 +339,7 @@ export function BacktestPage() {
                   fullWidth
                   value={params.buy_threshold}
                   onChange={(e) => handleChange('buy_threshold', Number(e.target.value))}
+                  helperText={mode === 'accumulation' ? 'この値未満で待機資金を再投入' : undefined}
                 />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
@@ -384,8 +387,11 @@ export function BacktestPage() {
                       待機資金: <strong>{currencySafe(result.summary.waiting_cash)}</strong>
                     </Typography>
                     <Typography variant="body2">
-                      利確回数 / 再投入回数:{' '}
-                      <strong>{result.summary.profit_take_count ?? 0} 回 / {result.summary.reinvest_count ?? 0} 回</strong>
+                      待機積立回数 / 再投入回数:{' '}
+                      <strong>{result.summary.deferred_contribution_count ?? 0} 回 / {result.summary.reinvest_count ?? 0} 回</strong>
+                    </Typography>
+                    <Typography variant="body2">
+                      待機した積立額: <strong>{currencySafe(result.summary.deferred_contribution_amount)}</strong>
                     </Typography>
                   </>
                 )}
@@ -419,7 +425,7 @@ export function BacktestPage() {
 
         {mode === 'accumulation' && result && (
           <Card>
-            <CardHeader title="積立診断" subheader="売り時くん判定が効いているかを確認するための診断情報" />
+            <CardHeader title="積立診断" subheader="過熱時に新規積立を待機できたかを確認するための診断情報" />
             <CardContent>
               <Stack spacing={1.2}>
                 <Grid container spacing={2}>
@@ -435,15 +441,21 @@ export function BacktestPage() {
                   <Grid item xs={12} sm={6} md={3}>
                     <Typography variant="body2">40未満の日数: <strong>{scoreSamples?.days_score_below_buy_threshold ?? 0} 日</strong></Typography>
                   </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Typography variant="body2">待機積立回数: <strong>{accumulationDiagnostics?.deferred_contribution_count ?? 0} 回</strong></Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Typography variant="body2">待機積立額: <strong>{currencySafe(accumulationDiagnostics?.deferred_contribution_amount)}</strong></Typography>
+                  </Grid>
                 </Grid>
                 {result.diagnostics?.index_specific_sell_adjustment_note && (
                   <Alert severity="info">{result.diagnostics.index_specific_sell_adjustment_note}</Alert>
                 )}
                 {accumulationDiagnostics?.no_trade_reason && (
                   <Alert severity="warning">
-                    売買なし理由: {accumulationDiagnostics.no_trade_reason === 'score_never_reached_sell_threshold'
+                    待機なし理由: {accumulationDiagnostics.no_trade_reason === 'score_never_reached_sell_threshold'
                       ? 'スコアが売りしきい値に到達していません。'
-                      : '売り候補はありましたが、保有数・クールダウン・再投入条件で売買されていません。'}
+                      : '売り候補日はありましたが、月初積立日と重なっていません。'}
                   </Alert>
                 )}
                 <Divider />
