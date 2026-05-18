@@ -14,7 +14,7 @@ import {
   Skeleton,
 } from '@mui/material'
 import type { TooltipTexts } from '../tooltipTexts'
-import { getScoreZoneText } from '../utils/alertState'
+import { useAppLanguage, getTranslations } from '../i18n'
 
 type EvalStatus = 'loading' | 'ready' | 'degraded' | 'error' | 'refreshing'
 
@@ -35,6 +35,17 @@ interface ScoreSummaryCardProps {
   overallScoreNoteLines?: string[]
 }
 
+const getLocalizedScoreZoneText = (score: number | undefined, t: ReturnType<typeof getTranslations>) => {
+  if (score === undefined) return t.scoreZones.loading
+  if (score >= 80) return t.scoreZones.sellLine
+  if (score >= 75) return t.scoreZones.strong
+  if (score >= 65) return t.scoreZones.push
+  if (score >= 60) return t.scoreZones.caution
+  if (score >= 40) return t.scoreZones.average
+  if (score >= 20) return t.scoreZones.low
+  return t.scoreZones.veryLow
+}
+
 function ScoreSummaryCard({
   scores,
   zoneText,
@@ -45,12 +56,12 @@ function ScoreSummaryCard({
   statusMessage,
   onRetry,
   isRetrying = false,
-  overallScoreNoteTitle = '総合スコア（統合判断）とは',
-  overallScoreNoteLines = [
-    'テクニカル・マクロ・イベント要因を統合した「今どうすべきか」の結論です。',
-    '時間軸別の評価（短期/中期/長期）とは別指標のため、一致しない場合があります。',
-  ],
+  overallScoreNoteTitle,
+  overallScoreNoteLines,
 }: ScoreSummaryCardProps) {
+  const language = useAppLanguage()
+  const t = getTranslations(language)
+  const d = t.dashboard
   const theme = useTheme()
   const isDark = theme.palette.mode === 'dark'
   const gradientStart = isDark ? '#101726' : alpha(theme.palette.primary.light, 0.2)
@@ -58,10 +69,11 @@ function ScoreSummaryCard({
   const showConfirmed = status === 'ready' || status === 'refreshing'
   const totalScore = scores?.total
   const isTotalScoreFinite = typeof totalScore === 'number' && Number.isFinite(totalScore)
-  const zoneTextValue =
-    zoneText ??
-    (showConfirmed && !isTotalScoreFinite ? 'データ取得失敗' : getScoreZoneText(showConfirmed && isTotalScoreFinite ? totalScore : undefined))
+  const localizedZoneText = getLocalizedScoreZoneText(showConfirmed && isTotalScoreFinite ? totalScore : undefined, t)
+  const zoneTextValue = language === 'en' ? localizedZoneText : zoneText ?? localizedZoneText
   const showDetailsToggle = Boolean(onShowDetails) && expanded !== undefined
+  const noteTitle = overallScoreNoteTitle ?? d.scoreNoteTitle
+  const noteLines = overallScoreNoteLines ?? [...d.scoreNoteLines]
 
   return (
     <Card
@@ -79,20 +91,20 @@ function ScoreSummaryCard({
               action={
                 onRetry ? (
                   <Button color="inherit" size="small" onClick={onRetry}>
-                    再取得
+                    {d.retry}
                   </Button>
                 ) : undefined
               }
             >
               <Typography variant="subtitle2" component="div">
-                ⚠ 一部データ取得中
+                {d.degradedTitle}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                {statusMessage ?? '価格履歴の取得が未完了のため、現在のスコアは参考値です。'}
+                {statusMessage ?? d.degradedMessage}
               </Typography>
               {isRetrying && (
                 <Typography variant="caption" color="text.secondary">
-                  再試行中…
+                  {d.retrying}
                 </Typography>
               )}
             </Alert>
@@ -103,16 +115,16 @@ function ScoreSummaryCard({
               action={
                 onRetry ? (
                   <Button color="inherit" size="small" onClick={onRetry}>
-                    再取得
+                    {d.retry}
                   </Button>
                 ) : undefined
               }
             >
               <Typography variant="subtitle2" component="div">
-                ❌ データ取得に失敗しました
+                {d.errorTitle}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                {statusMessage ?? '時間をおいて再取得してください。'}
+                {statusMessage ?? d.errorMessage}
               </Typography>
             </Alert>
           )}
@@ -126,7 +138,7 @@ function ScoreSummaryCard({
             <Stack spacing={0.75}>
               <Tooltip title={tooltips.score.total} arrow>
                 <Typography variant="overline" color="text.secondary" component="div">
-                  総合スコア
+                  {d.totalScore}
                 </Typography>
               </Tooltip>
               <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
@@ -137,7 +149,7 @@ function ScoreSummaryCard({
                     {showConfirmed && isTotalScoreFinite ? totalScore.toFixed(1) : 'N/A'}
                   </Typography>
                 )}
-                {status === 'refreshing' && <Chip size="small" color="info" label="更新中…" />}
+                {status === 'refreshing' && <Chip size="small" color="info" label={d.refreshing} />}
               </Stack>
             </Stack>
 
@@ -151,10 +163,10 @@ function ScoreSummaryCard({
               }}
             >
               <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
-                {overallScoreNoteTitle}
+                {noteTitle}
               </Typography>
               <Stack spacing={0.5} mt={0.75}>
-                {overallScoreNoteLines.map((line, index) => (
+                {noteLines.map((line, index) => (
                   <Typography key={`overall-score-note-${index}`} variant="caption" color="text.secondary">
                     {line}
                   </Typography>
@@ -164,22 +176,22 @@ function ScoreSummaryCard({
           </Box>
 
           <Typography variant="overline" color="text.secondary" component="div">
-            出口接近度
+            {d.exitCloseness}
           </Typography>
           <Tooltip title={tooltips.score.label} arrow>
             <Typography variant="subtitle1" color="text.secondary" component="div">
-              {showConfirmed ? scores?.label ?? '計算待ち' : status === 'degraded' ? '未確定' : '計算中'}
+              {showConfirmed ? scores?.label ?? d.pending : status === 'degraded' ? d.unconfirmed : d.calculating}
             </Typography>
           </Tooltip>
           <Typography variant="body2" color="text.secondary">
-            {status === 'loading' ? '⏳ 計算中…' : zoneTextValue}
+            {status === 'loading' ? d.loading : zoneTextValue}
           </Typography>
 
           {showDetailsToggle && (
             <>
               <Divider />
               <Button variant="outlined" color="inherit" onClick={onShowDetails} sx={{ alignSelf: 'flex-start' }}>
-                {expanded ? '閉じる' : 'くわしく見る ≫'}
+                {expanded ? d.detailsClose : d.detailsOpen}
               </Button>
             </>
           )}
