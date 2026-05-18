@@ -15,13 +15,12 @@ import { PaletteMode } from '@mui/material'
 import { Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import DashboardPage from './components/DashboardPage'
 import BacktestPage from './components/BacktestPage'
+import { getInitialLanguage, getTranslations, type AppLanguage } from './i18n'
 
 interface AppProps {
   mode: PaletteMode
   onToggleMode: () => void
 }
-
-type AppLanguage = 'ja' | 'en'
 
 function App({ mode, onToggleMode }: AppProps) {
   const [displayMode, setDisplayMode] = useState<'pro' | 'simple'>(() => {
@@ -29,13 +28,10 @@ function App({ mode, onToggleMode }: AppProps) {
     const stored = window.localStorage.getItem('displayMode')
     return stored === 'pro' || stored === 'simple' ? stored : 'simple'
   })
-  const [language, setLanguage] = useState<AppLanguage>(() => {
-    if (typeof window === 'undefined') return 'ja'
-    return window.localStorage.getItem('appLanguage') === 'en' ? 'en' : 'ja'
-  })
+  const [language, setLanguage] = useState<AppLanguage>(() => getInitialLanguage())
   const location = useLocation()
   const navigate = useNavigate()
-  const isEnglish = language === 'en'
+  const t = getTranslations(language)
 
   const currentTab = useMemo(() => {
     return location.pathname.startsWith('/backtest') ? 'backtest' : 'dashboard'
@@ -71,12 +67,10 @@ function App({ mode, onToggleMode }: AppProps) {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={2}>
         <Box>
           <Typography variant="h4" fontWeight={700} color="primary.light">
-            {isEnglish ? 'Uritoki-kun' : '売り時くん'}
+            {t.app.title}
           </Typography>
           <Typography variant="subtitle1" color="text.secondary">
-            {isEnglish
-              ? 'A market overheat score for long-term investors: trim, rebalance, or pause DCA.'
-              : 'テクニカル・マクロ・イベントの三軸で売り時スコアを可視化'}
+            {t.app.subtitle}
           </Typography>
         </Box>
         <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
@@ -87,26 +81,26 @@ function App({ mode, onToggleMode }: AppProps) {
               onChange={handleTabChange}
               size="small"
             >
-              <ToggleButton value="dashboard">{isEnglish ? 'Main' : 'メイン画面'}</ToggleButton>
-              <ToggleButton value="backtest">{isEnglish ? 'Backtest' : 'バックテスト画面'}</ToggleButton>
+              <ToggleButton value="dashboard">{t.app.mainTab}</ToggleButton>
+              <ToggleButton value="backtest">{t.app.backtestTab}</ToggleButton>
             </ToggleButtonGroup>
           </Paper>
           <Box display="flex" alignItems="center" gap={1}>
             <Typography variant="body2" color="text.secondary">
-              {isEnglish ? 'Language' : '言語'}
+              {t.app.languageLabel}
             </Typography>
             <ToggleButtonGroup value={language} exclusive size="small" onChange={handleLanguage}>
-              <ToggleButton value="ja">日本語</ToggleButton>
-              <ToggleButton value="en">English</ToggleButton>
+              <ToggleButton value="ja">{t.app.japanese}</ToggleButton>
+              <ToggleButton value="en">{t.app.english}</ToggleButton>
             </ToggleButtonGroup>
           </Box>
           <Box display="flex" alignItems="center" gap={1}>
             <Typography variant="body2" color="text.secondary">
-              {isEnglish ? 'Mode' : '表示モード'}
+              {t.app.modeLabel}
             </Typography>
             <ToggleButtonGroup value={displayMode} exclusive size="small" onChange={handleDisplayMode}>
-              <ToggleButton value="simple">{isEnglish ? 'Simple' : 'かんたん'}</ToggleButton>
-              <ToggleButton value="pro">{isEnglish ? 'Pro' : 'プロ向け'}</ToggleButton>
+              <ToggleButton value="simple">{t.app.simpleMode}</ToggleButton>
+              <ToggleButton value="pro">{t.app.proMode}</ToggleButton>
             </ToggleButtonGroup>
           </Box>
           <Stack direction="row" spacing={1} alignItems="center">
