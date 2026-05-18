@@ -22,6 +22,7 @@ import { runAccumulationBacktest, runBacktest } from '../apis'
 import type { AccumulationBacktestRequest, BacktestRequest, BacktestResult } from '../types/apis'
 import { INDEX_LABELS, type IndexType } from '../types/index'
 import { getBacktestViewStatus, toBacktestIndexType } from '../utils/indexTypeMap'
+import { getTranslations, type AppLanguage } from '../i18n'
 
 const BACKTEST_START_DATES: Record<IndexType, string> = {
   SP500: '2000-01-01',
@@ -73,21 +74,21 @@ const isPrecomputedRequest = (request: BacktestRequest): boolean => {
   )
 }
 
-const getBacktestValidationError = (mode: BacktestMode, request: BacktestRequest): string | null => {
+const getBacktestValidationError = (mode: BacktestMode, request: BacktestRequest, language: AppLanguage): string | null => {
   if (mode === 'accumulation') {
     if (isRuntimeRangeAllowed(request.start_date, request.end_date)) return null
-    return '積立バックテストの任意計算は3年以内のみ対応です。長期の積立検証は今後の事前計算プリセットで対応予定です。'
+    return language === 'en'
+      ? 'Custom DCA backtests are limited to 3 years. Longer DCA presets will be supported later.'
+      : '積立バックテストの任意計算は3年以内のみ対応です。長期の積立検証は今後の事前計算プリセットで対応予定です。'
   }
 
   if (isPrecomputedRequest(request)) return null
   if (isRuntimeRangeAllowed(request.start_date, request.end_date)) return null
 
   const availableStarts = getPrecomputedStartDates(request.index_type as IndexType).join(' / ')
-  return (
-    `3年超のバックテストは事前計算済み期間のみ利用できます。` +
-    `対象インデックスの開始日は ${availableStarts}、終了日は ${PRECOMPUTED_END_DATE}、` +
-    `初期資金100万円・売り80・買い40・MA200にしてください。`
-  )
+  return language === 'en'
+    ? `Backtests longer than 3 years are available only for precomputed presets. Use start ${availableStarts}, end ${PRECOMPUTED_END_DATE}, initial cash ¥1,000,000, sell 80, buy 40, and MA200.`
+    : `3年超のバックテストは事前計算済み期間のみ利用できます。対象インデックスの開始日は ${availableStarts}、終了日は ${PRECOMPUTED_END_DATE}、初期資金100万円・売り80・買い40・MA200にしてください。`
 }
 
 const DEFAULT_INDEX_TYPE: IndexType = 'SP500'
@@ -120,7 +121,8 @@ const labelNumberSafe = (v: unknown, fallback: number) => {
   return Number.isFinite(num) ? num : fallback
 }
 
-export function BacktestPage() {
+export function BacktestPage({ language = 'ja' }: { language?: AppLanguage }) {
+  const t = getTranslations(language).backtest
   const [mode, setMode] = useState<BacktestMode>('lump_sum')
   const [params, setParams] = useState<BacktestRequest>(DEFAULT_REQUEST)
   const [monthlyAmount, setMonthlyAmount] = useState(ACCUMULATION_DEFAULT_MONTHLY_AMOUNT)
@@ -176,7 +178,7 @@ export function BacktestPage() {
   }
 
   const handleRun = async () => {
-    const validationError = getBacktestValidationError(mode, params)
+    const validationError = getBacktestValidationError(mode, params, language)
     if (validationError) {
       setError(validationError)
       setResult(null)
@@ -197,7 +199,7 @@ export function BacktestPage() {
           : await runBacktest(normalizedParams)
       setResult(res)
     } catch (e: any) {
-      setError(e.message ?? 'バックテストに失敗しました')
+      setError(e.message ?? (language === 'en' ? 'Backtest failed' : 'バックテストに失敗しました'))
     } finally {
       setLoading(false)
     }
@@ -220,8 +222,12 @@ export function BacktestPage() {
 
   const startDateHelperText =
     mode === 'accumulation'
-      ? '積立バックテストの任意計算は3年以内のみ対応'
-      : `3年超は ${getPrecomputedStartDates(params.index_type as IndexType).join(' / ')} のみ対応`
+      ? language === 'en'
+        ? 'Custom DCA backtests are limited to 3 years'
+        : '積立バックテストの任意計算は3年以内のみ対応'
+      : language === 'en'
+        ? `Longer than 3 years: ${getPrecomputedStartDates(params.index_type as IndexType).join(' / ')} only`
+        : `3年超は ${getPrecomputedStartDates(params.index_type as IndexType).join(' / ')} のみ対応`
 
   const scoreSamples = result?.diagnostics?.score_samples
   const accumulationDiagnostics = result?.diagnostics?.accumulation_diagnostics
@@ -229,15 +235,17 @@ export function BacktestPage() {
   const sellThresholdLabel = labelNumberSafe(result?.diagnostics?.sell_threshold, labelNumberSafe(params.sell_threshold, PRECOMPUTED_SELL_THRESHOLD))
   const nearSellThresholdLabel = labelNumberSafe(scoreSamples?.near_sell_threshold, Math.max(sellThresholdLabel - 5, 0))
   const buyThresholdLabel = labelNumberSafe(result?.diagnostics?.buy_threshold, labelNumberSafe(params.buy_threshold, PRECOMPUTED_BUY_THRESHOLD))
+  const daysSuffix = language === 'en' ? 'days' : '日'
+  const timesSuffix = language === 'en' ? 'times' : '回'
 
   return (
     <Container maxWidth="lg" sx={{ py: 4 }}>
       <Stack spacing={3}>
         <Typography variant="h4" fontWeight={700} color="primary.light">
-          バックテスト専用ページ
+          {t.title}
         </Typography>
         <Card>
-          <CardHeader title="パラメータ" />
+          <CardHeader title={t.parameters} />
           <CardContent>
             {error && (
               <Alert severity="error" sx={{ mb: 2 }}>
@@ -247,61 +255,28 @@ export function BacktestPage() {
             <Grid container spacing={2}>
               <Grid item xs={12} sm={6} md={3}>
                 <FormControl fullWidth size="small">
-                  <InputLabel id="mode-select">バックテスト種別</InputLabel>
-                  <Select
-                    labelId="mode-select"
-                    value={mode}
-                    label="バックテスト種別"
-                    onChange={(e) => handleModeChange(e.target.value as BacktestMode)}
-                  >
-                    <MenuItem value="lump_sum">一括投資</MenuItem>
-                    <MenuItem value="accumulation">積立投資</MenuItem>
+                  <InputLabel id="mode-select">{t.type}</InputLabel>
+                  <Select labelId="mode-select" value={mode} label={t.type} onChange={(e) => handleModeChange(e.target.value as BacktestMode)}>
+                    <MenuItem value="lump_sum">{t.lumpSum}</MenuItem>
+                    <MenuItem value="accumulation">{t.accumulation}</MenuItem>
                   </Select>
                 </FormControl>
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
-                <TextField
-                  label="開始日"
-                  type="date"
-                  fullWidth
-                  value={params.start_date}
-                  onChange={(e) => handleChange('start_date', e.target.value)}
-                  InputLabelProps={{ shrink: true }}
-                  helperText={startDateHelperText}
-                />
+                <TextField label={t.startDate} type="date" fullWidth value={params.start_date} onChange={(e) => handleChange('start_date', e.target.value)} InputLabelProps={{ shrink: true }} helperText={startDateHelperText} />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
-                <TextField
-                  label="終了日"
-                  type="date"
-                  fullWidth
-                  value={params.end_date}
-                  onChange={(e) => handleChange('end_date', e.target.value)}
-                  InputLabelProps={{ shrink: true }}
-                />
+                <TextField label={t.endDate} type="date" fullWidth value={params.end_date} onChange={(e) => handleChange('end_date', e.target.value)} InputLabelProps={{ shrink: true }} />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
-                <TextField
-                  label="初期資金"
-                  type="number"
-                  fullWidth
-                  value={params.initial_cash}
-                  onChange={(e) => handleChange('initial_cash', Number(e.target.value))}
-                />
+                <TextField label={t.initialCash} type="number" fullWidth value={params.initial_cash} onChange={(e) => handleChange('initial_cash', Number(e.target.value))} />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <FormControl fullWidth size="small">
-                  <InputLabel id="index-select">対象インデックス</InputLabel>
-                  <Select
-                    labelId="index-select"
-                    value={params.index_type}
-                    label="対象インデックス"
-                    onChange={(e) => handleIndexChange(e.target.value as IndexType)}
-                  >
+                  <InputLabel id="index-select">{t.targetIndex}</InputLabel>
+                  <Select labelId="index-select" value={params.index_type} label={t.targetIndex} onChange={(e) => handleIndexChange(e.target.value as IndexType)}>
                     {(Object.keys(INDEX_LABELS) as IndexType[]).map((key) => (
-                      <MenuItem key={key} value={key}>
-                        {INDEX_LABELS[key]}
-                      </MenuItem>
+                      <MenuItem key={key} value={key}>{INDEX_LABELS[key]}</MenuItem>
                     ))}
                   </Select>
                 </FormControl>
@@ -309,174 +284,94 @@ export function BacktestPage() {
               {mode === 'accumulation' && (
                 <>
                   <Grid item xs={12} sm={6} md={3}>
-                    <TextField
-                      label="毎月積立額"
-                      type="number"
-                      fullWidth
-                      value={monthlyAmount}
-                      onChange={(e) => setMonthlyAmount(Number(e.target.value))}
-                    />
+                    <TextField label={t.monthlyAmount} type="number" fullWidth value={monthlyAmount} onChange={(e) => setMonthlyAmount(Number(e.target.value))} />
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
-                    <TextField
-                      label="利確割合（%）"
-                      type="number"
-                      fullWidth
-                      value={profitTakePct}
-                      onChange={(e) => setProfitTakePct(Number(e.target.value))}
-                      helperText="積立待機方式では保有分売却なし。将来の利確方式用パラメータです。"
-                    />
+                    <TextField label={t.profitTakePct} type="number" fullWidth value={profitTakePct} onChange={(e) => setProfitTakePct(Number(e.target.value))} helperText={t.profitTakePctHelp} />
                   </Grid>
                 </>
               )}
               <Grid item xs={12} sm={6} md={3}>
-                <TextField
-                  label="売りしきい値"
-                  type="number"
-                  fullWidth
-                  value={params.sell_threshold}
-                  onChange={(e) => handleChange('sell_threshold', Number(e.target.value))}
-                  helperText={mode === 'accumulation' ? 'この値以上で次回積立を待機' : undefined}
-                />
+                <TextField label={t.sellThreshold} type="number" fullWidth value={params.sell_threshold} onChange={(e) => handleChange('sell_threshold', Number(e.target.value))} helperText={mode === 'accumulation' ? t.sellThresholdHelp : undefined} />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
-                <TextField
-                  label="買い戻ししきい値"
-                  type="number"
-                  fullWidth
-                  value={params.buy_threshold}
-                  onChange={(e) => handleChange('buy_threshold', Number(e.target.value))}
-                  helperText={mode === 'accumulation' ? 'この値未満で待機資金を再投入' : undefined}
-                />
+                <TextField label={t.buyThreshold} type="number" fullWidth value={params.buy_threshold} onChange={(e) => handleChange('buy_threshold', Number(e.target.value))} helperText={mode === 'accumulation' ? t.buyThresholdHelp : undefined} />
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <FormControl fullWidth size="small">
-                  <InputLabel id="score-ma-select">スコア算出MA</InputLabel>
-                  <Select
-                    labelId="score-ma-select"
-                    value={params.score_ma}
-                    label="スコア算出MA"
-                    onChange={(e) => handleChange('score_ma', Number(e.target.value))}
-                  >
-                    <MenuItem value={20}>20日（短期・2〜6週間）</MenuItem>
-                    <MenuItem value={60}>60日（中期・1〜3か月）</MenuItem>
-                    <MenuItem value={200}>200日（長期・3か月〜1年）</MenuItem>
+                  <InputLabel id="score-ma-select">{t.scoreMa}</InputLabel>
+                  <Select labelId="score-ma-select" value={params.score_ma} label={t.scoreMa} onChange={(e) => handleChange('score_ma', Number(e.target.value))}>
+                    <MenuItem value={20}>{t.ma20}</MenuItem>
+                    <MenuItem value={60}>{t.ma60}</MenuItem>
+                    <MenuItem value={200}>{t.ma200}</MenuItem>
                   </Select>
                 </FormControl>
               </Grid>
               <Grid item xs={12}>
-                <Button variant="contained" onClick={handleRun} disabled={loading}>
-                  {loading ? '計算中...' : 'バックテスト実行'}
-                </Button>
+                <Button variant="contained" onClick={handleRun} disabled={loading}>{loading ? t.running : t.run}</Button>
               </Grid>
             </Grid>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader title="成績" subheader={result ? `${params.start_date}〜${params.end_date}` : undefined} />
+          <CardHeader title={t.result} subheader={result ? `${params.start_date}〜${params.end_date}` : undefined} />
           <CardContent>
             {result ? (
               <Stack spacing={0.5}>
-                <Typography variant="body2">
-                  最終資産: <strong>{currencySafe(result.summary.final_equity)}</strong>
-                </Typography>
-                <Typography variant="body2">
-                  {mode === 'accumulation' ? '通常積立ホールド' : '単純ホールド'}:{' '}
-                  <strong>{currencySafe(result.summary.hold_equity)}</strong>
-                </Typography>
+                <Typography variant="body2">{t.finalAsset}: <strong>{currencySafe(result.summary.final_equity)}</strong></Typography>
+                <Typography variant="body2">{mode === 'accumulation' ? t.regularDcaHold : t.buyAndHold}: <strong>{currencySafe(result.summary.hold_equity)}</strong></Typography>
                 {mode === 'accumulation' && (
                   <>
-                    <Typography variant="body2">
-                      累計積立額: <strong>{currencySafe(result.summary.total_contributed)}</strong>
-                    </Typography>
-                    <Typography variant="body2">
-                      待機資金: <strong>{currencySafe(result.summary.waiting_cash)}</strong>
-                    </Typography>
-                    <Typography variant="body2">
-                      待機積立回数 / 再投入回数:{' '}
-                      <strong>{result.summary.deferred_contribution_count ?? 0} 回 / {result.summary.reinvest_count ?? 0} 回</strong>
-                    </Typography>
-                    <Typography variant="body2">
-                      待機した積立額: <strong>{currencySafe(result.summary.deferred_contribution_amount)}</strong>
-                    </Typography>
+                    <Typography variant="body2">{t.totalContributed}: <strong>{currencySafe(result.summary.total_contributed)}</strong></Typography>
+                    <Typography variant="body2">{t.waitingCash}: <strong>{currencySafe(result.summary.waiting_cash)}</strong></Typography>
+                    <Typography variant="body2">{t.deferredAndReinvest}: <strong>{result.summary.deferred_contribution_count ?? 0} {timesSuffix} / {result.summary.reinvest_count ?? 0} {timesSuffix}</strong></Typography>
+                    <Typography variant="body2">{t.deferredAmount}: <strong>{currencySafe(result.summary.deferred_contribution_amount)}</strong></Typography>
                   </>
                 )}
-                <Typography variant="body2">
-                  トータルリターン: <strong>{pctFmt(result.summary.total_return)}</strong>
-                </Typography>
+                <Typography variant="body2">{t.totalReturn}: <strong>{pctFmt(result.summary.total_return)}</strong></Typography>
                 {mode === 'accumulation' && result.summary.hold_return !== undefined && (
-                  <Typography variant="body2">
-                    通常積立リターン: <strong>{pctFmt(result.summary.hold_return)}</strong>
-                  </Typography>
+                  <Typography variant="body2">{t.regularDcaReturn}: <strong>{pctFmt(result.summary.hold_return)}</strong></Typography>
                 )}
-                <Typography variant="body2">
-                  最大ドローダウン: <strong>{pctFmt(result.summary.max_drawdown)}</strong>
-                </Typography>
-                <Typography variant="body2">
-                  売買回数: <strong>{result.summary.trade_count ?? '-'} 回</strong>
-                </Typography>
+                <Typography variant="body2">{t.maxDrawdown}: <strong>{pctFmt(result.summary.max_drawdown)}</strong></Typography>
+                <Typography variant="body2">{t.tradeCount}: <strong>{result.summary.trade_count ?? '-'} {timesSuffix}</strong></Typography>
                 {mode === 'lump_sum' && getBacktestViewStatus(result.summary.trade_count) && (
-                  <Typography variant="body2" color="text.secondary">
-                    {getBacktestViewStatus(result.summary.trade_count)}
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary">{getBacktestViewStatus(result.summary.trade_count)}</Typography>
                 )}
               </Stack>
             ) : (
-              <Typography variant="body2" color="text.secondary">
-                パラメータを設定して「バックテスト実行」を押してください。
-              </Typography>
+              <Typography variant="body2" color="text.secondary">{t.emptyPrompt}</Typography>
             )}
           </CardContent>
         </Card>
 
         {mode === 'accumulation' && result && (
           <Card>
-            <CardHeader title="積立診断" subheader="過熱時に新規積立を待機できたかを確認するための診断情報" />
+            <CardHeader title={t.diagnostics} subheader={t.diagnosticsSub} />
             <CardContent>
               <Stack spacing={1.2}>
                 <Grid container spacing={2}>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">最大スコア: <strong>{numSafe(scoreSamples?.max_score)}</strong></Typography>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">{sellThresholdLabel}以上の日数: <strong>{scoreSamples?.days_score_above_sell_threshold ?? 0} 日</strong></Typography>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">{nearSellThresholdLabel}以上の日数: <strong>{scoreSamples?.days_score_above_near_sell_threshold ?? 0} 日</strong></Typography>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">{buyThresholdLabel}未満の日数: <strong>{scoreSamples?.days_score_below_buy_threshold ?? 0} 日</strong></Typography>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">待機積立回数: <strong>{accumulationDiagnostics?.deferred_contribution_count ?? 0} 回</strong></Typography>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Typography variant="body2">待機積立額: <strong>{currencySafe(accumulationDiagnostics?.deferred_contribution_amount)}</strong></Typography>
-                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}><Typography variant="body2">{t.maxScore}: <strong>{numSafe(scoreSamples?.max_score)}</strong></Typography></Grid>
+                  <Grid item xs={12} sm={6} md={3}><Typography variant="body2">{sellThresholdLabel}{t.aboveDays}: <strong>{scoreSamples?.days_score_above_sell_threshold ?? 0} {daysSuffix}</strong></Typography></Grid>
+                  <Grid item xs={12} sm={6} md={3}><Typography variant="body2">{nearSellThresholdLabel}{t.aboveDays}: <strong>{scoreSamples?.days_score_above_near_sell_threshold ?? 0} {daysSuffix}</strong></Typography></Grid>
+                  <Grid item xs={12} sm={6} md={3}><Typography variant="body2">{buyThresholdLabel}{t.belowDays}: <strong>{scoreSamples?.days_score_below_buy_threshold ?? 0} {daysSuffix}</strong></Typography></Grid>
+                  <Grid item xs={12} sm={6} md={3}><Typography variant="body2">{t.deferredCount}: <strong>{accumulationDiagnostics?.deferred_contribution_count ?? 0} {timesSuffix}</strong></Typography></Grid>
+                  <Grid item xs={12} sm={6} md={3}><Typography variant="body2">{t.deferredContributionAmount}: <strong>{currencySafe(accumulationDiagnostics?.deferred_contribution_amount)}</strong></Typography></Grid>
                 </Grid>
-                {result.diagnostics?.index_specific_sell_adjustment_note && (
-                  <Alert severity="info">{result.diagnostics.index_specific_sell_adjustment_note}</Alert>
-                )}
+                {result.diagnostics?.index_specific_sell_adjustment_note && <Alert severity="info">{result.diagnostics.index_specific_sell_adjustment_note}</Alert>}
                 {accumulationDiagnostics?.no_trade_reason && (
-                  <Alert severity="warning">
-                    待機なし理由: {accumulationDiagnostics.no_trade_reason === 'score_never_reached_sell_threshold'
-                      ? 'スコアが売りしきい値に到達していません。'
-                      : '最終積立後に過熱シグナルが出たため、次回積立待機まで進んでいません。'}
-                  </Alert>
+                  <Alert severity="warning">{t.noTradeReason}: {accumulationDiagnostics.no_trade_reason === 'score_never_reached_sell_threshold' ? t.reasonNeverReached : t.reasonAfterFinal}</Alert>
                 )}
                 <Divider />
-                <Typography variant="subtitle2">スコア上位日</Typography>
+                <Typography variant="subtitle2">{t.topScoreDates}</Typography>
                 {topScoreDates.length > 0 ? (
                   <Stack spacing={0.5}>
                     {topScoreDates.map((row) => (
-                      <Typography key={`${row.date}-${row.score}`} variant="body2" color="text.secondary">
-                        {row.date}: score {numSafe(row.score)} / close {numSafe(row.close)}
-                      </Typography>
+                      <Typography key={`${row.date}-${row.score}`} variant="body2" color="text.secondary">{row.date}: score {numSafe(row.score)} / close {numSafe(row.close)}</Typography>
                     ))}
                   </Stack>
                 ) : (
-                  <Typography variant="body2" color="text.secondary">スコア診断データがありません。</Typography>
+                  <Typography variant="body2" color="text.secondary">{t.noScoreData}</Typography>
                 )}
               </Stack>
             </CardContent>
@@ -485,29 +380,22 @@ export function BacktestPage() {
 
         {chartData.length > 0 && (
           <Card>
-            <CardHeader title={mode === 'accumulation' ? '資産推移' : '価格推移'} />
+            <CardHeader title={mode === 'accumulation' ? t.assetChart : t.priceChart} />
             <CardContent>
               <ResponsiveContainer width="100%" height={320}>
                 <LineChart data={chartData} margin={{ left: 8, right: 8 }}>
-                  <XAxis
-                    dataKey="date"
-                    tickFormatter={(d) => dayjs(d).format('YY/MM/DD')}
-                    minTickGap={24}
-                  />
+                  <XAxis dataKey="date" tickFormatter={(d) => dayjs(d).format('YY/MM/DD')} minTickGap={24} />
                   <YAxis tickFormatter={(v) => `${(v / 10000).toFixed(0)}万`} />
-                  <Tooltip
-                    formatter={(val: number) => currencyFmt.format(val)}
-                    labelFormatter={(d) => dayjs(d as string).format('YYYY-MM-DD')}
-                  />
+                  <Tooltip formatter={(val: number) => currencyFmt.format(val)} labelFormatter={(d) => dayjs(d as string).format('YYYY-MM-DD')} />
                   <Legend />
                   {mode === 'accumulation' ? (
                     <>
-                      <Line type="monotone" dataKey="strategy" name="積立＋売り時くん" stroke="#7c3aed" dot={false} />
-                      <Line type="monotone" dataKey="hold" name="通常積立ホールド" stroke="#10b981" dot={false} />
+                      <Line type="monotone" dataKey="strategy" name={t.strategyLine} stroke="#7c3aed" dot={false} />
+                      <Line type="monotone" dataKey="hold" name={t.holdLine} stroke="#10b981" dot={false} />
                     </>
                   ) : (
                     <>
-                      <Line type="monotone" dataKey="close" name="終値" stroke="#7c3aed" dot={false} />
+                      <Line type="monotone" dataKey="close" name={t.closeLine} stroke="#7c3aed" dot={false} />
                       <Line type="monotone" dataKey="ma20" name="MA20" stroke="#0ea5e9" dot={false} />
                       <Line type="monotone" dataKey="ma60" name="MA60" stroke="#10b981" dot={false} />
                       <Line type="monotone" dataKey="ma200" name="MA200" stroke="#f97316" dot={false} />
