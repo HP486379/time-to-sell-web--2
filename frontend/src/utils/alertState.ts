@@ -12,12 +12,12 @@ export interface AlertState {
 
 const ALERT_DEFINITIONS: Record<Decision, Omit<AlertState, 'decision'>> = {
   TAKE_PROFIT: {
-    title: '利確してOKな水準です',
-    message: '株価は長期平均より上振れています。利益確定を積極的に検討できるゾーンです。',
-    color: '#E4F6E8',
+    title: '一括投資では売り検討ラインです',
+    message: 'スコアが80以上です。一括投資では利益確定を具体的に検討できる水準です。',
+    color: '#DCF2E3',
     icon: '🟢',
-    face: '😄',
-    reaction: 'いまが利確チャンス。どこで収穫するか作戦会議しましょう。',
+    face: '😎',
+    reaction: '勢いに乗っている今のうちに、利確の計画を立てましょう。',
   },
   WAIT: {
     title: '今は様子見で大丈夫です',
@@ -40,18 +40,39 @@ const ALERT_DEFINITIONS: Record<Decision, Omit<AlertState, 'decision'>> = {
 export function getAlertState(score?: number): AlertState {
   const decision = deriveDecision(score)
 
-  const aggressiveTakeProfit =
-    decision === 'TAKE_PROFIT' && score !== undefined && score >= 80
-
-  if (aggressiveTakeProfit) {
+  if (score !== undefined && score >= 75 && score < 80) {
     return {
-      decision,
-      title: '利確を強く推奨します',
-      message: 'スコアが高水準です。利益確定を強く検討してください。',
-      color: '#DCF2E3',
-      icon: '🟢',
-      face: '😎',
-      reaction: '勢いに乗っている今のうちに、利確の計画を立てましょう。',
+      decision: 'WAIT',
+      title: '強めの警戒水準です',
+      message: 'スコアが75以上です。まだ機械的な売り判断ではありませんが、過熱感は強まっています。',
+      color: '#FFF1D6',
+      icon: '🟠',
+      face: '⚠️',
+      reaction: '強めの警戒ゾーン。売却候補や利確ラインを先に決めておきましょう。',
+    }
+  }
+
+  if (score !== undefined && score >= 65 && score < 75) {
+    return {
+      decision: 'WAIT',
+      title: '通知対象の過熱水準です',
+      message: 'スコアが65以上です。積立では新規積立分の一時待機を検討できる水準です。',
+      color: '#E6F4FF',
+      icon: '🔔',
+      face: '🔔',
+      reaction: '過熱を検知。焦って売るより、次の新規積立分を待機させる判断が現実的です。',
+    }
+  }
+
+  if (score !== undefined && score >= 60 && score < 65) {
+    return {
+      decision: 'WAIT',
+      title: '注意水準です',
+      message: 'スコアが60以上です。アプリ内で注意して見る水準ですが、通知や売買判断にはまだ早めです。',
+      color: '#EAF6FF',
+      icon: 'ℹ️',
+      face: '👀',
+      reaction: '注意ゾーン入り。ここではまだ慌てず、65以上への上昇を確認しましょう。',
     }
   }
 
@@ -63,8 +84,10 @@ export function getAlertState(score?: number): AlertState {
 
 export function getScoreZoneText(score?: number) {
   if (score === undefined) return 'スコアの計算中です。'
-  if (score >= 80) return '現在のスコアは「かなり高い水準」です。'
-  if (score >= 60) return '現在のスコアは「やや高めの水準」です。'
+  if (score >= 80) return '現在のスコアは「一括投資版の売り検討ライン」です。'
+  if (score >= 75) return '現在のスコアは「強めの警戒水準」です。'
+  if (score >= 65) return '現在のスコアは「プッシュ通知対象の過熱水準」です。'
+  if (score >= 60) return '現在のスコアは「アプリ内表示の注意水準」です。'
   if (score >= 40) return '現在のスコアは「平均的な水準」です。'
   if (score >= 20) return '現在のスコアは「やや低めの水準」です。'
   return '現在のスコアは「かなり低い水準」です。'
