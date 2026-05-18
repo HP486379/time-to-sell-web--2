@@ -112,7 +112,7 @@ function App({ mode, onToggleMode }: AppProps) {
       </Box>
       <Routes>
         <Route path="/" element={<DashboardPage displayMode={displayMode} />} />
-        <Route path="/backtest" element={<BacktestPage />} />
+        <Route path="/backtest" element={<BacktestPage language={language} />} />
       </Routes>
     </Container>
   )
