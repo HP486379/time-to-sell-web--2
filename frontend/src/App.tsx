@@ -15,7 +15,7 @@ import { PaletteMode } from '@mui/material'
 import { Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import DashboardPage from './components/DashboardPage'
 import BacktestPage from './components/BacktestPage'
-import { getInitialLanguage, getTranslations, type AppLanguage } from './i18n'
+import { emitLanguageChanged, getInitialLanguage, getTranslations, type AppLanguage } from './i18n'
 
 interface AppProps {
   mode: PaletteMode
@@ -52,7 +52,7 @@ function App({ mode, onToggleMode }: AppProps) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    window.localStorage.setItem('appLanguage', language)
+    emitLanguageChanged(language)
     document.documentElement.lang = language
   }, [language])
 
@@ -75,29 +75,20 @@ function App({ mode, onToggleMode }: AppProps) {
         </Box>
         <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
           <Paper variant="outlined" sx={{ p: 0.5, borderRadius: 2 }}>
-            <ToggleButtonGroup
-              value={currentTab}
-              exclusive
-              onChange={handleTabChange}
-              size="small"
-            >
+            <ToggleButtonGroup value={currentTab} exclusive onChange={handleTabChange} size="small">
               <ToggleButton value="dashboard">{t.app.mainTab}</ToggleButton>
               <ToggleButton value="backtest">{t.app.backtestTab}</ToggleButton>
             </ToggleButtonGroup>
           </Paper>
           <Box display="flex" alignItems="center" gap={1}>
-            <Typography variant="body2" color="text.secondary">
-              {t.app.languageLabel}
-            </Typography>
+            <Typography variant="body2" color="text.secondary">{t.app.languageLabel}</Typography>
             <ToggleButtonGroup value={language} exclusive size="small" onChange={handleLanguage}>
               <ToggleButton value="ja">{t.app.japanese}</ToggleButton>
               <ToggleButton value="en">{t.app.english}</ToggleButton>
             </ToggleButtonGroup>
           </Box>
           <Box display="flex" alignItems="center" gap={1}>
-            <Typography variant="body2" color="text.secondary">
-              {t.app.modeLabel}
-            </Typography>
+            <Typography variant="body2" color="text.secondary">{t.app.modeLabel}</Typography>
             <ToggleButtonGroup value={displayMode} exclusive size="small" onChange={handleDisplayMode}>
               <ToggleButton value="simple">{t.app.simpleMode}</ToggleButton>
               <ToggleButton value="pro">{t.app.proMode}</ToggleButton>
