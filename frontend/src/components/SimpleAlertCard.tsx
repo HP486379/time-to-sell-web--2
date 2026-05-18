@@ -16,8 +16,10 @@ import {
 import { darken } from '@mui/material/styles'
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward'
 import type { TooltipTexts } from '../tooltipTexts'
-import { getAlertState, getScoreZoneText } from '../utils/alertState'
+import { getAlertState } from '../utils/alertState'
 import { AnimatedSignalLight } from './AnimatedSignalLight'
+import { getTranslations, useAppLanguage } from '../i18n'
+import type { Decision } from '../domain/decision'
 
 interface Props {
   scores?: {
@@ -34,6 +36,36 @@ interface Props {
   isRetrying?: boolean
 }
 
+const getLocalizedZoneText = (score: number | undefined, t: ReturnType<typeof getTranslations>) => {
+  if (score === undefined) return t.scoreZones.loading
+  if (score >= 80) return t.scoreZones.sellLine
+  if (score >= 75) return t.scoreZones.strong
+  if (score >= 65) return t.scoreZones.push
+  if (score >= 60) return t.scoreZones.caution
+  if (score >= 40) return t.scoreZones.average
+  if (score >= 20) return t.scoreZones.low
+  return t.scoreZones.veryLow
+}
+
+const getLocalizedAlert = (score: number | undefined, decision: Decision, t: ReturnType<typeof getTranslations>) => {
+  if (score !== undefined && score >= 80) {
+    return { title: t.dashboard.alertTitles.takeProfit, message: t.dashboard.alertMessages.takeProfit, reaction: t.dashboard.alertReactions.takeProfit }
+  }
+  if (score !== undefined && score >= 75) {
+    return { title: t.dashboard.alertTitles.strong, message: t.dashboard.alertMessages.strong, reaction: t.dashboard.alertReactions.strong }
+  }
+  if (score !== undefined && score >= 65) {
+    return { title: t.dashboard.alertTitles.push, message: t.dashboard.alertMessages.push, reaction: t.dashboard.alertReactions.push }
+  }
+  if (score !== undefined && score >= 60) {
+    return { title: t.dashboard.alertTitles.caution, message: t.dashboard.alertMessages.caution, reaction: t.dashboard.alertReactions.caution }
+  }
+  if (decision === 'HOLD_OR_BUY') {
+    return { title: t.dashboard.alertTitles.hold, message: t.dashboard.alertMessages.hold, reaction: t.dashboard.alertReactions.hold }
+  }
+  return { title: t.dashboard.alertTitles.wait, message: t.dashboard.alertMessages.wait, reaction: t.dashboard.alertReactions.wait }
+}
+
 function SimpleAlertCard({
   scores,
   highlights = [],
@@ -46,15 +78,20 @@ function SimpleAlertCard({
   onRetry,
   isRetrying = false,
 }: Props) {
+  const language = useAppLanguage()
+  const t = getTranslations(language)
+  const d = t.dashboard
   const theme = useTheme()
   const isDark = theme.palette.mode === 'dark'
   const showConfirmed = status === 'ready' || status === 'refreshing'
   const totalScore = scores?.total
   const alert = getAlertState(showConfirmed ? totalScore : undefined)
+  const localizedAlert = getLocalizedAlert(showConfirmed ? totalScore : undefined, alert.decision, t)
   const cardBackground = isDark ? '#2b2f38' : darken(alert.color, 0.04)
   const borderColor = isDark ? 'rgba(255,255,255,0.08)' : alpha(theme.palette.text.primary, 0.1)
   const textPrimary = isDark ? '#ffffff' : 'rgba(0, 0, 0, 0.85)'
   const textSecondary = isDark ? '#d2d2d2' : 'rgba(0, 0, 0, 0.75)'
+  const localizedZoneText = getLocalizedZoneText(showConfirmed ? totalScore : undefined, t)
 
   return (
     <Card
@@ -74,20 +111,20 @@ function SimpleAlertCard({
               action={
                 onRetry ? (
                   <Button color="inherit" size="small" onClick={onRetry}>
-                    再取得
+                    {d.retry}
                   </Button>
                 ) : undefined
               }
             >
               <Typography variant="subtitle2" component="div">
-                ⚠ 一部データ取得中
+                {d.degradedTitle}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                {statusMessage ?? '価格履歴の取得が未完了のため、現在のスコアは参考値です。'}
+                {statusMessage ?? d.degradedMessage}
               </Typography>
               {isRetrying && (
                 <Typography variant="caption" color="text.secondary">
-                  再試行中…
+                  {d.retrying}
                 </Typography>
               )}
             </Alert>
@@ -98,22 +135,22 @@ function SimpleAlertCard({
               action={
                 onRetry ? (
                   <Button color="inherit" size="small" onClick={onRetry}>
-                    再取得
+                    {d.retry}
                   </Button>
                 ) : undefined
               }
             >
               <Typography variant="subtitle2" component="div">
-                ❌ データ取得に失敗しました
+                {d.errorTitle}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                {statusMessage ?? '時間をおいて再取得してください。'}
+                {statusMessage ?? d.errorMessage}
               </Typography>
             </Alert>
           )}
           <Tooltip title={tooltips.simple.alert} arrow>
             <Typography variant="overline" color={textSecondary}>
-              シンプル・アラート
+              {d.simpleAlert}
             </Typography>
           </Tooltip>
           <Stack direction="row" alignItems="center" spacing={2.25}>
@@ -131,23 +168,25 @@ function SimpleAlertCard({
               ) : (
                 <>
                   <Typography variant="h6" fontWeight={700} color={textPrimary}>
-                    {showConfirmed ? alert.title : '未確定データを確認中'}
+                    {showConfirmed ? localizedAlert.title : d.uncertainTitle}
                   </Typography>
                   <Typography variant="body2" color={textSecondary}>
-                    {showConfirmed ? alert.reaction : 'データが揃い次第、確定スコアを表示します。'}
+                    {showConfirmed ? localizedAlert.reaction : d.uncertainReaction}
                   </Typography>
                 </>
               )}
             </Stack>
-            {status === 'refreshing' && <Chip size="small" color="info" label="更新中…" />}
+            {status === 'refreshing' && <Chip size="small" color="info" label={d.refreshing} />}
           </Stack>
           <Typography variant="body1" color={textPrimary}>
-            {status === 'loading' ? '⏳ 計算中…' : showConfirmed ? alert.message : '現在のスコアは未確定です。'}
+            {status === 'loading' ? d.loading : showConfirmed ? localizedAlert.message : d.uncertainScore}
           </Typography>
           <Typography variant="body2" color={textSecondary}>
             {status === 'loading'
-              ? '計算完了までしばらくお待ちください。'
-              : zoneText ?? getScoreZoneText(showConfirmed ? totalScore : undefined)}
+              ? d.waitLoading
+              : language === 'en'
+                ? localizedZoneText
+                : zoneText ?? localizedZoneText}
           </Typography>
           {highlights.length > 0 && (
             <Box
@@ -160,7 +199,7 @@ function SimpleAlertCard({
             >
               <Tooltip title={tooltips.simple.points} arrow>
                 <Typography variant="subtitle2" color={textSecondary} gutterBottom>
-                  今日のポイント
+                  {d.todayPoints}
                 </Typography>
               </Tooltip>
               <Stack spacing={1}>
@@ -185,7 +224,7 @@ function SimpleAlertCard({
             onClick={onShowDetails}
             sx={{ alignSelf: 'flex-start' }}
           >
-            {expanded ? '閉じる' : 'くわしく見る ≫'}
+            {expanded ? d.detailsClose : d.detailsOpen}
           </Button>
         </Stack>
       </CardContent>
