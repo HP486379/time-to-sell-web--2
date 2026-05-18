@@ -21,14 +21,21 @@ interface AppProps {
   onToggleMode: () => void
 }
 
+type AppLanguage = 'ja' | 'en'
+
 function App({ mode, onToggleMode }: AppProps) {
   const [displayMode, setDisplayMode] = useState<'pro' | 'simple'>(() => {
     if (typeof window === 'undefined') return 'simple'
     const stored = window.localStorage.getItem('displayMode')
     return stored === 'pro' || stored === 'simple' ? stored : 'simple'
   })
+  const [language, setLanguage] = useState<AppLanguage>(() => {
+    if (typeof window === 'undefined') return 'ja'
+    return window.localStorage.getItem('appLanguage') === 'en' ? 'en' : 'ja'
+  })
   const location = useLocation()
   const navigate = useNavigate()
+  const isEnglish = language === 'en'
 
   const currentTab = useMemo(() => {
     return location.pathname.startsWith('/backtest') ? 'backtest' : 'dashboard'
@@ -38,10 +45,20 @@ function App({ mode, onToggleMode }: AppProps) {
     if (next) setDisplayMode(next)
   }
 
+  const handleLanguage = (_: any, next: AppLanguage | null) => {
+    if (next) setLanguage(next)
+  }
+
   useEffect(() => {
     if (typeof window === 'undefined') return
     window.localStorage.setItem('displayMode', displayMode)
   }, [displayMode])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem('appLanguage', language)
+    document.documentElement.lang = language
+  }, [language])
 
   const handleTabChange = (_: any, next: 'dashboard' | 'backtest' | null) => {
     if (!next) return
@@ -54,10 +71,12 @@ function App({ mode, onToggleMode }: AppProps) {
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={2}>
         <Box>
           <Typography variant="h4" fontWeight={700} color="primary.light">
-            売り時くん
+            {isEnglish ? 'Uritoki-kun' : '売り時くん'}
           </Typography>
           <Typography variant="subtitle1" color="text.secondary">
-            テクニカル・マクロ・イベントの三軸で売り時スコアを可視化
+            {isEnglish
+              ? 'A market overheat score for long-term investors: trim, rebalance, or pause DCA.'
+              : 'テクニカル・マクロ・イベントの三軸で売り時スコアを可視化'}
           </Typography>
         </Box>
         <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
@@ -68,17 +87,26 @@ function App({ mode, onToggleMode }: AppProps) {
               onChange={handleTabChange}
               size="small"
             >
-              <ToggleButton value="dashboard">メイン画面</ToggleButton>
-              <ToggleButton value="backtest">バックテスト画面</ToggleButton>
+              <ToggleButton value="dashboard">{isEnglish ? 'Main' : 'メイン画面'}</ToggleButton>
+              <ToggleButton value="backtest">{isEnglish ? 'Backtest' : 'バックテスト画面'}</ToggleButton>
             </ToggleButtonGroup>
           </Paper>
           <Box display="flex" alignItems="center" gap={1}>
             <Typography variant="body2" color="text.secondary">
-              表示モード
+              {isEnglish ? 'Language' : '言語'}
+            </Typography>
+            <ToggleButtonGroup value={language} exclusive size="small" onChange={handleLanguage}>
+              <ToggleButton value="ja">日本語</ToggleButton>
+              <ToggleButton value="en">English</ToggleButton>
+            </ToggleButtonGroup>
+          </Box>
+          <Box display="flex" alignItems="center" gap={1}>
+            <Typography variant="body2" color="text.secondary">
+              {isEnglish ? 'Mode' : '表示モード'}
             </Typography>
             <ToggleButtonGroup value={displayMode} exclusive size="small" onChange={handleDisplayMode}>
-              <ToggleButton value="simple">かんたん</ToggleButton>
-              <ToggleButton value="pro">プロ向け</ToggleButton>
+              <ToggleButton value="simple">{isEnglish ? 'Simple' : 'かんたん'}</ToggleButton>
+              <ToggleButton value="pro">{isEnglish ? 'Pro' : 'プロ向け'}</ToggleButton>
             </ToggleButtonGroup>
           </Box>
           <Stack direction="row" spacing={1} alignItems="center">
