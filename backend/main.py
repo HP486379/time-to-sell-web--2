@@ -433,6 +433,9 @@ def get_cached_snapshot(
         return _cached_snapshot[key]
 
     snapshot_started = time.perf_counter()
+    def finish_snapshot(result: dict) -> dict:
+        logger.info("[evaluate-timing] index=%s phase=snapshot_total elapsed_ms=%.1f", index_type.value, (time.perf_counter() - snapshot_started) * 1000)
+        return result
     logger.info("[evaluate-timing] index=%s phase=cache_miss", index_type.value)
     snapshot = {
         "current_price": 0.0,
@@ -468,7 +471,7 @@ def get_cached_snapshot(
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         snapshot["status"] = "error"
         snapshot["reasons"] = ["PRICE_HISTORY_UNAVAILABLE"]
-        return snapshot
+        return finish_snapshot(snapshot)
     except Exception:
         logger.warning("[evaluate-timing] index=%s phase=price_history_failed elapsed_ms=%.1f", index_type.value, (time.perf_counter() - price_fetch_started) * 1000)
         logger.exception("[snapshot] price history failed for %s", index_type.value)
@@ -476,7 +479,7 @@ def get_cached_snapshot(
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         snapshot["status"] = "error"
         snapshot["reasons"] = ["PRICE_HISTORY_UNAVAILABLE"]
-        return snapshot
+        return finish_snapshot(snapshot)
 
     if not price_history:
         logger.warning("[snapshot] empty price history for %s", index_type.value)
@@ -484,7 +487,7 @@ def get_cached_snapshot(
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         snapshot["status"] = "error"
         snapshot["reasons"] = ["PRICE_HISTORY_EMPTY"]
-        return snapshot
+        return finish_snapshot(snapshot)
 
     current_price = price_history[-1][1]
     market_service._set_debug(
@@ -509,7 +512,7 @@ def get_cached_snapshot(
         snapshot["adopted_provider"] = market_service.get_last_debug(index_type.value).get("adopted_provider")
         snapshot["status"] = "error"
         snapshot["reasons"] = ["SOURCE_DISALLOWED"]
-        return snapshot
+        return finish_snapshot(snapshot)
 
     eligible, reason = _is_debug_eligible_for_scoring(index_type, price_history)
     if not eligible:
@@ -519,7 +522,7 @@ def get_cached_snapshot(
         snapshot["debug"] = market_service.get_last_debug(index_type.value)
         snapshot["status"] = "degraded"
         snapshot["reasons"] = [reason]
-        return snapshot
+        return finish_snapshot(snapshot)
     market_service._set_debug(index_type.value, scoring_allowed=True, scoring_executed=True, scoring_block_reason=None)
 
     try:
@@ -649,8 +652,7 @@ def get_cached_snapshot(
     market_service._set_debug(index_type.value, scores_total=total_score)
     _cached_snapshot[key] = snapshot
     _cached_at[key] = now
-    logger.info("[evaluate-timing] index=%s phase=snapshot_total elapsed_ms=%.1f", index_type.value, (time.perf_counter() - snapshot_started) * 1000)
-    return snapshot
+    return finish_snapshot(snapshot)
 
 
 def _build_debug_payload(requested_index_type: str, used_index_type: str, snapshot: dict) -> dict:
