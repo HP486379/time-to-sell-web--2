@@ -1478,6 +1478,8 @@ class SP500MarketService:
                     exc,
                 )
                 self._add_provider_reject_reason(index_type, f"yfinance_first:fetch_error:{exc}")
+                tried_providers.append("yfinance")
+                self._set_debug(index_type, tried_providers=tried_providers)
                 # Restore the original NAV -> Stooq -> yfinance fallback path.
         symbol = self._resolve_symbol(index_type)
         try:
