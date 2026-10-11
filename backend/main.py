@@ -14,6 +14,7 @@ from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, validator
 
 from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
@@ -300,6 +301,15 @@ def _price_history_range():
 
 
 def _get_price_series(index_type: IndexType):
+    # Reuse the evaluated series when it is fresh, avoiding a duplicate provider fetch.
+    cache_key = f"{index_type.value}|synth=0|lowq=0"
+    cached = _cached_snapshot.get(cache_key)
+    cached_at = _cached_at.get(cache_key)
+    if cached_at and cached and datetime.now(timezone.utc) - cached_at < _cache_ttl:
+        series = cached.get("price_series")
+        if series and cached.get("status") not in {"error", "degraded"}:
+            logger.info("[price-history-timing] index=%s phase=snapshot_cache_hit", index_type.value)
+            return series
     price_history = market_service.get_price_history(index_type.value, allow_synthetic=False)
     source = market_service.get_last_source(index_type.value)
     restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
@@ -310,6 +320,7 @@ def _get_price_series(index_type: IndexType):
 
 
 def _get_price_series_or_503(index_type: IndexType):
+    started = time.perf_counter()
     try:
         return _get_price_series(index_type)
     except (PriceHistoryFetchError, ValueError):
@@ -317,6 +328,8 @@ def _get_price_series_or_503(index_type: IndexType):
     except Exception as exc:
         logger.warning("price-history failed index=%s error=%s", index_type.value, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="Price data unavailable.")
+    finally:
+        logger.info("[price-history-timing] index=%s phase=request_total elapsed_ms=%.1f", index_type.value, (time.perf_counter() - started) * 1000)
 
 
 def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tuple[str, float]]) -> tuple[bool, str]:
@@ -1364,7 +1377,8 @@ async def evaluate_sp500(
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(
+        snapshot = await run_in_threadpool(
+            get_cached_snapshot,
             position.index_type,
             allow_synthetic=debug_flag,
             allow_low_quality=allow_low_quality,
@@ -1436,7 +1450,8 @@ async def evaluate(
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(
+        snapshot = await run_in_threadpool(
+            get_cached_snapshot,
             position.index_type,
             allow_synthetic=debug_flag,
             allow_low_quality=allow_low_quality,
