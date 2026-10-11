@@ -9,12 +9,12 @@ import statistics
 import logging
 import os
 import time
+from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from enum import Enum
 
 from fastapi import FastAPI, HTTPException, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, validator
 
 from scoring.technical import calculate_technical_score, calculate_ultra_long_mas
@@ -320,7 +320,7 @@ def _get_price_series(index_type: IndexType):
 
 
 def _get_price_series_or_503(index_type: IndexType):
-    started = time.perf_counter()
+    started = perf_counter()
     try:
         return _get_price_series(index_type)
     except (PriceHistoryFetchError, ValueError):
@@ -329,7 +329,7 @@ def _get_price_series_or_503(index_type: IndexType):
         logger.warning("price-history failed index=%s error=%s", index_type.value, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="Price data unavailable.")
     finally:
-        logger.info("[price-history-timing] index=%s phase=request_total elapsed_ms=%.1f", index_type.value, (time.perf_counter() - started) * 1000)
+        logger.info("[price-history-timing] index=%s phase=request_total elapsed_ms=%.1f", index_type.value, (perf_counter() - started) * 1000)
 
 
 def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tuple[str, float]]) -> tuple[bool, str]:
@@ -1377,8 +1377,7 @@ async def evaluate_sp500(
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = await run_in_threadpool(
-            get_cached_snapshot,
+        snapshot = get_cached_snapshot(
             position.index_type,
             allow_synthetic=debug_flag,
             allow_low_quality=allow_low_quality,
@@ -1450,8 +1449,7 @@ async def evaluate(
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = await run_in_threadpool(
-            get_cached_snapshot,
+        snapshot = get_cached_snapshot(
             position.index_type,
             allow_synthetic=debug_flag,
             allow_low_quality=allow_low_quality,
