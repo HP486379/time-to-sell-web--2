@@ -1449,6 +1449,26 @@ class SP500MarketService:
         tried_providers.append("nav_api")
         self._set_debug(index_type, tried_providers=tried_providers)
 
+        # Opt-in experiment: skip slow Stooq gateway when yfinance is available.
+        # Leave the default provider order untouched until production validation.
+        if os.getenv("SP500_YFINANCE_FIRST", "").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                hist = self._fetch_yfinance_history_with_retry(
+                    start, end, index_type, enforce_quality=True,
+                )
+                self._set_debug(
+                    index_type,
+                    tried_providers=tried_providers + ["yfinance"],
+                    adoption_reason="yfinance_first_opt_in",
+                )
+                return hist
+            except Exception as exc:
+                logger.warning(
+                    "SP500 yfinance-first failed; trying legacy Stooq path: %s",
+                    exc,
+                )
+                self._add_provider_reject_reason(index_type, f"yfinance_first:fetch_error:{exc}")
+                # Restore the original NAV -> Stooq -> yfinance fallback path.
         symbol = self._resolve_symbol(index_type)
         try:
             closes = fetch_history_from_stooq(symbol, start, end)
