@@ -1449,6 +1449,38 @@ class SP500MarketService:
         tried_providers.append("nav_api")
         self._set_debug(index_type, tried_providers=tried_providers)
 
+        # Opt-in experiment: skip slow Stooq gateway when yfinance is available.
+        # Leave the default provider order untouched until production validation.
+        if os.getenv("SP500_YFINANCE_FIRST", "").strip().lower() in {"1", "true", "yes", "on"}:
+            try:
+                hist = self._fetch_yfinance_history_with_retry(
+                    start, end, index_type, enforce_quality=True,
+                )
+                adopted_provider = self.get_last_debug(index_type).get("adopted_provider")
+                if adopted_provider == "yfinance":
+                    self._set_debug(
+                        index_type,
+                        tried_providers=tried_providers + ["yfinance"],
+                        adoption_reason="yfinance_first_opt_in",
+                    )
+                    return hist
+                # The retry helper may return stale last_good data without raising.
+                # Do not mistake that fallback for a successful fresh yfinance fetch.
+                logger.info(
+                    "SP500 yfinance-first returned provider=%s; trying legacy Stooq path",
+                    adopted_provider,
+                )
+                tried_providers.append("yfinance")
+                self._set_debug(index_type, tried_providers=tried_providers)
+            except Exception as exc:
+                logger.warning(
+                    "SP500 yfinance-first failed; trying legacy Stooq path: %s",
+                    exc,
+                )
+                self._add_provider_reject_reason(index_type, f"yfinance_first:fetch_error:{exc}")
+                tried_providers.append("yfinance")
+                self._set_debug(index_type, tried_providers=tried_providers)
+                # Restore the original NAV -> Stooq -> yfinance fallback path.
         symbol = self._resolve_symbol(index_type)
         try:
             closes = fetch_history_from_stooq(symbol, start, end)
@@ -1470,6 +1502,7 @@ class SP500MarketService:
                     tried_providers=tried_providers + ["stooq"],
                     adopted_provider="stooq",
                     adopted_symbol=symbol,
+                    adoption_reason="stooq_after_yfinance_first" if "yfinance" in tried_providers else "primary",
                     fetch_error=None,
                     quality_check={"symbol": symbol, "result": "success", "reason": None},
                 )
