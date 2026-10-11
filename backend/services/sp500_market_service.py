@@ -1456,12 +1456,22 @@ class SP500MarketService:
                 hist = self._fetch_yfinance_history_with_retry(
                     start, end, index_type, enforce_quality=True,
                 )
-                self._set_debug(
-                    index_type,
-                    tried_providers=tried_providers + ["yfinance"],
-                    adoption_reason="yfinance_first_opt_in",
+                adopted_provider = self.get_last_debug(index_type).get("adopted_provider")
+                if adopted_provider == "yfinance":
+                    self._set_debug(
+                        index_type,
+                        tried_providers=tried_providers + ["yfinance"],
+                        adoption_reason="yfinance_first_opt_in",
+                    )
+                    return hist
+                # The retry helper may return stale last_good data without raising.
+                # Do not mistake that fallback for a successful fresh yfinance fetch.
+                logger.info(
+                    "SP500 yfinance-first returned provider=%s; trying legacy Stooq path",
+                    adopted_provider,
                 )
-                return hist
+                tried_providers.append("yfinance")
+                self._set_debug(index_type, tried_providers=tried_providers)
             except Exception as exc:
                 logger.warning(
                     "SP500 yfinance-first failed; trying legacy Stooq path: %s",
