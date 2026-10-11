@@ -1500,6 +1500,7 @@ class SP500MarketService:
                     tried_providers=tried_providers + ["stooq"],
                     adopted_provider="stooq",
                     adopted_symbol=symbol,
+                    adoption_reason="stooq_after_yfinance_first" if "yfinance" in tried_providers else "primary",
                     fetch_error=None,
                     quality_check={"symbol": symbol, "result": "success", "reason": None},
                 )
