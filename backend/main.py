@@ -9,6 +9,8 @@ import statistics
 import logging
 import os
 import time
+import threading
+from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from enum import Enum
 
@@ -287,6 +289,9 @@ def _serialize_event_details(details: dict) -> dict:
 _cache_ttl = timedelta(seconds=60)
 _cached_snapshot = {}
 _cached_at: dict[str, datetime] = {}
+# The market service stores source/debug state by index. Protect the full
+# fetch-and-evaluate transaction against concurrent chart requests.
+_market_state_locks = {index: threading.RLock() for index in IndexType}
 MIN_PRICE_POINTS = 200
 
 
@@ -300,6 +305,20 @@ def _price_history_range():
 
 
 def _get_price_series(index_type: IndexType):
+    with _market_state_locks[index_type]:
+        return _get_price_series_locked(index_type)
+
+
+def _get_price_series_locked(index_type: IndexType):
+    # Reuse the evaluated series when it is fresh, avoiding a duplicate provider fetch.
+    cache_key = f"{index_type.value}|synth=0|lowq=0"
+    cached = _cached_snapshot.get(cache_key)
+    cached_at = _cached_at.get(cache_key)
+    if cached_at and cached and datetime.now(timezone.utc) - cached_at < _cache_ttl:
+        series = cached.get("price_series")
+        if series and cached.get("status") not in {"error", "degraded"}:
+            logger.info("[price-history-timing] index=%s phase=snapshot_cache_hit", index_type.value)
+            return series
     price_history = market_service.get_price_history(index_type.value, allow_synthetic=False)
     source = market_service.get_last_source(index_type.value)
     restricted = {IndexType.NIFTY50, IndexType.ALLCOUNTRY, IndexType.ALLCOUNTRY_JPY}
@@ -310,6 +329,7 @@ def _get_price_series(index_type: IndexType):
 
 
 def _get_price_series_or_503(index_type: IndexType):
+    started = perf_counter()
     try:
         return _get_price_series(index_type)
     except (PriceHistoryFetchError, ValueError):
@@ -317,6 +337,8 @@ def _get_price_series_or_503(index_type: IndexType):
     except Exception as exc:
         logger.warning("price-history failed index=%s error=%s", index_type.value, exc, exc_info=True)
         raise HTTPException(status_code=503, detail="Price data unavailable.")
+    finally:
+        logger.info("[price-history-timing] index=%s phase=request_total elapsed_ms=%.1f", index_type.value, (perf_counter() - started) * 1000)
 
 
 def _is_debug_eligible_for_scoring(index_type: IndexType, price_history: List[Tuple[str, float]]) -> tuple[bool, str]:
@@ -422,6 +444,15 @@ def _build_event_adjustment(target: date):
 
 
 def get_cached_snapshot(
+    index_type: IndexType,
+    allow_synthetic: bool = False,
+    allow_low_quality: bool = False,
+) -> dict:
+    with _market_state_locks[index_type]:
+        return _get_cached_snapshot_locked(index_type, allow_synthetic, allow_low_quality)
+
+
+def _get_cached_snapshot_locked(
     index_type: IndexType,
     allow_synthetic: bool = False,
     allow_low_quality: bool = False,
@@ -1364,12 +1395,13 @@ async def evaluate_sp500(
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(
-            position.index_type,
-            allow_synthetic=debug_flag,
-            allow_low_quality=allow_low_quality,
-        )
-        debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
+        with _market_state_locks[position.index_type]:
+            snapshot = get_cached_snapshot(
+                position.index_type,
+                allow_synthetic=debug_flag,
+                allow_low_quality=allow_low_quality,
+            )
+            debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
         if used_index_type == "TOPIX":
             logger.info(
@@ -1436,12 +1468,13 @@ async def evaluate(
         debug_flag = await _resolve_debug_flag(request, debug)
         requested_index_type = str(position.index_type.value)
         used_index_type = normalize_index_type(requested_index_type)
-        snapshot = get_cached_snapshot(
-            position.index_type,
-            allow_synthetic=debug_flag,
-            allow_low_quality=allow_low_quality,
-        )
-        debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
+        with _market_state_locks[position.index_type]:
+            snapshot = get_cached_snapshot(
+                position.index_type,
+                allow_synthetic=debug_flag,
+                allow_low_quality=allow_low_quality,
+            )
+            debug_payload = _build_debug_payload(requested_index_type, used_index_type, snapshot)
         logger.info("[evaluate] debug=%s", debug_payload)
         if used_index_type == "TOPIX":
             logger.info(
