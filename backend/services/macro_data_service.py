@@ -1,5 +1,7 @@
 import os
 import random
+import logging
+import time
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -7,6 +9,9 @@ import requests
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
+
+
+logger = logging.getLogger(__name__)
 
 
 class MacroDataService:
@@ -178,8 +183,19 @@ class MacroDataService:
         }
 
     def get_macro_series(self) -> Dict[str, Tuple[List[float], float]]:
-        return {
-            "r_10y": self._fetch_r10y(),
-            "cpi": self._fetch_cpi(),
-            "vix": self._fetch_vix(),
-        }
+        results: Dict[str, Tuple[List[float], float]] = {}
+        for name, fetch in (
+            ("r_10y", self._fetch_r10y),
+            ("cpi", self._fetch_cpi),
+            ("vix", self._fetch_vix),
+        ):
+            started = time.perf_counter()
+            try:
+                results[name] = fetch()
+            finally:
+                logger.info(
+                    "[evaluate-timing] phase=macro_source source=%s elapsed_ms=%.1f",
+                    name,
+                    (time.perf_counter() - started) * 1000,
+                )
+        return results
