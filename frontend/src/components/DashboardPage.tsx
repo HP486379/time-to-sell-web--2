@@ -223,8 +223,10 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   const [evalStatusMap, setEvalStatusMap] = useState<Partial<Record<IndexType, EvalStatus>>>({})
   const [evalReasonsMap, setEvalReasonsMap] = useState<Partial<Record<IndexType, string[]>>>({})
   const [evalStatusMessageMap, setEvalStatusMessageMap] = useState<Partial<Record<IndexType, string>>>({})
-  const priceReqSeqRef = useRef(0)
-  const evalReqSeqRef = useRef(0)
+  const priceReqSeqRef = useRef<Partial<Record<IndexType, number>>>({})
+  const chartEpochRef = useRef<Partial<Record<IndexType, number>>>({})
+  const evalReqSeqRef = useRef<Partial<Record<IndexType, number>>>({})
+  const fetchBatchRef = useRef(0)
   const evalRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const latestEvalRequestIdRef = useRef<Partial<Record<IndexType, string>>>({})
 
@@ -253,7 +255,15 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       [indexType]: response ? 'refreshing' : 'loading',
     }))
     setIsEvalRetrying(false)
-    void fetchAll()
+    void fetchAll(beginFetchBatch())
+  }
+
+  const beginFetchBatch = (): number => {
+    if (evalRetryTimeoutRef.current !== null) {
+      clearTimeout(evalRetryTimeoutRef.current)
+      evalRetryTimeoutRef.current = null
+    }
+    return ++fetchBatchRef.current
   }
 
   const EVAL_RETRY_DELAYS_MS = [1500, 3000, 6000]
@@ -297,13 +307,33 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     retryCount: number,
   ) => {
     if (retryCount >= EVAL_RETRY_DELAYS_MS.length) return
-    if (evalRetryTimeoutRef.current) {
+    const scheduledBatch = fetchBatchRef.current
+    if (evalRetryTimeoutRef.current !== null) {
       clearTimeout(evalRetryTimeoutRef.current)
     }
     evalRetryTimeoutRef.current = setTimeout(() => {
-      fetchEvaluation(targetIndex, payload, markPrimary, retryCount + 1)
+      evalRetryTimeoutRef.current = null
+      if (scheduledBatch !== fetchBatchRef.current) return
+      void fetchEvaluation(targetIndex, payload, markPrimary, retryCount + 1)
     }, EVAL_RETRY_DELAYS_MS[retryCount])
   }
+
+  const isValidPriceDate = (value: unknown): value is string => {
+    if (typeof value !== 'string' || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) return false
+    const parsed = new Date(value + 'T00:00:00Z')
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+  }
+
+  const normalizePriceRows = (rows: PricePoint[]): PricePoint[] =>
+    [...rows]
+      .filter((p) => isValidPriceDate(p?.date) && typeof p?.close === 'number' && Number.isFinite(p.close))
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((p) => ({
+        ...p,
+        ma20: typeof p.ma20 === 'number' && Number.isFinite(p.ma20) ? p.ma20 : null,
+        ma60: typeof p.ma60 === 'number' && Number.isFinite(p.ma60) ? p.ma60 : null,
+        ma200: typeof p.ma200 === 'number' && Number.isFinite(p.ma200) ? p.ma200 : null,
+      }))
 
   const fetchEvaluation = async (
   targetIndex: IndexType,
@@ -311,7 +341,11 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   markPrimary = false,
   retryCount = 0,
 ) => {
-  const reqSeq = ++evalReqSeqRef.current
+  const requestBatch = fetchBatchRef.current
+  const reqSeq = (evalReqSeqRef.current[targetIndex] ?? 0) + 1
+  evalReqSeqRef.current[targetIndex] = reqSeq
+  const chartEpoch = (chartEpochRef.current[targetIndex] ?? 0) + 1
+  chartEpochRef.current[targetIndex] = chartEpoch
   const clientRequestId = genRequestId()
   latestEvalRequestIdRef.current[targetIndex] = clientRequestId
 
@@ -338,7 +372,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       params: { debug: true },
     })
 
-    if (reqSeq !== evalReqSeqRef.current) return
+    if (requestBatch !== fetchBatchRef.current || reqSeq !== evalReqSeqRef.current[targetIndex]) return null
 
     const responseRequestId =
       typeof (res.data as EvaluateResponse & { request_id?: unknown }).request_id === 'string'
@@ -356,8 +390,16 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       return
     }
 
+    const rawSeries = res.data.price_series
+    const evaluatedSeries = Array.isArray(rawSeries) ? normalizePriceRows(rawSeries) : []
+    const hasValidSeries = Array.isArray(rawSeries) &&
+      rawSeries.length > 0 && evaluatedSeries.length === rawSeries.length
+    // Keep the historical score-fallback inputs unchanged. Only chart data is reused.
     const latestSeries = priceSeriesMap[targetIndex] ?? []
     const normalized = normalizeEvaluateResponse(res.data, latestSeries)
+    if (hasValidSeries && chartEpochRef.current[targetIndex] === chartEpoch) {
+      setPriceSeriesMap((prev) => ({ ...prev, [targetIndex]: evaluatedSeries }))
+    }
     const status = resolveUiStatus(normalized)
     const reasons = normalized.reasons ?? []
 
@@ -381,12 +423,12 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     if (status === 'degraded') {
       setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
 
-      if (!markPrimary) return
+      if (!markPrimary) return hasValidSeries
 
       if (retryCount >= EVAL_RETRY_DELAYS_MS.length) {
         setIsEvalRetrying(false)
         setEvalStatusMap((prev) => ({ ...prev, [targetIndex]: 'degraded' }))
-        return
+        return hasValidSeries
       }
 
       setIsEvalRetrying(true)
@@ -398,7 +440,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
         scores: normalized.scores,
       })
       scheduleEvalRetry(targetIndex, payload, markPrimary, retryCount)
-      return
+      return hasValidSeries
     }
 
     if (status === 'error') {
@@ -406,7 +448,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
         setIsEvalRetrying(false)
         setError('評価データの取得に失敗しました。再取得してください。')
       }
-      return
+      return hasValidSeries
     }
 
     setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
@@ -422,9 +464,10 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       setEvalReasonsMap((prev) => ({ ...prev, [targetIndex]: reasons }))
       setEvalStatusMessageMap((prev) => ({ ...prev, [targetIndex]: '' }))
     }
+    return hasValidSeries
 
   } catch (e: any) {
-    if (reqSeq !== evalReqSeqRef.current) return
+    if (requestBatch !== fetchBatchRef.current || reqSeq !== evalReqSeqRef.current[targetIndex]) return null
 
     const status = e?.response?.status
 
@@ -464,25 +507,13 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   }
 
   const fetchPriceSeries = async (targetIndex: IndexType) => {
-    const reqSeq = ++priceReqSeqRef.current
+    const reqSeq = (priceReqSeqRef.current[targetIndex] ?? 0) + 1
+    priceReqSeqRef.current[targetIndex] = reqSeq
+    const chartEpoch = chartEpochRef.current[targetIndex]
     try {
       const res = await apiClient.get<PricePoint[]>(getPriceHistoryEndpoint(targetIndex))
-      if (reqSeq !== priceReqSeqRef.current) return
-      const sorted = [...res.data]
-        .filter((p) => typeof p?.date === 'string' && typeof p?.close === 'number' && Number.isFinite(p?.close))
-        .sort((a, b) => a.date.localeCompare(b.date))
-        .map((p, idx) => {
-          const row = {
-            ...p,
-            ma20: typeof p.ma20 === 'number' && Number.isFinite(p.ma20) ? p.ma20 : null,
-            ma60: typeof p.ma60 === 'number' && Number.isFinite(p.ma60) ? p.ma60 : null,
-            ma200: typeof p.ma200 === 'number' && Number.isFinite(p.ma200) ? p.ma200 : null,
-          }
-          if (idx === 0 || idx === res.data.length - 1) {
-            console.debug('[PRICE ROW]', { index: targetIndex, row })
-          }
-          return row
-        })
+      if (reqSeq !== priceReqSeqRef.current[targetIndex] || chartEpoch !== chartEpochRef.current[targetIndex]) return
+      const sorted = normalizePriceRows(res.data)
       setPriceSeriesMap((prev) => ({ ...prev, [targetIndex]: sorted }))
     } catch (e: any) {
       console.error('価格履歴取得に失敗しました', e)
@@ -511,7 +542,8 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     setViewDays(value as ScoreMaDays)
   }
 
-  const fetchAll = async () => {
+  const fetchAll = async (batch: number) => {
+    if (batch !== fetchBatchRef.current) return
     const targets: IndexType[] = (() => {
       if (indexType === 'ORUKAN' || indexType === 'orukan_jpy') return ['ORUKAN', 'orukan_jpy']
       if (indexType === 'sp500_jpy') return ['SP500', 'sp500_jpy']
@@ -521,21 +553,33 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     const primary = indexType
     const secondaryTargets = targets.filter((target) => target !== primary)
 
-    await fetchPriceSeries(primary)
-    await fetchEvaluation(primary, undefined, true)
+    const primaryHasSeries = await fetchEvaluation(primary, undefined, true)
+    if (batch !== fetchBatchRef.current) return
+    if (primaryHasSeries === false || primaryHasSeries === undefined) await fetchPriceSeries(primary)
+    if (batch !== fetchBatchRef.current) return
 
     await Promise.all(
-      secondaryTargets.flatMap((target) => [fetchEvaluation(target), fetchPriceSeries(target)]),
+      secondaryTargets.map(async (target) => {
+        if (batch !== fetchBatchRef.current) return
+        const hasSeries = await fetchEvaluation(target)
+        if (batch !== fetchBatchRef.current) return
+        if (hasSeries === false || hasSeries === undefined) await fetchPriceSeries(target)
+      }),
     )
+    if (batch !== fetchBatchRef.current) return
     await fetchNavs()
   }
 
   useEffect(() => {
-    void fetchAll()
+    const batch = beginFetchBatch()
+    void fetchAll(batch)
     const id = setInterval(() => {
-      void fetchAll()
+      void fetchAll(beginFetchBatch())
     }, REFRESH_INTERVAL_MS)
-    return () => clearInterval(id)
+    return () => {
+      beginFetchBatch()
+      clearInterval(id)
+    }
   }, [lastRequest, indexType])
 
   useEffect(() => {
@@ -823,7 +867,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
             </Typography>
           )}
           <Tooltip title="最新データを取得" arrow>
-            <IconButton color="primary" onClick={() => void fetchAll()}>
+            <IconButton color="primary" onClick={() => void fetchAll(beginFetchBatch())}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
