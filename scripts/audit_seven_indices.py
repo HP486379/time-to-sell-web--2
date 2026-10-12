@@ -74,6 +74,11 @@ def summarize(result: dict, now: dt.datetime) -> dict:
     quality = data.get("quality")
     if not isinstance(quality, dict):
         quality = {}
+    quality_fields = {
+        key: debug.get(key, data.get(key))
+        for key in ("quality_flags", "quality_summary", "quality_check")
+    }
+    quality_evidence = bool(quality) or any(value is not None for value in quality_fields.values())
     provider = data.get("adopted_provider") or debug.get("adopted_provider")
     symbol = (data.get("adopted_symbol") or debug.get("adopted_symbol")
               or debug.get("resolved_symbol"))
@@ -84,25 +89,47 @@ def summarize(result: dict, now: dt.datetime) -> dict:
         audit_missing.append("adopted_symbol")
     if not debug:
         audit_missing.append("debug_details_not_exposed")
+    if not quality_evidence:
+        audit_missing.append("quality_details_not_exposed")
+    current_price = data.get("current_price")
+    invalid_current_price = (isinstance(current_price, float) and not math.isfinite(current_price))
+    if invalid_current_price:
+        current_price = None
+        audit_missing.append("invalid_current_price_nonfinite")
     row.update({
         "status": data.get("status"), "reasons": data.get("reasons"),
         "score": scores.get("total"), "source": data.get("source"),
         "adopted_provider": provider, "adopted_symbol": symbol,
         "adoption_reason": debug.get("adoption_reason"),
         "quality": quality or None,
+        "quality_flags": quality_fields["quality_flags"],
+        "quality_summary": quality_fields["quality_summary"],
+        "quality_check": quality_fields["quality_check"],
+        "quality_details_available": quality_evidence,
         "provider_reject_reasons": data.get("provider_reject_reasons") or debug.get("provider_reject_reasons"),
         "audit_missing_fields": audit_missing,
         "provider_verified": bool(provider and symbol),
         "as_of": data.get("as_of"), "rows": len(series), "valid_rows": len(valid),
         "invalid_rows": invalid_rows, "invalid_row_count": len(invalid_rows),
         "last_date": last_date, "last_close": last.get("close"),
-        "calendar_days_old": days_old, "current_price": data.get("current_price"),
+        "calendar_days_old": days_old, "current_price": current_price,
         "last_equals_current_price": (
             math.isclose(float(last["close"]), float(data["current_price"]), rel_tol=1e-8)
-            if last and isinstance(data.get("current_price"), (float, int)) else None
+            if last and isinstance(current_price, (float, int)) and not isinstance(current_price, bool) else None
         ),
     })
     return row
+
+
+def json_safe(value):
+    """Return strictly JSON-compatible data and document non-finite values as null."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
 
 
 def main() -> None:
@@ -122,10 +149,11 @@ def main() -> None:
                 result = {"index": index, "audit_error": "unexpected_audit_exception",
                           "error_type": type(exc).__name__, "error": str(exc)}
             result["round"] = attempt
+            result = json_safe(result)
             results.append(result)
-            print(json.dumps(result, ensure_ascii=False), flush=True)
+            print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)
     with open(args.output, "w", encoding="utf-8") as output:
-        json.dump({"checked_at_utc": now.isoformat(), "results": results}, output, ensure_ascii=False, indent=2)
+        json.dump({"checked_at_utc": now.isoformat(), "results": results}, output, ensure_ascii=False, indent=2, allow_nan=False)
     print("Saved:", args.output)
     print("Review freshness vs each index's exchange calendar; weekends/holidays are not errors by themselves.")
 
