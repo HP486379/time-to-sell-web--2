@@ -255,7 +255,15 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       [indexType]: response ? 'refreshing' : 'loading',
     }))
     setIsEvalRetrying(false)
-    void fetchAll(++fetchBatchRef.current)
+    void fetchAll(beginFetchBatch())
+  }
+
+  const beginFetchBatch = (): number => {
+    if (evalRetryTimeoutRef.current !== null) {
+      clearTimeout(evalRetryTimeoutRef.current)
+      evalRetryTimeoutRef.current = null
+    }
+    return ++fetchBatchRef.current
   }
 
   const EVAL_RETRY_DELAYS_MS = [1500, 3000, 6000]
@@ -299,11 +307,14 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     retryCount: number,
   ) => {
     if (retryCount >= EVAL_RETRY_DELAYS_MS.length) return
-    if (evalRetryTimeoutRef.current) {
+    const scheduledBatch = fetchBatchRef.current
+    if (evalRetryTimeoutRef.current !== null) {
       clearTimeout(evalRetryTimeoutRef.current)
     }
     evalRetryTimeoutRef.current = setTimeout(() => {
-      fetchEvaluation(targetIndex, payload, markPrimary, retryCount + 1)
+      evalRetryTimeoutRef.current = null
+      if (scheduledBatch !== fetchBatchRef.current) return
+      void fetchEvaluation(targetIndex, payload, markPrimary, retryCount + 1)
     }, EVAL_RETRY_DELAYS_MS[retryCount])
   }
 
@@ -330,6 +341,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   markPrimary = false,
   retryCount = 0,
 ) => {
+  const requestBatch = fetchBatchRef.current
   const reqSeq = (evalReqSeqRef.current[targetIndex] ?? 0) + 1
   evalReqSeqRef.current[targetIndex] = reqSeq
   const chartEpoch = (chartEpochRef.current[targetIndex] ?? 0) + 1
@@ -360,7 +372,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       params: { debug: true },
     })
 
-    if (reqSeq !== evalReqSeqRef.current[targetIndex]) return null
+    if (requestBatch !== fetchBatchRef.current || reqSeq !== evalReqSeqRef.current[targetIndex]) return null
 
     const responseRequestId =
       typeof (res.data as EvaluateResponse & { request_id?: unknown }).request_id === 'string'
@@ -455,7 +467,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
     return hasValidSeries
 
   } catch (e: any) {
-    if (reqSeq !== evalReqSeqRef.current[targetIndex]) return null
+    if (requestBatch !== fetchBatchRef.current || reqSeq !== evalReqSeqRef.current[targetIndex]) return null
 
     const status = e?.response?.status
 
@@ -559,13 +571,13 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
   }
 
   useEffect(() => {
-    const batch = ++fetchBatchRef.current
+    const batch = beginFetchBatch()
     void fetchAll(batch)
     const id = setInterval(() => {
-      void fetchAll(++fetchBatchRef.current)
+      void fetchAll(beginFetchBatch())
     }, REFRESH_INTERVAL_MS)
     return () => {
-      ++fetchBatchRef.current
+      beginFetchBatch()
       clearInterval(id)
     }
   }, [lastRequest, indexType])
@@ -855,7 +867,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
             </Typography>
           )}
           <Tooltip title="最新データを取得" arrow>
-            <IconButton color="primary" onClick={() => void fetchAll(++fetchBatchRef.current)}>
+            <IconButton color="primary" onClick={() => void fetchAll(beginFetchBatch())}>
               <RefreshIcon />
             </IconButton>
           </Tooltip>
