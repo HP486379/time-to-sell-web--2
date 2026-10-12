@@ -30,11 +30,34 @@ def summarize(result: dict, now: dt.datetime) -> dict:
     if "payload" not in result:
         return row
     data = result["payload"]
+    if not isinstance(data, dict):
+        row.update({"audit_error": "response_not_object", "payload_type": type(data).__name__})
+        return row
     series = data.get("price_series") or []
     if not isinstance(series, list):
         series = []
-    valid = [p for p in series if isinstance(p, dict) and isinstance(p.get("date"), str)
-             and isinstance(p.get("close"), (int, float)) and math.isfinite(p["close"])]
+    valid = []
+    invalid_rows = []
+    for number, point in enumerate(series):
+        reason = None
+        if not isinstance(point, dict):
+            reason = "row_not_object"
+        else:
+            date_value = point.get("date")
+            close = point.get("close")
+            try:
+                parsed_date = dt.date.fromisoformat(date_value) if isinstance(date_value, str) else None
+                if not parsed_date or parsed_date.isoformat() != date_value:
+                    reason = "invalid_date"
+            except ValueError:
+                reason = "invalid_date"
+            if not reason and (isinstance(close, bool) or not isinstance(close, (int, float))
+                               or not math.isfinite(close)):
+                reason = "invalid_close"
+        if reason:
+            invalid_rows.append({"row": number, "reason": reason})
+        else:
+            valid.append(point)
     ordered = sorted(valid, key=lambda p: p["date"])
     last = ordered[-1] if ordered else {}
     last_date = last.get("date")
@@ -42,14 +65,36 @@ def summarize(result: dict, now: dt.datetime) -> dict:
         days_old = (now.date() - dt.date.fromisoformat(last_date)).days if last_date else None
     except ValueError:
         days_old = None
-    scores = data.get("scores") or {}
-    debug = data.get("debug") or {}
+    scores = data.get("scores")
+    if not isinstance(scores, dict):
+        scores = {}
+    debug = data.get("debug")
+    if not isinstance(debug, dict):
+        debug = {}
+    quality = data.get("quality")
+    if not isinstance(quality, dict):
+        quality = {}
+    provider = data.get("adopted_provider") or debug.get("adopted_provider")
+    symbol = (data.get("adopted_symbol") or debug.get("adopted_symbol")
+              or debug.get("resolved_symbol"))
+    audit_missing = []
+    if not provider:
+        audit_missing.append("adopted_provider")
+    if not symbol:
+        audit_missing.append("adopted_symbol")
+    if not debug:
+        audit_missing.append("debug_details_not_exposed")
     row.update({
         "status": data.get("status"), "reasons": data.get("reasons"),
         "score": scores.get("total"), "source": data.get("source"),
-        "adopted_provider": data.get("adopted_provider") or debug.get("adopted_provider"),
+        "adopted_provider": provider, "adopted_symbol": symbol,
         "adoption_reason": debug.get("adoption_reason"),
+        "quality": quality or None,
+        "provider_reject_reasons": data.get("provider_reject_reasons") or debug.get("provider_reject_reasons"),
+        "audit_missing_fields": audit_missing,
+        "provider_verified": bool(provider and symbol),
         "as_of": data.get("as_of"), "rows": len(series), "valid_rows": len(valid),
+        "invalid_rows": invalid_rows, "invalid_row_count": len(invalid_rows),
         "last_date": last_date, "last_close": last.get("close"),
         "calendar_days_old": days_old, "current_price": data.get("current_price"),
         "last_equals_current_price": (
@@ -71,7 +116,11 @@ def main() -> None:
     results = []
     for attempt in range(1, args.rounds + 1):
         for index in INDICES:
-            result = summarize(fetch(args.base.rstrip("/") + "/api/evaluate", index, args.timeout), now)
+            try:
+                result = summarize(fetch(args.base.rstrip("/") + "/api/evaluate", index, args.timeout), now)
+            except Exception as exc:
+                result = {"index": index, "audit_error": "unexpected_audit_exception",
+                          "error_type": type(exc).__name__, "error": str(exc)}
             result["round"] = attempt
             results.append(result)
             print(json.dumps(result, ensure_ascii=False), flush=True)
