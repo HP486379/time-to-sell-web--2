@@ -453,10 +453,6 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
 
     setResponses((prev) => ({ ...prev, [targetIndex]: normalized }))
 
-    if (targetIndex === indexType && payload) {
-      setLastRequest((prev) => ({ ...prev, ...payload, index_type: targetIndex }))
-    }
-
     if (markPrimary) {
       setLastUpdated(new Date())
       setIsEvalRetrying(false)
@@ -1070,7 +1066,13 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
             <DialogContent dividers>
               <PositionForm
                 onSubmit={(req) => {
-                  fetchEvaluation(indexType, req, true)
+                  // The lastRequest effect is the single entry point for fetching.
+                  // A new object also triggers one evaluation for identical form values.
+                  setLastRequest((prev) => ({
+                    ...prev,
+                    ...req,
+                    index_type: indexType,
+                  }))
                   setPositionDialogOpen(false)
                 }}
                 marketValue={displayResponse?.market_value}
