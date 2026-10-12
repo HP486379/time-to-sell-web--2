@@ -368,8 +368,25 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
       }
     }
 
+    const startedAt = performance.now()
+    console.info('[EVAL REQUEST]', {
+      index: targetIndex,
+      reason: retryCount > 0 ? 'degraded_retry' : markPrimary ? 'primary' : 'secondary',
+      retryCount,
+      batch: requestBatch,
+      requestId: clientRequestId,
+    })
     const res = await apiClient.post<EvaluateResponse>('/api/evaluate', body, {
       params: { debug: true },
+    })
+    console.info('[EVAL RESPONSE]', {
+      index: targetIndex,
+      batch: requestBatch,
+      requestId: clientRequestId,
+      ms: Math.round(performance.now() - startedAt),
+      status: res.data.status,
+      reasons: res.data.reasons,
+      score: res.data.scores?.total ?? null,
     })
 
     if (requestBatch !== fetchBatchRef.current || reqSeq !== evalReqSeqRef.current[targetIndex]) return null
@@ -552,6 +569,7 @@ function DashboardPage({ displayMode }: { displayMode: DisplayMode }) {
 
     const primary = indexType
     const secondaryTargets = targets.filter((target) => target !== primary)
+    console.info('[EVAL BATCH]', { batch, primary, secondaryTargets })
 
     const primaryHasSeries = await fetchEvaluation(primary, undefined, true)
     if (batch !== fetchBatchRef.current) return
